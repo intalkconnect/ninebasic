@@ -15,7 +15,7 @@ export default async function analyticsRoutes(fastify, opts) {
             WHEN t.assigned_to IS NULL THEN 'aguardando'
             ELSE 'em_atendimento'
           END AS status,
-          EXTRACT(EPOCH FROM (now() - t.created_at)) / 60 AS tempo_espera,
+          EXTRACT(EPOCH FROM (now() - t.created_at)) / 60 AS tempo_espera
         FROM tickets t
         JOIN clientes c ON c.user_id = t.user_id
         LEFT JOIN atendentes a ON a.email::text = t.assigned_to
