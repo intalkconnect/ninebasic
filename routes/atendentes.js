@@ -4,6 +4,7 @@ async function atendentesRoutes(fastify, _options) {
   const deriveStatusCase = `
     CASE
       WHEN status = 'pausa' THEN 'pausa'
+      WHEN status = 'inativo' THEN 'inativo'
       WHEN status = 'offline' THEN 'offline'
       WHEN status = 'online' THEN CASE WHEN session_id IS NOT NULL THEN 'online' ELSE 'offline' END
       ELSE CASE WHEN session_id IS NOT NULL THEN 'online' ELSE 'offline' END
@@ -96,10 +97,10 @@ async function atendentesRoutes(fastify, _options) {
   });
 
   // 🔐 Abrir/atualizar sessão (não mexe no status manual)
-  // aceita PUT e PATCH
-  const setSessionHandler = async (req, reply) => {
+  // PUT /api/v1/atendentes/session/:email  body: { session: "abc123" }
+  fastify.put('/session/:email', async (req, reply) => {
     const { email } = req.params;
-    const { session } = req.body || {};
+    const { session } = req.body;
 
     if (!email || !session) {
       return reply.code(400).send({ error: 'email e session são obrigatórios' });
@@ -117,38 +118,51 @@ async function atendentesRoutes(fastify, _options) {
 
       return reply.send({ success: true, email, session });
     } catch (err) {
-      fastify.log.error(err, '[atendentes] erro ao atualizar sessão');
+      fastify.log.error(err);
       return reply.code(500).send({ error: 'Erro ao atualizar sessão do atendente' });
     }
-  };
-  fastify.put('/session/:email', setSessionHandler);
-  fastify.patch('/session/:email', setSessionHandler);
+  });
 
-  // 📴 Encerrar sessão (session_id = NULL) — trigger do DB cuida do derived/offline
-  // aceita PUT, POST (sendBeacon) e PATCH
+  // 📴 Encerrar sessão
+  // Aceita PUT/POST/PATCH
+  // Regra:
+  // - default (sem reason ou reason != 'close'): status = 'inativo'
+  // - reason = 'close' (logout/fechar explícito): status = 'offline'
+  // Idempotente:
+  // - se não enviar :session OU não existir sessão correspondente → 200 com affected:0
   const closeSessionHandler = async (req, reply) => {
     const { session } = req.params || {};
+    // reason pode vir por query (?reason=reload|close) ou no body { reason: '...' }
+    const reason =
+      (req.query && (req.query.reason || req.query.motivo)) ||
+      (req.body && (req.body.reason || req.body.motivo)) ||
+      null;
+
     if (!session) {
-      return reply.code(400).send({ error: 'session é obrigatório' });
+      return reply.code(200).send({ success: true, affected: 0, note: 'no session provided' });
     }
+
+    // decide novo status
+    const nextStatus = reason === 'close' ? 'offline' : 'inativo';
 
     try {
       const { rowCount } = await req.db.query(
         `UPDATE atendentes
-         SET session_id = NULL
+           SET session_id = NULL,
+               status = $2
          WHERE session_id = $1`,
-        [session]
+        [session, nextStatus]
       );
 
-      // Idempotente: mesmo que rowCount=0, retornamos sucesso
-      return reply.send({ success: true, affected: rowCount || 0 });
+      // Mesmo que não encontre, 200 (idempotente)
+      return reply.code(200).send({ success: true, affected: rowCount || 0, status: nextStatus });
     } catch (err) {
-      fastify.log.error(err, '[atendentes] erro ao encerrar sessão');
+      req.log.error(err, '[atendentes] erro ao encerrar sessão');
       return reply.code(500).send({ error: 'Erro ao encerrar sessão do atendente' });
     }
   };
   fastify.put('/status/:session', closeSessionHandler);
-  fastify.post('/status/:session', closeSessionHandler); // para sendBeacon
+  fastify.post('/status/:session', closeSessionHandler);
   fastify.patch('/status/:session', closeSessionHandler);
 
   // ⏸️ Pausar atendimento (mantém sessão)
@@ -199,12 +213,11 @@ async function atendentesRoutes(fastify, _options) {
     }
   });
 
-  // 🟢 Definir presença manual (online/offline/pausa)
-  // aceita PUT e PATCH
-  const setPresenceHandler = async (req, reply) => {
+  // 🟢 Definir presença manual (online/offline/pausa/inativo)
+  fastify.put('/presence/:email', async (req, reply) => {
     const { email } = req.params;
     const { status } = req.body || {};
-    const allowed = ['online', 'offline', 'pausa'];
+    const allowed = ['online', 'offline', 'pausa', 'inativo'];
 
     if (!email || !allowed.includes(status)) {
       return reply.code(400).send({ error: `Informe status válido: ${allowed.join(', ')}` });
@@ -222,15 +235,12 @@ async function atendentesRoutes(fastify, _options) {
 
       return reply.send({ success: true, email, status });
     } catch (err) {
-      fastify.log.error(err, '[atendentes] erro ao definir presença');
+      fastify.log.error(err);
       return reply.code(500).send({ error: 'Erro ao definir presença' });
     }
-  };
-  fastify.put('/presence/:email', setPresenceHandler);
-  fastify.patch('/presence/:email', setPresenceHandler);
+  });
 
-  // ❤️ Heartbeat (não altera status; apenas confirma que a sessão existe)
-  // aceita POST, PUT e PATCH
+  // ❤️ Heartbeat (não altera status; apenas confirma sessão)
   const heartbeatHandler = async (req, reply) => {
     const { session } = req.body || {};
     if (!session) return reply.code(400).send({ error: 'session é obrigatório' });
@@ -246,6 +256,7 @@ async function atendentesRoutes(fastify, _options) {
       const a = rows[0];
       const derived =
         a.status === 'pausa' ? 'pausa'
+        : a.status === 'inativo' ? 'inativo'
         : a.status === 'offline' ? 'offline'
         : (a.session_id ? 'online' : 'offline');
 
@@ -257,7 +268,6 @@ async function atendentesRoutes(fastify, _options) {
   };
   fastify.post('/heartbeat', heartbeatHandler);
   fastify.put('/heartbeat', heartbeatHandler);
-  fastify.patch('/heartbeat', heartbeatHandler);
 
   // 🗑️ Excluir atendente
   fastify.delete('/:id', async (req, reply) => {
