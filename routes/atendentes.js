@@ -123,7 +123,7 @@ async function atendentesRoutes(fastify, _options) {
     }
   });
 
-  // 📴 Encerrar sessão
+  // 📴 Encerrar sessão por session_id (idempotente, sempre 200)
   // Aceita PUT/POST/PATCH
   // Regra:
   // - default (sem reason ou reason != 'close'): status = 'inativo'
@@ -132,7 +132,6 @@ async function atendentesRoutes(fastify, _options) {
   // - se não enviar :session OU não existir sessão correspondente → 200 com affected:0
   const closeSessionHandler = async (req, reply) => {
     const { session } = req.params || {};
-    // reason pode vir por query (?reason=reload|close) ou no body { reason: '...' }
     const reason =
       (req.query && (req.query.reason || req.query.motivo)) ||
       (req.body && (req.body.reason || req.body.motivo)) ||
@@ -142,7 +141,6 @@ async function atendentesRoutes(fastify, _options) {
       return reply.code(200).send({ success: true, affected: 0, note: 'no session provided' });
     }
 
-    // decide novo status
     const nextStatus = reason === 'close' ? 'offline' : 'inativo';
 
     try {
@@ -154,7 +152,6 @@ async function atendentesRoutes(fastify, _options) {
         [session, nextStatus]
       );
 
-      // Mesmo que não encontre, 200 (idempotente)
       return reply.code(200).send({ success: true, affected: rowCount || 0, status: nextStatus });
     } catch (err) {
       req.log.error(err, '[atendentes] erro ao encerrar sessão');
@@ -179,9 +176,8 @@ async function atendentesRoutes(fastify, _options) {
         [email]
       );
 
-      if (rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
-
-      return reply.send({ success: true, email, status: 'pausa' });
+    // mesmo se não existir, retorne 200 para não poluir console
+      return reply.send({ success: true, email, status: 'pausa', affected: rowCount || 0 });
     } catch (err) {
       fastify.log.error(err);
       return reply.code(500).send({ error: 'Erro ao pausar atendente' });
@@ -202,11 +198,7 @@ async function atendentesRoutes(fastify, _options) {
         [email]
       );
 
-      if (rowCount === 0) {
-        return reply.code(404).send({ error: 'Atendente não encontrado' });
-      }
-
-      return reply.send({ success: true, email, status: 'online' });
+      return reply.send({ success: true, email, status: 'online', affected: rowCount || 0 });
     } catch (err) {
       fastify.log.error(err);
       return reply.code(500).send({ error: 'Erro ao retomar atendente' });
@@ -214,7 +206,8 @@ async function atendentesRoutes(fastify, _options) {
   });
 
   // 🟢 Definir presença manual (online/offline/pausa/inativo)
-  fastify.put('/presence/:email', async (req, reply) => {
+  // Aceita PUT e POST; sempre retorna 200 (idempotente)
+  const presenceHandler = async (req, reply) => {
     const { email } = req.params;
     const { status } = req.body || {};
     const allowed = ['online', 'offline', 'pausa', 'inativo'];
@@ -231,14 +224,15 @@ async function atendentesRoutes(fastify, _options) {
         [email, status]
       );
 
-      if (rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
-
-      return reply.send({ success: true, email, status });
+      // mesmo se não existir, 200 com affected:0
+      return reply.send({ success: true, email, status, affected: rowCount || 0 });
     } catch (err) {
-      fastify.log.error(err);
+      fastify.log.error(err, '[atendentes] erro ao definir presença');
       return reply.code(500).send({ error: 'Erro ao definir presença' });
     }
-  });
+  };
+  fastify.put('/presence/:email', presenceHandler);
+  fastify.post('/presence/:email', presenceHandler);
 
   // ❤️ Heartbeat (não altera status; apenas confirma sessão)
   const heartbeatHandler = async (req, reply) => {
