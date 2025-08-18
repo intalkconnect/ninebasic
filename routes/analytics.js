@@ -194,7 +194,7 @@ export default async function analyticsRoutes(fastify, opts) {
       let idx = 1;
 
       if (has) {
-        cond.push(`fi.first_in_ts >= $${idx} AND fi.first_in_ts < $${idx + 1}`);
+        cond.push(`frt.first_in_ts >= $${idx} AND frt.first_in_ts < $${idx + 1}`);
         params.push(fromISO, toISO);
         idx += 2;
       }
@@ -293,7 +293,7 @@ export default async function analyticsRoutes(fastify, opts) {
       let idx = 1;
 
       if (has) {
-        cond.push(`i.in_ts >= $${idx} AND i.in_ts < $${idx + 1}`);
+        cond.push(`pair.in_ts >= $${idx} AND pair.in_ts < $${idx + 1}`);
         params.push(fromISO, toISO);
         idx += 2;
       }
@@ -302,7 +302,7 @@ export default async function analyticsRoutes(fastify, opts) {
         params.push(filaFilter); idx++;
       }
       if (canalFilter) {
-        cond.push(`i.channel = $${idx}`);
+        cond.push(`pair.channel = $${idx}`);
         params.push(canalFilter); idx++;
       }
       if (agentFilter) {
