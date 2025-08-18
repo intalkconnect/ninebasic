@@ -126,23 +126,28 @@ async function atendentesRoutes(fastify, _options) {
   // Aceita PUT (apiPut) e POST (sendBeacon)
   const closeSessionHandler = async (req, reply) => {
     const { session } = req.params || {};
-    if (!session) return reply.code(400).send({ error: 'session é obrigatório' });
+    if (!session) {
+      return reply.code(400).send({ error: 'session é obrigatório' });
+    }
 
     try {
       const { rowCount } = await req.db.query(
-        `UPDATE atendentes SET session_id = NULL WHERE session_id = $1`,
+        `UPDATE atendentes
+         SET session_id = NULL
+         WHERE session_id = $1`,
         [session]
       );
 
-      // idempotente: responde ok mesmo se já estava NULL ou não existia
-      return reply.send({ success: true, affected: rowCount || 0 });
+      if (rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+
+      return reply.send({ success: true });
     } catch (err) {
-      req.log.error(err, '[atendentes] erro ao encerrar sessão');
+      fastify.log.error(err, '[atendentes] erro ao encerrar sessão');
       return reply.code(500).send({ error: 'Erro ao encerrar sessão do atendente' });
     }
   };
   fastify.put('/status/:session', closeSessionHandler);
-  fastify.post('/status/:session', closeSessionHandler);
+  fastify.post('/status/:session', closeSessionHandler); // ← para sendBeacon (POST)
 
   // ⏸️ Pausar atendimento (mantém sessão)
   // PUT /api/v1/atendentes/pause/:email
@@ -222,7 +227,8 @@ async function atendentesRoutes(fastify, _options) {
     }
   });
 
-  // ❤️ Heartbeat (não altera status; apenas confirma sessão)
+  // ❤️ Heartbeat (não altera status; apenas confirma que a sessão existe)
+  // Aceita POST (se preferir) e PUT (seu front usa apiPut)
   const heartbeatHandler = async (req, reply) => {
     const { session } = req.body || {};
     if (!session) return reply.code(400).send({ error: 'session é obrigatório' });
