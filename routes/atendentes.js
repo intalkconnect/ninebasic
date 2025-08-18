@@ -124,28 +124,28 @@ async function atendentesRoutes(fastify, _options) {
 
   // 📴 Encerrar sessão (trigger do DB seta offline quando session_id = NULL)
   // Aceita PUT (apiPut) e POST (sendBeacon)
-  const closeSessionHandler = async (req, reply) => {
-    const { session } = req.params || {};
-    if (!session) {
-      return reply.code(400).send({ error: 'session é obrigatório' });
-    }
+const closeSessionHandler = async (req, reply) => {
+  const { session } = req.params || {};
+  if (!session) return reply.code(400).send({ error: 'session é obrigatório' });
 
-    try {
-      const { rowCount } = await req.db.query(
-        `UPDATE atendentes
-         SET session_id = NULL
-         WHERE session_id = $1`,
-        [session]
-      );
+  try {
+    const { rowCount } = await req.db.query(
+      `UPDATE atendentes SET session_id = NULL WHERE session_id = $1`,
+      [session]
+    );
 
-      if (rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+    // idempotente: se não achou, também é "ok"
+    return reply.send({ success: true, affected: rowCount || 0 });
+  } catch (err) {
+    req.log.error(err, '[atendentes] erro ao encerrar sessão');
+    return reply.code(500).send({ error: 'Erro ao encerrar sessão do atendente' });
+  }
+};
 
-      return reply.send({ success: true });
-    } catch (err) {
-      fastify.log.error(err, '[atendentes] erro ao encerrar sessão');
-      return reply.code(500).send({ error: 'Erro ao encerrar sessão do atendente' });
-    }
-  };
+fastify.put('/status/:session', closeSessionHandler);
+fastify.post('/status/:session', closeSessionHandler);
+
+  
   fastify.put('/status/:session', closeSessionHandler);
   fastify.post('/status/:session', closeSessionHandler); // ← para sendBeacon (POST)
 
