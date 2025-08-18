@@ -49,7 +49,7 @@ fastify.get('/atendentes/:fila_nome', async (req, reply) => {
 
 
   // 📥 Listar todas as filas
-  fastify.get('/', async (_, reply) => {
+  fastify.get('/', async (req, reply) => {
     try {
       const { rows } = await req.db.query('SELECT * FROM filas ORDER BY nome');
       return reply.send(rows);
