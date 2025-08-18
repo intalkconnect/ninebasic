@@ -20,68 +20,60 @@ export default async function analyticsRoutes(fastify, opts) {
    * GET /analytics/realtime
    * (id, cliente, canal, agente, tempoEspera[min], status, prioridade, fila, posicaoFila, inicioConversa)
    */
-  fastify.get('/realtime', async (req, reply) => {
-    try {
-      const { rows } = await req.db.query(`
-        WITH base AS (
-          SELECT
-            t.ticket_number,
-            t.user_id,
-            t.fila,
-            t.assigned_to,
-            t.created_at,
-            t.ticket_number
-            CASE WHEN t.assigned_to IS NULL THEN 'aguardando' ELSE 'em_atendimento' END AS status
-          FROM tickets t
-          WHERE t.status = 'open'
-        ),
-        pos AS (
-          SELECT
-            b.*,
-            CASE
-              WHEN b.assigned_to IS NULL
-              THEN RANK() OVER (PARTITION BY b.fila ORDER BY b.created_at)
-              ELSE NULL
-            END AS posicao_fila,
-            EXTRACT(EPOCH FROM (now() - b.created_at))/60 AS tempo_espera_min
-          FROM base b
-        )
+ fastify.get('/realtime', async (req, reply) => {
+  try {
+    const { rows } = await req.db.query(`
+      WITH base AS (
         SELECT
-          c.name AS cliente,
-          c.channel,
-          COALESCE(a.name || ' ' || a.lastname, NULL) AS agente,
-          p.fila,
-          p.assigned_to,
-          p.ticket_number,
-          p.created_at AS inicio_conversa,
-          p.status,
-          p.posicao_fila,
-          p.tempo_espera_min
-        FROM pos p
-        JOIN clientes c ON c.user_id = p.user_id
-        LEFT JOIN atendentes a ON a.email::text = p.assigned_to
-        ORDER BY p.created_at;
-      `);
+          t.ticket_number,
+          t.user_id,
+          t.fila,
+          t.assigned_to,
+          t.created_at,
+          CASE
+            WHEN t.assigned_to IS NULL THEN 'aguardando'
+            ELSE 'em_atendimento'
+          END AS status,
+          EXTRACT(EPOCH FROM (now() - t.created_at))/60 AS tempo_espera_min
+        FROM tickets t
+        WHERE t.status = 'open'
+      )
+      SELECT
+        c.name AS cliente,
+        c.channel,
+        COALESCE(a.name || ' ' || a.lastname, NULL) AS agente,
+        b.fila,
+        b.assigned_to,
+        b.ticket_number,
+        b.created_at AS inicio_conversa,
+        b.status,
+        b.tempo_espera_min
+      FROM base b
+      JOIN clientes c ON c.user_id = b.user_id
+      LEFT JOIN atendentes a ON a.email::text = b.assigned_to
+      ORDER BY b.created_at;
+    `);
 
-      const mapped = rows.map((r, i) => ({
-        id: i + 1,
-        cliente: r.cliente,
-        canal: r.channel,
-        agente: r.agente,
-        tempoEspera: Math.floor(r.tempo_espera_min), // minutos
-        status: r.status,
-        prioridade: 'normal',
-        fila: r.fila,
-        posicaoFila: r.posicao_fila,
-        inicioConversa: r.inicio_conversa,
-      }));
+    const mapped = rows.map((r, i) => ({
+      id: i + 1,
+      ticket_number: r.ticket_number,
+      cliente: r.cliente,
+      canal: r.channel,
+      agente: r.agente,
+      tempoEspera: Math.floor(r.tempo_espera_min), // minutos
+      status: r.status,
+      prioridade: 'normal',
+      fila: r.fila,
+      inicioConversa: r.inicio_conversa,
+    }));
 
-      return reply.send(mapped);
-    } catch (err) {
-      req.log.error(err, '[analytics] erro ao buscar atendimentos');
-      return reply.status(500).send({ error: 'Erro ao buscar atendimentos' });
-    }
-  });
+    return reply.send(mapped);
+  } catch (err) {
+    req.log.error(err, '[analytics] erro ao buscar atendimentos');
+    return reply.status(500).send({ error: 'Erro ao buscar atendimentos' });
+  }
+});
+
 
   /**
    * ==================================
