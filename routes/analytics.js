@@ -30,6 +30,7 @@ export default async function analyticsRoutes(fastify, opts) {
             t.fila,
             t.assigned_to,
             t.created_at,
+            t.ticket_number
             CASE WHEN t.assigned_to IS NULL THEN 'aguardando' ELSE 'em_atendimento' END AS status
           FROM tickets t
           WHERE t.status = 'open'
