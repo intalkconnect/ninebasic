@@ -122,11 +122,10 @@ async function atendentesRoutes(fastify, _options) {
     }
   });
 
-  // 📴 Encerrar sessão (fica offline via trigger do DB quando session_id = NULL)
-  // PUT /api/v1/atendentes/status/:session
-  fastify.put('/status/:session', async (req, reply) => {
-    const { session } = req.params;
-
+  // 📴 Encerrar sessão (trigger do DB seta offline quando session_id = NULL)
+  // Aceita PUT (apiPut) e POST (sendBeacon)
+  const closeSessionHandler = async (req, reply) => {
+    const { session } = req.params || {};
     if (!session) {
       return reply.code(400).send({ error: 'session é obrigatório' });
     }
@@ -143,13 +142,15 @@ async function atendentesRoutes(fastify, _options) {
 
       return reply.send({ success: true });
     } catch (err) {
-      fastify.log.error(err);
+      fastify.log.error(err, '[atendentes] erro ao encerrar sessão');
       return reply.code(500).send({ error: 'Erro ao encerrar sessão do atendente' });
     }
-  });
+  };
+  fastify.put('/status/:session', closeSessionHandler);
+  fastify.post('/status/:session', closeSessionHandler); // ← para sendBeacon (POST)
 
   // ⏸️ Pausar atendimento (mantém sessão)
-  // PUT /api/v1/atendentes/pause/:email   body: { reason?: string }
+  // PUT /api/v1/atendentes/pause/:email
   fastify.put('/pause/:email', async (req, reply) => {
     const { email } = req.params;
 
@@ -226,9 +227,9 @@ async function atendentesRoutes(fastify, _options) {
     }
   });
 
-  // ❤️ Heartbeat (não altera status; apenas garante que a sessão existe)
-  // POST /api/v1/atendentes/heartbeat   body: { session: "abc123" }
-  fastify.post('/heartbeat', async (req, reply) => {
+  // ❤️ Heartbeat (não altera status; apenas confirma que a sessão existe)
+  // Aceita POST (se preferir) e PUT (seu front usa apiPut)
+  const heartbeatHandler = async (req, reply) => {
     const { session } = req.body || {};
     if (!session) return reply.code(400).send({ error: 'session é obrigatório' });
 
@@ -240,7 +241,6 @@ async function atendentesRoutes(fastify, _options) {
 
       if (!rows.length) return reply.code(404).send({ error: 'sessão não encontrada' });
 
-      // não mexe no status manual/pausa; apenas confirma sessão
       const a = rows[0];
       const derived =
         a.status === 'pausa' ? 'pausa'
@@ -249,10 +249,12 @@ async function atendentesRoutes(fastify, _options) {
 
       return reply.send({ ok: true, email: a.email, status: a.status, derived_status: derived });
     } catch (err) {
-      fastify.log.error(err);
+      fastify.log.error(err, '[atendentes] erro no heartbeat');
       return reply.code(500).send({ error: 'Erro no heartbeat' });
     }
-  });
+  };
+  fastify.post('/heartbeat', heartbeatHandler);
+  fastify.put('/heartbeat', heartbeatHandler);
 
   // 🗑️ Excluir atendente
   fastify.delete('/:id', async (req, reply) => {
