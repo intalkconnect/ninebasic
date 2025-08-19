@@ -234,34 +234,66 @@ async function atendentesRoutes(fastify, _options) {
   fastify.put('/presence/:email', presenceHandler);
   fastify.post('/presence/:email', presenceHandler);
 
-  // ❤️ Heartbeat (não altera status; apenas confirma sessão)
-  const heartbeatHandler = async (req, reply) => {
-    const { session } = req.body || {};
-    if (!session) return reply.code(400).send({ error: 'session é obrigatório' });
+// ❤️ Heartbeat (confirma presença). Evita 404 e aceita email como fallback.
+const heartbeatHandler = async (req, reply) => {
+  const { session, email } = req.body || {};
 
-    try {
-      const { rows } = await req.db.query(
-        `SELECT email, status, session_id FROM atendentes WHERE session_id = $1`,
+  if (!session && !email) {
+    // falta de parâmetros é erro do cliente
+    return reply.code(400).send({ error: "session ou email é obrigatório" });
+  }
+
+  try {
+    let row = null;
+
+    // 1) tenta por session_id, se veio
+    if (session) {
+      const bySession = await req.db.query(
+        `SELECT email, status, session_id
+           FROM atendentes
+          WHERE session_id = $1`,
         [session]
       );
-
-      if (!rows.length) return reply.code(404).send({ error: 'sessão não encontrada' });
-
-      const a = rows[0];
-      const derived =
-        a.status === 'pausa' ? 'pausa'
-        : a.status === 'inativo' ? 'inativo'
-        : a.status === 'offline' ? 'offline'
-        : (a.session_id ? 'online' : 'offline');
-
-      return reply.send({ ok: true, email: a.email, status: a.status, derived_status: derived });
-    } catch (err) {
-      fastify.log.error(err, '[atendentes] erro no heartbeat');
-      return reply.code(500).send({ error: 'Erro no heartbeat' });
+      row = bySession.rows[0] || null;
     }
-  };
-  fastify.post('/heartbeat', heartbeatHandler);
-  fastify.put('/heartbeat', heartbeatHandler);
+
+    // 2) se nada e veio email, tenta por email
+    if (!row && email) {
+      const byEmail = await req.db.query(
+        `SELECT email, status, session_id
+           FROM atendentes
+          WHERE email = $1`,
+        [email]
+      );
+      row = byEmail.rows[0] || null;
+    }
+
+    // 3) se ainda não achou, retorna 200 silencioso (evita 404 no console)
+    if (!row) {
+      return reply.send({ ok: false, reason: "not_found" });
+    }
+
+    const a = row;
+    const derived =
+      a.status === "pausa"    ? "pausa"    :
+      a.status === "inativo"  ? "inativo"  :
+      a.status === "offline"  ? "offline"  :
+      (a.session_id ? "online" : "offline");
+
+    return reply.send({
+      ok: true,
+      email: a.email,
+      status: a.status,
+      derived_status: derived
+    });
+  } catch (err) {
+    req.log.error(err, "[atendentes] erro no heartbeat");
+    return reply.code(500).send({ error: "Erro no heartbeat" });
+  }
+};
+
+fastify.post("/heartbeat", heartbeatHandler);
+fastify.put("/heartbeat", heartbeatHandler);
 
   // 🗑️ Excluir atendente
   fastify.delete('/:id', async (req, reply) => {
