@@ -210,7 +210,7 @@ async function atendentesRoutes(fastify, _options) {
     // resolve motivo
     let finalReason = (reason || '').trim();
     if (!finalReason && reason_id) {
-      const r = await req.db.query('SELECT nome FROM pausa_motivos WHERE id = $1 AND ativo = TRUE', [reason_id]);
+      const r = await req.db.query('SELECT label FROM pause_reasons WHERE id = $1 AND ativo = TRUE', [reason_id]);
       if (r.rows.length) finalReason = r.rows[0].nome;
     }
     if (!finalReason) return reply.code(400).send({ error: 'Informe um motivo de pausa (reason_id ou reason)' });
