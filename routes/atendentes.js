@@ -85,6 +85,61 @@ async function atendentesRoutes(fastify, _options) {
     }
   });
 
+  fastify.get('/status/:email', async (req, reply) => {
+    const { email } = req.params;
+    
+    if (!email) {
+      return reply.code(400).send({ error: 'Email é obrigatório' });
+    }
+
+    try {
+      // Consulta otimizada para pegar apenas os campos relevantes
+      const { rows } = await req.db.query(
+        `SELECT 
+           status, 
+           session_id, 
+           EXTRACT(EPOCH FROM (NOW() - created_at)) as seconds_since_creation,
+           NOW() as server_time
+         FROM atendentes
+         WHERE email = $1`,
+        [email]
+      );
+
+      if (rows.length === 0) {
+        return reply.code(404).send({ error: 'Atendente não encontrado' });
+      }
+
+      const atendenteStatus = rows[0];
+      
+      // Estrutura de resposta completa
+      const response = {
+        email,
+        status: atendenteStatus.status, // Valor exato do banco
+        raw_status: atendenteStatus.status, // Cópia para confirmar que não foi alterado
+        session_id: atendenteStatus.session_id,
+        server_time: atendenteStatus.server_time,
+        seconds_since_creation: atendenteStatus.seconds_since_creation,
+        _debug: {
+          query_executed_at: new Date().toISOString(),
+          cache: 'disabled'
+        }
+      };
+
+      // Headers para evitar cache
+      reply.header('Cache-Control', 'no-cache, no-store, must-revalidate');
+      reply.header('Pragma', 'no-cache');
+      reply.header('Expires', '0');
+
+      return reply.send(response);
+    } catch (err) {
+      fastify.log.error(`Erro ao buscar status para ${email}:`, err);
+      return reply.code(500).send({ 
+        error: 'Erro ao buscar status do atendente',
+        details: err.message 
+      });
+    }
+  });
+
   // 🔐 Abrir/atualizar sessão
   fastify.put('/session/:email', async (req, reply) => {
     const { email } = req.params;
