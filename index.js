@@ -19,7 +19,7 @@ import filaRoutes from './routes/filas.js';
 import atendentesRoutes from './routes/atendentes.js';
 import quickRepliesRoutes from './routes/quickReplies.js';
 import analyticsRoutes from './routes/analytics.js';
-import pausasRoutes from './routes/pausas.js';
+import pausasRoutes from './routes/pause.js';
 
 dotenv.config();
 
@@ -75,6 +75,7 @@ async function start() {
 }
 
 start();
+
 
 
 
