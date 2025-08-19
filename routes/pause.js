@@ -1,7 +1,7 @@
 // routes/pausas.js
 async function pausasRoutes(fastify, _opts) {
   // ========== CRUD: pause_reasons ==========
-  fastify.get('/pausas', async (req, reply) => {
+  fastify.get('/', async (req, reply) => {
     try {
       const { active } = req.query || {};
       let q = `SELECT id, code, label, max_minutes, active, created_at, updated_at
@@ -20,7 +20,7 @@ async function pausasRoutes(fastify, _opts) {
     }
   });
 
-  fastify.get('/pausas/:id', async (req, reply) => {
+  fastify.get('/:id', async (req, reply) => {
     const { id } = req.params;
     try {
       const { rows } = await req.db.query(
@@ -36,7 +36,7 @@ async function pausasRoutes(fastify, _opts) {
     }
   });
 
-  fastify.post('/pausas', async (req, reply) => {
+  fastify.post('/', async (req, reply) => {
     const { code, label, max_minutes = 0, active = true } = req.body || {};
     if (!code || !label) {
       return reply.code(400).send({ error: 'code e label são obrigatórios' });
@@ -56,7 +56,7 @@ async function pausasRoutes(fastify, _opts) {
     }
   });
 
-  fastify.put('/pausas/:id', async (req, reply) => {
+  fastify.put('/:id', async (req, reply) => {
     const { id } = req.params;
     const { code, label, max_minutes = 0, active = true } = req.body || {};
     if (!code || !label) {
@@ -76,7 +76,7 @@ async function pausasRoutes(fastify, _opts) {
     }
   });
 
-  fastify.patch('/pausas/:id', async (req, reply) => {
+  fastify.patch('/:id', async (req, reply) => {
     const { id } = req.params;
     const { code, label, max_minutes, active } = req.body || {};
     const sets = [];
@@ -101,7 +101,7 @@ async function pausasRoutes(fastify, _opts) {
     }
   });
 
-  fastify.patch('/pausas/:id/toggle', async (req, reply) => {
+  fastify.patch('/:id/toggle', async (req, reply) => {
     const { id } = req.params;
     try {
       const { rows } = await req.db.query(
@@ -119,7 +119,7 @@ async function pausasRoutes(fastify, _opts) {
     }
   });
 
-  fastify.delete('/pausas/:id', async (req, reply) => {
+  fastify.delete('/:id', async (req, reply) => {
     const { id } = req.params;
     try {
       // bloqueia se houver sessões vinculadas
@@ -141,7 +141,7 @@ async function pausasRoutes(fastify, _opts) {
 
   // ========== SESSÕES DE PAUSA DO ATENDENTE ==========
   // Sessão ativa
-  fastify.get('/atendentes/:email/pausas/current', async (req, reply) => {
+  fastify.get('/atendentes/:email/current', async (req, reply) => {
     const { email } = req.params;
     try {
       const { rows } = await req.db.query(
@@ -161,7 +161,7 @@ async function pausasRoutes(fastify, _opts) {
   });
 
   // Histórico
-  fastify.get('/atendentes/:email/pausas/historico', async (req, reply) => {
+  fastify.get('/atendentes/:email/historico', async (req, reply) => {
     const { email } = req.params;
     const { limit = 50, from } = req.query || {};
     const params = [email];
@@ -188,7 +188,7 @@ async function pausasRoutes(fastify, _opts) {
   });
 
   // Iniciar pausa
-  fastify.post('/atendentes/:email/pausas/start', async (req, reply) => {
+  fastify.post('/atendentes/:email/start', async (req, reply) => {
     const { email } = req.params;
     const { reason_id, notes } = req.body || {};
     if (!reason_id) return reply.code(400).send({ error: 'reason_id é obrigatório' });
@@ -233,7 +233,7 @@ async function pausasRoutes(fastify, _opts) {
   });
 
   // Encerrar pausa
-  fastify.patch('/atendentes/:email/pausas/:id/end', async (req, reply) => {
+  fastify.patch('/atendentes/:email/:id/end', async (req, reply) => {
     const { email, id } = req.params;
     const { ended_at } = req.body || {};
     try {
