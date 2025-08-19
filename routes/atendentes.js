@@ -200,26 +200,7 @@ async function atendentesRoutes(fastify, _options) {
   fastify.patch('/status/:session', closeSessionHandler);
 
   // ⏸️ Pausar atendimento
-  fastify.put('/pause/:email', async (req, reply) => {
-    const { email } = req.params;
-
-    if (!email) return reply.code(400).send({ error: 'email é obrigatório' });
-
-    try {
-      const { rowCount } = await req.db.query(
-        `UPDATE atendentes
-         SET status = 'pausa'
-         WHERE email = $1`,
-        [email]
-      );
-
-      return reply.send({ success: true, email, status: 'pausa', affected: rowCount || 0 });
-    } catch (err) {
-      fastify.log.error(err);
-      return reply.code(500).send({ error: 'Erro ao pausar atendente' });
-    }
-  });
-
+ 
   fastify.put('/pause/:email', async (req, reply) => {
   const { email } = req.params;
   const { reason_id, reason } = req.body || {};
