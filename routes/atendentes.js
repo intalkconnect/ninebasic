@@ -260,27 +260,36 @@ async function atendentesRoutes(fastify, _options) {
 });
 
   // ▶️ Retomar da pausa
-  fastify.put('/resume/:email', async (req, reply) => {
-    const { email } = req.params;
+fastify.put('/resume/:email', async (req, reply) => {
+  const { email } = req.params;
+  if (!email) return reply.code(400).send({ error: 'email é obrigatório' });
 
-    if (!email) return reply.code(400).send({ error: 'email é obrigatório' });
+  try {
+    const { rowCount } = await req.db.query(
+      `UPDATE atendentes
+          SET status = 'online',
+              pause_reason = NULL,
+              pause_started_at = NULL
+        WHERE email = $1`,
+      [email]
+    );
+    if (!rowCount) return reply.code(404).send({ error: 'Atendente não encontrado' });
 
-    try {
-      const { rowCount } = await req.db.query(
-        `UPDATE atendentes
-         SET status = 'online',
-             pause_reason = NULL,
-             pause_started_at = NULL
-         WHERE email = $1`,
-        [email]
-      );
+    // encerra sessão de pausa aberta
+    await req.db.query(
+      `UPDATE pausa_sessoes
+          SET ended_at = now()
+        WHERE email = $1
+          AND ended_at IS NULL`,
+      [email]
+    );
 
-      return reply.send({ success: true, email, status: 'online', affected: rowCount || 0 });
-    } catch (err) {
-      fastify.log.error(err);
-      return reply.code(500).send({ error: 'Erro ao retomar atendente' });
-    }
-  });
+    return reply.send({ success: true, email, status: 'online' });
+  } catch (err) {
+    fastify.log.error(err, '[atendentes] erro ao retomar');
+    return reply.code(500).send({ error: 'Erro ao retomar atendente' });
+  }
+});
 
   // 🟢 Definir presença manual
   const presenceHandler = async (req, reply) => {
