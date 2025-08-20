@@ -1,3 +1,17 @@
+import amqplib from 'amqplib';
+const AMQP_URL = process.env.AMQP_URL || 'amqp://guest:guest@rabbitmq:5672/';
+const INCOMING_QUEUE = process.env.INCOMING_QUEUE || 'hmg.incoming';
+
+let amqpConn, amqpChIncoming;
+async function ensureAMQPIncoming() {
+  if (amqpChIncoming) return amqpChIncoming;
+  amqpConn = await amqplib.connect(AMQP_URL, { heartbeat: 15 });
+  amqpConn.on('close', () => { amqpConn = null; amqpChIncoming = null; });
+  amqpChIncoming = await amqpConn.createChannel();
+  await amqpChIncoming.assertQueue(INCOMING_QUEUE, { durable: true });
+  return amqpChIncoming;
+}
+
 async function ticketsRoutes(fastify, options) {
   // Validação simples do formato do user_id
   function isValidUserId(user_id) {
@@ -69,63 +83,72 @@ async function ticketsRoutes(fastify, options) {
 });
 
 
-  // PUT /tickets/:user_id → Atualiza status, fila ou assigned_to
-  fastify.put('/:user_id', async (req, reply) => {
-    const { user_id } = req.params;
-    const { status, fila, assigned_to } = req.body;
+// PUT /tickets/:user_id → Finaliza o ÚLTIMO ticket 'open' e publica evento
+fastify.put('/:user_id', async (req, reply) => {
+  const { user_id } = req.params;
+  const { status } = req.body || {};
+  const s = String(status || '').toLowerCase();
 
-    if (!isValidUserId(user_id)) {
-      return reply.code(400).send({
-        error: 'Formato de user_id inválido. Use: usuario@dominio',
-      });
+  if (!isValidUserId(user_id)) {
+    return reply.code(400).send({ error: 'Formato de user_id inválido. Use: usuario@dominio' });
+  }
+  if (s !== 'closed') {
+    return reply.code(400).send({ error: "status deve ser 'closed'" });
+  }
+
+  try {
+    // fecha SOMENTE o último ticket aberto desse usuário
+    const { rows } = await req.db.query(
+      `
+      WITH last_open AS (
+        SELECT id
+          FROM tickets
+         WHERE user_id = $1 AND status = 'open'
+         ORDER BY created_at DESC, updated_at DESC, id DESC
+         LIMIT 1
+      )
+      UPDATE tickets t
+         SET status = 'closed', updated_at = NOW()
+        FROM last_open lo
+       WHERE t.id = lo.id
+    RETURNING t.ticket_number, t.fila, t.status
+      `,
+      [user_id]
+    );
+
+    const updated = rows?.[0];
+    if (!updated) {
+      return reply.code(404).send({ error: 'Nenhum ticket aberto encontrado para encerrar' });
     }
 
-    if (!status && !fila && !assigned_to) {
-      return reply.code(400).send({
-        error: 'Informe ao menos um campo: status, fila ou assigned_to',
-      });
-    }
+    // publica evento para o worker retomar o fluxo
+    const ch = await ensureAMQPIncoming();
+    ch.sendToQueue(
+      INCOMING_QUEUE,
+      Buffer.from(JSON.stringify({
+        kind: 'system_event',
+        event: {
+          type: 'ticket_status',
+          userId: user_id,                // ex.: 55119...@w.msgcli.net
+          status: 'closed',
+          ticketNumber: updated.ticket_number, // ← número FINAL
+          fila: updated.fila || null
+        },
+        ts: Date.now()
+      })),
+      { persistent: true, headers: { 'x-attempts': 0 } }
+    );
 
-    const updates = [];
-    const values = [];
-    let index = 1;
+    return reply.send({ ok: true, ticket: updated });
+  } catch (error) {
+    fastify.log.error('Erro ao finalizar ticket:', error);
+    return reply.code(500).send({
+      error: 'Erro interno ao finalizar ticket',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
 
-    if (status) {
-      updates.push(`status = $${index++}`);
-      values.push(status);
-    }
-    if (fila) {
-      updates.push(`fila = $${index++}`);
-      values.push(fila);
-    }
-    if (assigned_to) {
-      updates.push(`assigned_to = $${index++}`);
-      values.push(assigned_to);
-    }
-
-    values.push(user_id); // Para o WHERE
-
-    try {
-      const { rowCount } = await req.db.query(
-        `UPDATE tickets
-         SET ${updates.join(', ')}, updated_at = NOW()
-         WHERE user_id = $${index}`,
-        values
-      );
-
-      if (rowCount === 0) {
-        return reply.code(404).send({ error: 'Ticket não encontrado para atualizar' });
-      }
-
-      return reply.send({ success: true });
-    } catch (error) {
-      fastify.log.error('Erro ao atualizar ticket:', error);
-      return reply.code(500).send({
-        error: 'Erro interno ao atualizar ticket',
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined
-      });
-    }
-  });
 
  fastify.post('/transferir', async (req, reply) => {
   const { from_user_id, to_fila, to_assigned_to, transferido_por } = req.body;
