@@ -1,42 +1,46 @@
 export default async function flowRoutes(fastify, opts) {
-fastify.post('/publish', async (req, reply) => {
-  const { data } = req.body;
+  fastify.post('/publish', async (req, reply) => {
+    const { data } = req.body;
 
-  if (!data || typeof data !== 'object') {
-    return reply.code(400).send({ error: 'Fluxo inválido ou ausente.' });
-  }
+    if (!data || typeof data !== 'object') {
+      return reply.code(400).send({ error: 'Fluxo inválido ou ausente.' });
+    }
 
-  const client = await req.db.connect();
-  try {
-    await client.query('BEGIN');
+    try {
+      // Insere um novo fluxo ativo e desativa todos os outros em UMA única query
+      const { rows } = await req.db.query(
+        `
+        WITH ins AS (
+          INSERT INTO flows (data, created_at, active)
+          VALUES ($1, NOW(), true)
+          RETURNING id
+        ),
+        deact AS (
+          UPDATE flows
+             SET active = false
+           WHERE id <> (SELECT id FROM ins)
+          RETURNING 1
+        )
+        SELECT id FROM ins;
+        `,
+        [data]
+      );
 
-    // 1. Desativa todos os fluxos ativos
-    await client.query('UPDATE flows SET active = false');
-
-    // 2. Insere novo fluxo com active=true
-    const insertRes = await client.query(
-      'INSERT INTO flows(data, created_at, active) VALUES($1, $2, $3) RETURNING id',
-      [data, new Date().toISOString(), true]
-    );
-
-    const insertedId = insertRes.rows[0].id;
-
-    await client.query('COMMIT');
-
-    return reply.send({ message: 'Fluxo publicado e ativado com sucesso.', id: insertedId });
-  } catch (error) {
-    await client.query('ROLLBACK');
-    fastify.log.error(error);
-    return reply.code(500).send({ error: 'Erro ao publicar fluxo', detail: error.message });
-  } finally {
-    client.release();
-  }
-});
-
+      const insertedId = rows[0]?.id;
+      return reply.send({
+        message: 'Fluxo publicado e ativado com sucesso.',
+        id: insertedId
+      });
+    } catch (error) {
+      fastify.log.error(error);
+      return reply
+        .code(500)
+        .send({ error: 'Erro ao publicar fluxo', detail: error.message });
+    }
+  });
 
   fastify.get('/sessions/:user_id', async (req, reply) => {
     const { user_id } = req.params;
-    
     try {
       const { rows } = await req.db.query(
         'SELECT * FROM sessions WHERE user_id = $1 LIMIT 1',
@@ -59,16 +63,19 @@ fastify.post('/publish', async (req, reply) => {
     const { current_block, flow_id, vars } = req.body;
 
     try {
-      await req.db.query(`
+      await req.db.query(
+        `
         INSERT INTO sessions(user_id, current_block, last_flow_id, vars, updated_at)
         VALUES($1, $2, $3, $4, $5)
-        ON CONFLICT (user_id) 
-        DO UPDATE SET 
+        ON CONFLICT (user_id)
+        DO UPDATE SET
           current_block = EXCLUDED.current_block,
           last_flow_id = EXCLUDED.last_flow_id,
           vars = EXCLUDED.vars,
           updated_at = EXCLUDED.updated_at
-      `, [user_id, current_block, flow_id, vars, new Date().toISOString()]);
+        `,
+        [user_id, current_block, flow_id, vars, new Date().toISOString()]
+      );
 
       reply.send({ message: 'Sessão salva com sucesso.' });
     } catch (error) {
@@ -77,68 +84,66 @@ fastify.post('/publish', async (req, reply) => {
     }
   });
 
-fastify.post('/activate', async (req, reply) => {
-  const { id } = req.body;
+  fastify.post('/activate', async (req, reply) => {
+    const { id } = req.body;
 
-  const client = await req.db.connect();
-  try {
-    await client.query('BEGIN');
+    try {
+      // Desativa todos e ativa o ID informado em UMA única query
+      const { rows } = await req.db.query(
+        `
+        WITH deact AS (
+          UPDATE flows SET active = false RETURNING 1
+        ),
+        act AS (
+          UPDATE flows SET active = true WHERE id = $1 RETURNING id
+        )
+        SELECT id FROM act;
+        `,
+        [id]
+      );
 
-    // Desativa todos
-    await client.query('UPDATE flows SET active = false');
-
-    // Ativa o fluxo específico
-    await client.query('UPDATE flows SET active = true WHERE id = $1', [id]);
-
-    await client.query('COMMIT');
-    return reply.code(200).send({ success: true });
-  } catch (error) {
-    await client.query('ROLLBACK');
-    fastify.log.error(error);
-    return reply.code(500).send({ error: 'Erro ao ativar fluxo', detail: error.message });
-  } finally {
-    client.release();
-  }
-});
-
+      const activatedId = rows[0]?.id || id;
+      return reply.code(200).send({ success: true, id: activatedId });
+    } catch (error) {
+      fastify.log.error(error);
+      return reply
+        .code(500)
+        .send({ error: 'Erro ao ativar fluxo', detail: error.message });
+    }
+  });
 
   fastify.get('/latest', async (req, reply) => {
     try {
       const { rows } = await req.db.query(`
-      SELECT id, active, created_at 
-      FROM flows 
-      WHERE active = true 
+        SELECT id, active, created_at
+          FROM flows
+         WHERE active = true
       `);
-
       return reply.code(200).send(rows);
     } catch (error) {
       fastify.log.error(error);
-      return reply.code(500).send({ 
-        error: 'Falha ao buscar últimos fluxos', 
-        detail: error.message 
-      });
+      return reply
+        .code(500)
+        .send({ error: 'Falha ao buscar últimos fluxos', detail: error.message });
     }
   });
 
   fastify.get('/history', async (req, reply) => {
-  try {
-    const { rows } = await req.db.query(`
-      SELECT id, active, created_at 
-      FROM flows 
-      ORDER BY created_at DESC 
-      LIMIT 10
-    `);
-
-    return reply.code(200).send(rows);
-  } catch (error) {
-    fastify.log.error(error);
-    return reply.code(500).send({ 
-      error: 'Erro ao buscar histórico de versões', 
-      detail: error.message 
-    });
-  }
-});
-
+    try {
+      const { rows } = await req.db.query(`
+        SELECT id, active, created_at
+          FROM flows
+         ORDER BY created_at DESC
+         LIMIT 10
+      `);
+      return reply.code(200).send(rows);
+    } catch (error) {
+      fastify.log.error(error);
+      return reply
+        .code(500)
+        .send({ error: 'Erro ao buscar histórico de versões', detail: error.message });
+    }
+  });
 
   fastify.get('/data/:id', async (req, reply) => {
     const { id } = req.params;
@@ -156,10 +161,9 @@ fastify.post('/activate', async (req, reply) => {
       return reply.code(200).send(rows[0].data);
     } catch (error) {
       fastify.log.error(error);
-      return reply.code(500).send({ 
-        error: 'Erro ao buscar fluxo', 
-        detail: error.message 
-      });
+      return reply
+        .code(500)
+        .send({ error: 'Erro ao buscar fluxo', detail: error.message });
     }
   });
 }
