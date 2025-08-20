@@ -1,43 +1,44 @@
 export default async function flowRoutes(fastify, opts) {
   fastify.post('/publish', async (req, reply) => {
-    const { data } = req.body;
+  const { data } = req.body;
 
-    if (!data || typeof data !== 'object') {
-      return reply.code(400).send({ error: 'Fluxo inválido ou ausente.' });
-    }
+  if (!data || typeof data !== 'object') {
+    return reply.code(400).send({ error: 'Fluxo inválido ou ausente.' });
+  }
 
-    try {
-      // Insere um novo fluxo ativo e desativa todos os outros em UMA única query
-      const { rows } = await req.db.query(
-        `
-        WITH ins AS (
-          INSERT INTO flows (data, created_at, active)
-          VALUES ($1, NOW(), true)
-          RETURNING id
-        ),
-        deact AS (
-          UPDATE flows
-             SET active = false
-           WHERE id <> (SELECT id FROM ins)
-          RETURNING 1
-        )
-        SELECT id FROM ins;
-        `,
-        [data]
-      );
+  try {
+    // 1) desativa o ativo; 2) insere o novo como ativo — tudo no MESMO statement
+    const { rows } = await req.db.query(
+      `
+      WITH deact AS (
+        UPDATE flows
+           SET active = false
+         WHERE active = true
+         RETURNING 1
+      ),
+      ins AS (
+        INSERT INTO flows (data, created_at, active)
+        VALUES ($1, NOW(), true)
+        RETURNING id
+      )
+      SELECT id FROM ins;
+      `,
+      [data]
+    );
 
-      const insertedId = rows[0]?.id;
-      return reply.send({
-        message: 'Fluxo publicado e ativado com sucesso.',
-        id: insertedId
-      });
-    } catch (error) {
-      fastify.log.error(error);
-      return reply
-        .code(500)
-        .send({ error: 'Erro ao publicar fluxo', detail: error.message });
-    }
-  });
+    const insertedId = rows[0]?.id;
+    return reply.send({
+      message: 'Fluxo publicado e ativado com sucesso.',
+      id: insertedId
+    });
+  } catch (error) {
+    fastify.log.error(error);
+    return reply
+      .code(500)
+      .send({ error: 'Erro ao publicar fluxo', detail: error.message });
+  }
+});
+
 
   fastify.get('/sessions/:user_id', async (req, reply) => {
     const { user_id } = req.params;
