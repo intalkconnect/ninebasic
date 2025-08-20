@@ -1,5 +1,4 @@
 // services/metaGraph.js
-// Helper minimalista para Graph API (GET/POST) com tratamento de erro padronizado.
 const GRAPH_VERSION = process.env.GRAPH_VERSION || 'v23.0';
 
 function buildUrl(path, qs = {}) {
