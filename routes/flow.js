@@ -6,42 +6,51 @@ export default async function flowRoutes(fastify, opts) {
   }
 
   try {
-    const { rows } = await req.db.query(
+    // 1) Insere NOVA versão como inativa (evita conflito com unique_active_flow)
+    const ins = await req.db.query(
+      `INSERT INTO flows (data, created_at, active)
+       VALUES ($1, NOW(), false)
+       RETURNING id`,
+      [data]
+    );
+    const newId = ins.rows[0]?.id;
+    if (!newId) {
+      return reply.code(500).send({ error: 'Falha ao criar versão do fluxo' });
+    }
+
+    // 2) Ativa essa versão usando a mesma lógica/lock de /activate
+    const act = await req.db.query(
       `
       WITH lock AS (
-        -- serializa publicações concorrentes por schema/tenant
         SELECT pg_advisory_xact_lock( hashtext(current_schema() || ':flows_publish') )
       ),
       deact AS (
-        UPDATE flows
-           SET active = false
-         WHERE active = true
+        UPDATE flows SET active = false WHERE active = true
       ),
-      ins AS (
-        INSERT INTO flows (data, created_at, active)
-        VALUES ($1, NOW(), true)
+      act AS (
+        UPDATE flows SET active = true WHERE id = $1
         RETURNING id
       )
-      SELECT id FROM ins;
+      SELECT id FROM act;
       `,
-      [data]
+      [newId]
     );
 
-    return reply.send({
-      message: 'Fluxo publicado e ativado com sucesso.',
-      id: rows[0]?.id
-    });
+    const activatedId = act.rows[0]?.id;
+    if (!activatedId) {
+      return reply.code(404).send({ error: 'Fluxo criado, mas não foi possível ativar' });
+    }
+
+    return reply.send({ message: 'Fluxo publicado e ativado com sucesso.', id: activatedId });
   } catch (error) {
     req.log?.error(error, 'Erro ao publicar fluxo');
-    // se ainda assim acontecer corrida rara:
+    // Se acontecer qualquer corrida rara, devolve 409 para UX mais clara
     if (error?.code === '23505') {
       return reply.code(409).send({ error: 'Concorrência ao publicar. Tente novamente.' });
     }
     return reply.code(500).send({ error: 'Erro ao publicar fluxo', detail: error.message });
   }
 });
-
-
 
   fastify.get('/sessions/:user_id', async (req, reply) => {
     const { user_id } = req.params;
