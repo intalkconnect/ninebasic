@@ -1,20 +1,21 @@
 export default async function flowRoutes(fastify, opts) {
   fastify.post('/publish', async (req, reply) => {
   const { data } = req.body;
-
   if (!data || typeof data !== 'object') {
     return reply.code(400).send({ error: 'Fluxo inválido ou ausente.' });
   }
 
   try {
-    // 1) desativa o ativo; 2) insere o novo como ativo — tudo no MESMO statement
     const { rows } = await req.db.query(
       `
-      WITH deact AS (
+      WITH lock AS (
+        -- serializa publicações concorrentes por schema/tenant
+        SELECT pg_advisory_xact_lock( hashtext(current_schema() || ':flows_publish') )
+      ),
+      deact AS (
         UPDATE flows
            SET active = false
          WHERE active = true
-         RETURNING 1
       ),
       ins AS (
         INSERT INTO flows (data, created_at, active)
@@ -26,18 +27,20 @@ export default async function flowRoutes(fastify, opts) {
       [data]
     );
 
-    const insertedId = rows[0]?.id;
     return reply.send({
       message: 'Fluxo publicado e ativado com sucesso.',
-      id: insertedId
+      id: rows[0]?.id
     });
   } catch (error) {
-    fastify.log.error(error);
-    return reply
-      .code(500)
-      .send({ error: 'Erro ao publicar fluxo', detail: error.message });
+    req.log?.error(error, 'Erro ao publicar fluxo');
+    // se ainda assim acontecer corrida rara:
+    if (error?.code === '23505') {
+      return reply.code(409).send({ error: 'Concorrência ao publicar. Tente novamente.' });
+    }
+    return reply.code(500).send({ error: 'Erro ao publicar fluxo', detail: error.message });
   }
 });
+
 
 
   fastify.get('/sessions/:user_id', async (req, reply) => {
@@ -86,32 +89,41 @@ export default async function flowRoutes(fastify, opts) {
   });
 
   fastify.post('/activate', async (req, reply) => {
-    const { id } = req.body;
+  const { id } = req.body;
+  if (!id) return reply.code(400).send({ error: 'id é obrigatório' });
 
-    try {
-      // Desativa todos e ativa o ID informado em UMA única query
-      const { rows } = await req.db.query(
-        `
-        WITH deact AS (
-          UPDATE flows SET active = false RETURNING 1
-        ),
-        act AS (
-          UPDATE flows SET active = true WHERE id = $1 RETURNING id
-        )
-        SELECT id FROM act;
-        `,
-        [id]
-      );
+  try {
+    const { rows } = await req.db.query(
+      `
+      WITH lock AS (
+        SELECT pg_advisory_xact_lock( hashtext(current_schema() || ':flows_publish') )
+      ),
+      deact AS (
+        UPDATE flows SET active = false WHERE active = true
+      ),
+      act AS (
+        UPDATE flows SET active = true WHERE id = $1
+        RETURNING id
+      )
+      SELECT id FROM act;
+      `,
+      [id]
+    );
 
-      const activatedId = rows[0]?.id || id;
-      return reply.code(200).send({ success: true, id: activatedId });
-    } catch (error) {
-      fastify.log.error(error);
-      return reply
-        .code(500)
-        .send({ error: 'Erro ao ativar fluxo', detail: error.message });
+    const activatedId = rows[0]?.id;
+    if (!activatedId) {
+      return reply.code(404).send({ error: 'Fluxo não encontrado para ativação' });
     }
-  });
+    return reply.code(200).send({ success: true, id: activatedId });
+  } catch (error) {
+    req.log?.error(error, 'Erro ao ativar fluxo');
+    if (error?.code === '23505') {
+      return reply.code(409).send({ error: 'Concorrência ao ativar fluxo. Tente novamente.' });
+    }
+    return reply.code(500).send({ error: 'Erro ao ativar fluxo', detail: error.message });
+  }
+});
+
 
   fastify.get('/latest', async (req, reply) => {
     try {
