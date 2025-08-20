@@ -6,30 +6,25 @@ fastify.post('/publish', async (req, reply) => {
     return reply.code(400).send({ error: 'Fluxo inválido ou ausente.' });
   }
 
-  const client = await req.db.connect();
   try {
-    await client.query('BEGIN');
+    await req.db.tx(async (client) => {
+      // 1. Desativa todos os fluxos ativos
+      await client.query('UPDATE flows SET active = false');
 
-    // 1. Desativa todos os fluxos ativos
-    await client.query('UPDATE flows SET active = false');
+      // 2. Insere novo fluxo com active=true
+      const insertRes = await client.query(
+        'INSERT INTO flows(data, created_at, active) VALUES($1, $2, $3) RETURNING id',
+        [data, new Date().toISOString(), true]
+      );
 
-    // 2. Insere novo fluxo com active=true
-    const insertRes = await client.query(
-      'INSERT INTO flows(data, created_at, active) VALUES($1, $2, $3) RETURNING id',
-      [data, new Date().toISOString(), true]
-    );
+      const insertedId = insertRes.rows[0].id;
 
-    const insertedId = insertRes.rows[0].id;
-
-    await client.query('COMMIT');
-
-    return reply.send({ message: 'Fluxo publicado e ativado com sucesso.', id: insertedId });
+      // Commit implícito se não houver erro
+      return reply.send({ message: 'Fluxo publicado e ativado com sucesso.', id: insertedId });
+    });
   } catch (error) {
-    await client.query('ROLLBACK');
     fastify.log.error(error);
     return reply.code(500).send({ error: 'Erro ao publicar fluxo', detail: error.message });
-  } finally {
-    client.release();
   }
 });
 
@@ -80,27 +75,22 @@ fastify.post('/publish', async (req, reply) => {
 fastify.post('/activate', async (req, reply) => {
   const { id } = req.body;
 
-  const client = await req.db.connect();
   try {
-    await client.query('BEGIN');
+    await req.db.tx(async (client) => {
+      // Desativa todos
+      await client.query('UPDATE flows SET active = false');
 
-    // Desativa todos
-    await client.query('UPDATE flows SET active = false');
+      // Ativa o fluxo específico
+      await client.query('UPDATE flows SET active = true WHERE id = $1', [id]);
 
-    // Ativa o fluxo específico
-    await client.query('UPDATE flows SET active = true WHERE id = $1', [id]);
-
-    await client.query('COMMIT');
-    return reply.code(200).send({ success: true });
+      // Commit implícito
+      return reply.code(200).send({ success: true });
+    });
   } catch (error) {
-    await client.query('ROLLBACK');
     fastify.log.error(error);
     return reply.code(500).send({ error: 'Erro ao ativar fluxo', detail: error.message });
-  } finally {
-    client.release();
   }
 });
-
 
   fastify.get('/latest', async (req, reply) => {
     try {
