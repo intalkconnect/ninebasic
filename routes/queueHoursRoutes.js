@@ -38,12 +38,24 @@ function normalizeWeekly(weekly = []) {
   return out;
 }
 
+/** Converte payload {mon..sun:[{start,end}]} -> weekly[{weekday,windows}] */
+function windowsToWeekly(w = {}) {
+  const map = { mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6, sun: 7 };
+  const weekly = [];
+  for (const key of Object.keys(map)) {
+    const arr = Array.isArray(w[key]) ? w[key] : [];
+    if (arr.length === 0) continue;
+    weekly.push({ weekday: map[key], windows: arr });
+  }
+  // ordena por weekday
+  weekly.sort((a, b) => a.weekday - b.weekday);
+  return weekly;
+}
+
 /* resolve schema do tenant a partir do Host; fallback hmg */
 async function resolveSchemaFromReq(req) {
   try {
-    // se sua infra já decorou req.tenantSchema, respeita
     if (req.tenantSchema) return req.tenantSchema;
-
     const sub = extractSubdomain(req.headers.host, process.env.BASE_DOMAIN);
     if (!sub) return 'hmg';
     const schema = await lookupSchemaBySubdomain(sub);
@@ -71,7 +83,7 @@ async function loadConfig(client, queueName) {
       weekly: [],
       holidays: [],
     };
-    }
+  }
 
   const row = cfg.rows[0];
 
@@ -91,7 +103,6 @@ async function loadConfig(client, queueName) {
     [queueName]
   );
 
-  // agrupa por dia
   const weeklyMap = new Map();
   for (const r of rules.rows) {
     const arr = weeklyMap.get(r.weekday) || [];
@@ -113,7 +124,6 @@ async function loadConfig(client, queueName) {
 
 /* calcula status agora (ou numa data) e próxima abertura */
 async function testNow(client, queueName, tsOverride /* ISO opcional */) {
-  // carrega cfg
   const cfg = await loadConfig(client, queueName);
   if (!cfg.enabled) {
     return {
@@ -125,7 +135,6 @@ async function testNow(client, queueName, tsOverride /* ISO opcional */) {
     };
   }
 
-  // hora local na TZ da fila
   const q = await client.query(
     `SELECT
        (COALESCE($2::timestamptz, now()) AT TIME ZONE $1) AS local_ts,
@@ -144,7 +153,6 @@ async function testNow(client, queueName, tsOverride /* ISO opcional */) {
   const minutes = q.rows[0].minutes_local;
   const localDate = q.rows[0].local_date;
 
-  // feriado hoje?
   const fer = await client.query(
     `SELECT 1 FROM queue_holidays WHERE queue_name=$1 AND holiday_date=$2::date`,
     [queueName, localDate]
@@ -159,7 +167,6 @@ async function testNow(client, queueName, tsOverride /* ISO opcional */) {
     };
   }
 
-  // regra do dia
   const dayRules = await client.query(
     `SELECT start_minute, end_minute
        FROM queue_hours_rules
@@ -176,16 +183,9 @@ async function testNow(client, queueName, tsOverride /* ISO opcional */) {
   }
 
   if (openNow) {
-    return {
-      offhours: false,
-      reason: 'open',
-      local_ts: localTs,
-      local_tz: cfg.tz,
-      next_open_local: null,
-    };
+    return { offhours: false, reason: 'open', local_ts: localTs, local_tz: cfg.tz, next_open_local: null };
   }
 
-  // fechado (fora do horário)
   return {
     offhours: true,
     reason: 'closed',
@@ -196,7 +196,6 @@ async function testNow(client, queueName, tsOverride /* ISO opcional */) {
 }
 
 async function findNextOpenLocal(client, queueName, tz, dow, minutes) {
-  // tenta hoje (próxima janela no mesmo dia)
   const today = await client.query(
     `SELECT start_minute
        FROM queue_hours_rules
@@ -214,9 +213,8 @@ async function findNextOpenLocal(client, queueName, tz, dow, minutes) {
     return `${d.rows[0].d} ${start}`;
   }
 
-  // próximos dias (até +6)
   for (let i = 1; i <= 6; i++) {
-    const nextDow = ((dow - 1 + i) % 7) + 1; // 1..7
+    const nextDow = ((dow - 1 + i) % 7) + 1;
     const hol = await client.query(
       `SELECT 1
          FROM queue_holidays
@@ -250,16 +248,12 @@ async function findNextOpenLocal(client, queueName, tz, dow, minutes) {
  * Plugin Fastify
  * ========================= */
 async function queueHoursRoutes(fastify, options) {
-  // GET /queues/:queue/hours  → carrega config
+  // GET /queues/:queue/hours
   fastify.get('/:queue/hours', async (req, reply) => {
     const queueName = req.params.queue;
     try {
       const schema = await resolveSchemaFromReq(req);
-
-      const data = await withTenant(schema, async (client) => {
-        return await loadConfig(client, queueName);
-      });
-
+      const data = await withTenant(schema, async (client) => await loadConfig(client, queueName));
       return reply.send(data);
     } catch (error) {
       fastify.log.error('Erro ao buscar horários da fila:', error);
@@ -270,7 +264,7 @@ async function queueHoursRoutes(fastify, options) {
     }
   });
 
-  // POST /queues/:queue/hours  → cria/atualiza config completa (upsert)
+  // POST /queues/:queue/hours  (upsert)
   fastify.post('/:queue/hours', async (req, reply) => {
     const queueName = req.params.queue;
     const {
@@ -287,7 +281,6 @@ async function queueHoursRoutes(fastify, options) {
       const flatRules = normalizeWeekly(weekly);
 
       const data = await withTenant(schema, async (client) => {
-        // upsert queue_hours
         await client.query(
           `INSERT INTO queue_hours (queue_name, tz, enabled, pre_service_message, offhours_message)
            VALUES ($1,$2,$3,$4,$5)
@@ -296,7 +289,6 @@ async function queueHoursRoutes(fastify, options) {
           [queueName, tz, enabled, pre_service_message, offhours_message]
         );
 
-        // replace rules
         await client.query(`DELETE FROM queue_hours_rules WHERE queue_name=$1`, [queueName]);
         for (const r of flatRules) {
           await client.query(
@@ -306,7 +298,6 @@ async function queueHoursRoutes(fastify, options) {
           );
         }
 
-        // replace holidays (simples)
         await client.query(`DELETE FROM queue_holidays WHERE queue_name=$1`, [queueName]);
         for (const h of holidays || []) {
           if (!h?.date) continue;
@@ -331,17 +322,73 @@ async function queueHoursRoutes(fastify, options) {
     }
   });
 
-  // POST /queues/:queue/hours/test  → { offhours, reason, local_ts, local_tz, next_open_local }
+  // PUT /queues/:queue/hours  (upsert — aceita weekly **ou** windows)
+  fastify.put('/:queue/hours', async (req, reply) => {
+    const queueName = req.params.queue;
+
+    // aceita os dois formatos de nomes
+    const tzInput = req.body?.timezone || req.body?.tz || 'America/Sao_Paulo';
+    const enabled = req.body?.enabled ?? true;
+    const preMsg  = req.body?.pre_message ?? req.body?.pre_service_message ?? '';
+    const offMsg  = req.body?.off_message ?? req.body?.offhours_message ?? '';
+    let weekly    = Array.isArray(req.body?.weekly)
+      ? req.body.weekly
+      : windowsToWeekly(req.body?.windows || {});
+    const holidays = Array.isArray(req.body?.holidays) ? req.body.holidays : [];
+
+    try {
+      const schema = await resolveSchemaFromReq(req);
+      const flatRules = normalizeWeekly(weekly);
+
+      const data = await withTenant(schema, async (client) => {
+        await client.query(
+          `INSERT INTO queue_hours (queue_name, tz, enabled, pre_service_message, offhours_message)
+           VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (queue_name) DO UPDATE
+             SET tz=$2, enabled=$3, pre_service_message=$4, offhours_message=$5, updated_at=now()`,
+          [queueName, tzInput, enabled, preMsg, offMsg]
+        );
+
+        await client.query(`DELETE FROM queue_hours_rules WHERE queue_name=$1`, [queueName]);
+        for (const r of flatRules) {
+          await client.query(
+            `INSERT INTO queue_hours_rules (queue_name, weekday, start_minute, end_minute)
+             VALUES ($1,$2,$3,$4)`,
+            [queueName, r.weekday, r.start_minute, r.end_minute]
+          );
+        }
+
+        await client.query(`DELETE FROM queue_holidays WHERE queue_name=$1`, [queueName]);
+        for (const h of holidays) {
+          if (!h?.date) continue;
+          await client.query(
+            `INSERT INTO queue_holidays (queue_name, holiday_date, name)
+             VALUES ($1,$2,$3)
+             ON CONFLICT (queue_name, holiday_date) DO UPDATE SET name=EXCLUDED.name`,
+            [queueName, h.date, h.name || '']
+          );
+        }
+
+        return await loadConfig(client, queueName);
+      });
+
+      return reply.send(data);
+    } catch (error) {
+      fastify.log.error('Erro ao atualizar horários da fila (PUT):', error);
+      return reply.code(400).send({
+        error: 'Payload inválido ao atualizar horários da fila',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  });
+
+  // POST /queues/:queue/hours/test
   fastify.post('/:queue/hours/test', async (req, reply) => {
     const queueName = req.params.queue;
     const ts = req.body?.ts || req.query?.ts || null;
     try {
       const schema = await resolveSchemaFromReq(req);
-
-      const out = await withTenant(schema, async (client) => {
-        return await testNow(client, queueName, ts);
-      });
-
+      const out = await withTenant(schema, async (client) => await testNow(client, queueName, ts));
       return reply.send(out);
     } catch (error) {
       fastify.log.error('Erro ao testar horários da fila:', error);
