@@ -524,4 +524,90 @@ export default async function analyticsRoutes(fastify, opts) {
       return reply.status(500).send({ error: 'Erro em aging' });
     }
   });
+
+  /**
+ * ==========================
+ *  Realtime - Somente agentes
+ * ==========================
+ * GET /analytics/agents/realtime
+ * Retorna todos os atendentes (online, pause, offline, inativo),
+ * com motivo/duração da pausa e # de tickets abertos por agente.
+ */
+fastify.get('/agents/realtime', async (req, reply) => {
+  try {
+    const { rows } = await req.db.query(`
+      WITH agentes_base AS (
+        SELECT
+          a.email,
+          COALESCE(a.name || ' ' || a.lastname, a.email) AS agente,
+          a.status,                         -- 'online' | 'pause' | 'offline' | 'inativo'
+          a.filas,
+          a.last_seen,
+          a.session_id,
+          -- sessão de pausa aberta em hmg.pausa_sessoes (preferida, pois tem reason)
+          ps.reason      AS pausa_motivo,
+          ps.started_at  AS pausa_inicio,
+          CASE
+            WHEN a.status = 'pause' AND ps.started_at IS NOT NULL
+              THEN EXTRACT(EPOCH FROM (now() - ps.started_at))/60.0
+            WHEN a.status = 'pause' AND ps.started_at IS NULL AND a.pause_started_at IS NOT NULL
+              THEN EXTRACT(EPOCH FROM (now() - a.pause_started_at))/60.0
+            ELSE NULL
+          END AS pausa_duracao_min
+        FROM hmg.atendentes a
+        LEFT JOIN hmg.pausa_sessoes ps
+          ON ps.email = a.email AND ps.ended_at IS NULL
+      ),
+      ticket_counts AS (
+        SELECT
+          t.assigned_to AS email,
+          COUNT(*) FILTER (WHERE t.status = 'open') AS tickets_abertos
+        FROM tickets t
+        GROUP BY t.assigned_to
+      )
+      SELECT
+        b.agente,
+        b.email,
+        b.status,
+        b.pausa_motivo,
+        b.pausa_inicio,
+        CASE WHEN b.pausa_duracao_min IS NOT NULL
+             THEN ROUND(b.pausa_duracao_min)::int END AS pausa_duracao_min,
+        COALESCE(tc.tickets_abertos, 0) AS tickets_abertos,
+        b.filas,
+        b.last_seen,
+        b.session_id
+      FROM agentes_base b
+      LEFT JOIN ticket_counts tc USING (email)
+      ORDER BY
+        CASE b.status
+          WHEN 'online'  THEN 1
+          WHEN 'pause'   THEN 2
+          WHEN 'offline' THEN 3
+          WHEN 'inativo' THEN 4
+          ELSE 5
+        END,
+        b.agente;
+    `);
+
+    const agents = rows.map(r => ({
+      agente: r.agente,
+      email: r.email,
+      status: r.status, // já vem como 'online' | 'pause' | 'offline' | 'inativo'
+      pausa: r.status === 'pause'
+        ? { motivo: r.pausa_motivo || null, inicio: r.pausa_inicio, duracao_min: r.pausa_duracao_min ?? null }
+        : null,
+      tickets_abertos: Number(r.tickets_abertos) || 0,
+      filas: r.filas || [],
+      last_seen: r.last_seen,
+      session_id: r.session_id,
+    }));
+
+    return reply.send(agents);
+  } catch (err) {
+    req.log.error(err, '[analytics] /agents/realtime erro');
+    return reply.status(500).send({ error: 'Erro em realtime de agentes' });
+  }
+});
+
 }
