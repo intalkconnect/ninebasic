@@ -98,7 +98,7 @@ export default async function analyticsRoutes(fastify, opts) {
         SELECT
           COUNT(*)                                              AS total_criados${has ? '_no_periodo' : ''},
           COUNT(*) FILTER (WHERE t.status='open')               AS backlog_aberto,
-          COUNT(*) FILTER (WHERE t.assigned_to IS NULL)         AS aguardando,
+          COUNT(*) FILTER (WHERE t.assigned_to IS NULL AND t.status = 'open')         AS aguardando,
           COUNT(*) FILTER (WHERE t.assigned_to IS NOT NULL AND t.status = 'open')     AS em_atendimento,
           ROUND(AVG(EXTRACT(EPOCH FROM (now()-t.created_at))/60)
                 FILTER (WHERE t.assigned_to IS NULL))::int      AS espera_media_min_aguardando,
