@@ -251,7 +251,7 @@ async function findNextOpenLocal(client, queueName, tz, dow, minutes) {
  * ========================= */
 async function queueHoursRoutes(fastify, options) {
   // GET /queues/:queue/hours  → carrega config
-  fastify.get('/queues/:queue/hours', async (req, reply) => {
+  fastify.get('/:queue/hours', async (req, reply) => {
     const queueName = req.params.queue;
     try {
       const schema = await resolveSchemaFromReq(req);
@@ -271,7 +271,7 @@ async function queueHoursRoutes(fastify, options) {
   });
 
   // POST /queues/:queue/hours  → cria/atualiza config completa (upsert)
-  fastify.post('/queues/:queue/hours', async (req, reply) => {
+  fastify.post('/:queue/hours', async (req, reply) => {
     const queueName = req.params.queue;
     const {
       tz = 'America/Sao_Paulo',
@@ -332,7 +332,7 @@ async function queueHoursRoutes(fastify, options) {
   });
 
   // POST /queues/:queue/hours/test  → { offhours, reason, local_ts, local_tz, next_open_local }
-  fastify.post('/queues/:queue/hours/test', async (req, reply) => {
+  fastify.post('/:queue/hours/test', async (req, reply) => {
     const queueName = req.params.queue;
     const ts = req.body?.ts || req.query?.ts || null;
     try {
