@@ -18,6 +18,50 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
+  // GET /tickets/last/:user_id → retorna o ticket mais recente do usuário
+fastify.get('/last/:user_id', async (req, reply) => {
+  const { user_id } = req.params;
+
+  // reutiliza seu validador existente
+  if (!isValidUserId(user_id)) {
+    return reply.code(400).send({
+      error: 'Formato de user_id inválido. Use: usuario@dominio',
+    });
+  }
+
+  try {
+    const { rows } = await req.db.query(
+      `
+      SELECT
+        id,
+        ticket_number,
+        user_id,
+        fila,
+        assigned_to,
+        status,
+        created_at,
+        updated_at,
+        COALESCE(updated_at, created_at) AS last_activity_at
+      FROM tickets
+      WHERE user_id = $1
+      ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+      LIMIT 1
+      `,
+      [user_id]
+    );
+
+    if (rows.length === 0) {
+      return reply.code(404).send({ error: 'Ticket não encontrado' });
+    }
+
+    return reply.send(rows[0]);
+  } catch (error) {
+    fastify.log.error('Erro ao buscar último ticket:', error);
+    return reply.code(500).send({ error: 'Erro interno ao buscar último ticket' });
+  }
+});
+
+
   // GET /tickets/:user_id → Consulta ticket
   fastify.get('/:user_id', async (req, reply) => {
     const { user_id } = req.params;
