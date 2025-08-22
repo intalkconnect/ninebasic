@@ -34,7 +34,7 @@ async function metricsRoutes(fastify, _options) {
   }
 
   // POST /metrics/feedback  -> salva NPS/CSAT
-  fastify.post('/metrics/feedback', async (req, reply) => {
+  fastify.post('/feedback', async (req, reply) => {
     try {
       const {
         type,               // 'nps' | 'csat'
@@ -85,7 +85,7 @@ async function metricsRoutes(fastify, _options) {
   });
 
   // GET /metrics/series/nps  -> série temporal para gráficos
-  fastify.get('/metrics/series/nps', async (req, reply) => {
+  fastify.get('/series/nps', async (req, reply) => {
     const { bucket = 'day' } = req.query || {}; // 'day' | 'week' | 'month'
     const trunc = bucket === 'month' ? 'month' : bucket === 'week' ? 'week' : 'day';
     try {
@@ -111,7 +111,7 @@ async function metricsRoutes(fastify, _options) {
   });
 
   // GET /metrics/series/csat -> série temporal para gráficos
-  fastify.get('/metrics/series/csat', async (req, reply) => {
+  fastify.get('/series/csat', async (req, reply) => {
     const { bucket = 'day' } = req.query || {};
     const trunc = bucket === 'month' ? 'month' : bucket === 'week' ? 'week' : 'day';
     try {
