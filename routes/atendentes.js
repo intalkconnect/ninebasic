@@ -38,54 +38,6 @@ async function userssRoutes(fastify, _options) {
     }
   });
 
-  // // ➕ Criar novo atendente
-  // fastify.post('/', async (req, reply) => {
-  //   const { name, lastname, email, filas = [] } = req.body;
-
-  //   if (!name || !lastname || !email) {
-  //     return reply.code(400).send({ error: 'name, lastname e email são obrigatórios' });
-  //   }
-
-  //   try {
-  //     const { rows } = await req.db.query(
-  //       `INSERT INTO users (name, lastname, email, filas, perfil)
-  //        VALUES ($1, $2, $3, $4)
-  //        RETURNING id, name, lastname, email, status, filas, perfil, created_at, session_id`,
-  //       [name, lastname, email, filas]
-  //     );
-  //     return reply.code(201).send(rows[0]);
-  //   } catch (err) {
-  //     fastify.log.error(err);
-  //     return reply.code(500).send({ error: 'Erro ao criar atendente' });
-  //   }
-  // });
-
-  // // ✏️ Atualizar atendente (perfil)
-  // fastify.put('/:id', async (req, reply) => {
-  //   const { id } = req.params;
-  //   const { name, lastname, email, filas } = req.body;
-
-  //   if (!name || !lastname || !email || !Array.isArray(filas)) {
-  //     return reply.code(400).send({ error: 'Campos inválidos' });
-  //   }
-
-  //   try {
-  //     const { rowCount } = await req.db.query(
-  //       `UPDATE users
-  //        SET name = $1, lastname = $2, email = $3, filas = $4
-  //        WHERE id = $5`,
-  //       [name, lastname, email, filas, id]
-  //     );
-
-  //     if (rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
-
-  //     return reply.send({ success: true });
-  //   } catch (err) {
-  //     fastify.log.error(err);
-  //     return reply.code(500).send({ error: 'Erro ao atualizar atendente' });
-  //   }
-  // });
-
   fastify.get('/status/:email', async (req, reply) => {
     const { email } = req.params;
     
