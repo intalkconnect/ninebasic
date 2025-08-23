@@ -1,5 +1,5 @@
 // routes/atendentes.js
-async function userssRoutes(fastify, _options) {
+async function usersRoutes(fastify, _options) {
   // ------------ Rotas principais ------------
   
   // 🔄 Listar todos os usuários
@@ -107,4 +107,4 @@ async function userssRoutes(fastify, _options) {
   
 }
 
-export default atendentesRoutes;
+export default usersRoutes;
