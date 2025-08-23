@@ -21,6 +21,7 @@ import pausasRoutes from './routes/pause.js';
 import queueHoursRoutes from './routes/queueHoursRoutes.js';
 import metricsRoutes from './routes/metrics.js';
 import templatesRoutes from './routes/templates.js';
+import usersRoutes from './routes/users.js';
 
 // 👉 NOVO
 import waEmbeddedRoutes from './routes/waEmbedded.js';
@@ -56,6 +57,7 @@ async function buildServer() {
   fastify.register(queueHoursRoutes,      { prefix: '/api/v1/queueHours' });
   fastify.register(metricsRoutes,      { prefix: '/api/v1/metrics' });
   fastify.register(templatesRoutes,      { prefix: '/api/v1/templates' });
+  fastify.register(usersRoutes,      { prefix: '/api/v1/users' });
   
 
   // 👉 NOVO: Embedded Signup (prefixo próprio)
@@ -79,6 +81,7 @@ async function start() {
 }
 
 start();
+
 
 
 
