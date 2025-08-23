@@ -1,5 +1,5 @@
 // routes/atendentes.js
-async function atendentesRoutes(fastify, _options) {
+async function userssRoutes(fastify, _options) {
   // ------------ Rotas principais ------------
   
   // 🔄 Listar todos os atendentes
@@ -8,7 +8,8 @@ async function atendentesRoutes(fastify, _options) {
       const { rows } = await req.db.query(
         `SELECT 
            id, name, lastname, email, status, filas, created_at, session_id
-         FROM atendentes
+         FROM users
+         WHERE perfil = 'atendente'
          ORDER BY name, lastname`
       );
       return reply.send(rows);
@@ -25,8 +26,8 @@ async function atendentesRoutes(fastify, _options) {
       const { rows } = await req.db.query(
         `SELECT 
            id, name, lastname, email, status, filas, created_at, session_id
-         FROM atendentes
-         WHERE email = $1`,
+         FROM users
+         WHERE email = $1 AND perfil = 'atendente'`,
         [email]
       );
       if (rows.length === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
@@ -37,53 +38,53 @@ async function atendentesRoutes(fastify, _options) {
     }
   });
 
-  // ➕ Criar novo atendente
-  fastify.post('/', async (req, reply) => {
-    const { name, lastname, email, filas = [] } = req.body;
+  // // ➕ Criar novo atendente
+  // fastify.post('/', async (req, reply) => {
+  //   const { name, lastname, email, filas = [] } = req.body;
 
-    if (!name || !lastname || !email) {
-      return reply.code(400).send({ error: 'name, lastname e email são obrigatórios' });
-    }
+  //   if (!name || !lastname || !email) {
+  //     return reply.code(400).send({ error: 'name, lastname e email são obrigatórios' });
+  //   }
 
-    try {
-      const { rows } = await req.db.query(
-        `INSERT INTO atendentes (name, lastname, email, filas)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, name, lastname, email, status, filas, created_at, session_id`,
-        [name, lastname, email, filas]
-      );
-      return reply.code(201).send(rows[0]);
-    } catch (err) {
-      fastify.log.error(err);
-      return reply.code(500).send({ error: 'Erro ao criar atendente' });
-    }
-  });
+  //   try {
+  //     const { rows } = await req.db.query(
+  //       `INSERT INTO users (name, lastname, email, filas, perfil)
+  //        VALUES ($1, $2, $3, $4)
+  //        RETURNING id, name, lastname, email, status, filas, perfil, created_at, session_id`,
+  //       [name, lastname, email, filas]
+  //     );
+  //     return reply.code(201).send(rows[0]);
+  //   } catch (err) {
+  //     fastify.log.error(err);
+  //     return reply.code(500).send({ error: 'Erro ao criar atendente' });
+  //   }
+  // });
 
-  // ✏️ Atualizar atendente (perfil)
-  fastify.put('/:id', async (req, reply) => {
-    const { id } = req.params;
-    const { name, lastname, email, filas } = req.body;
+  // // ✏️ Atualizar atendente (perfil)
+  // fastify.put('/:id', async (req, reply) => {
+  //   const { id } = req.params;
+  //   const { name, lastname, email, filas } = req.body;
 
-    if (!name || !lastname || !email || !Array.isArray(filas)) {
-      return reply.code(400).send({ error: 'Campos inválidos' });
-    }
+  //   if (!name || !lastname || !email || !Array.isArray(filas)) {
+  //     return reply.code(400).send({ error: 'Campos inválidos' });
+  //   }
 
-    try {
-      const { rowCount } = await req.db.query(
-        `UPDATE atendentes
-         SET name = $1, lastname = $2, email = $3, filas = $4
-         WHERE id = $5`,
-        [name, lastname, email, filas, id]
-      );
+  //   try {
+  //     const { rowCount } = await req.db.query(
+  //       `UPDATE users
+  //        SET name = $1, lastname = $2, email = $3, filas = $4
+  //        WHERE id = $5`,
+  //       [name, lastname, email, filas, id]
+  //     );
 
-      if (rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+  //     if (rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
 
-      return reply.send({ success: true });
-    } catch (err) {
-      fastify.log.error(err);
-      return reply.code(500).send({ error: 'Erro ao atualizar atendente' });
-    }
-  });
+  //     return reply.send({ success: true });
+  //   } catch (err) {
+  //     fastify.log.error(err);
+  //     return reply.code(500).send({ error: 'Erro ao atualizar atendente' });
+  //   }
+  // });
 
   fastify.get('/status/:email', async (req, reply) => {
     const { email } = req.params;
@@ -100,8 +101,8 @@ async function atendentesRoutes(fastify, _options) {
            session_id, 
            EXTRACT(EPOCH FROM (NOW() - created_at)) as seconds_since_creation,
            NOW() as server_time
-         FROM atendentes
-         WHERE email = $1`,
+         FROM users
+         WHERE email = $1 AND perfil = 'atendente'`,
         [email]
       );
 
@@ -109,16 +110,16 @@ async function atendentesRoutes(fastify, _options) {
         return reply.code(404).send({ error: 'Atendente não encontrado' });
       }
 
-      const atendenteStatus = rows[0];
+      const usersStatus = rows[0];
       
       // Estrutura de resposta completa
       const response = {
         email,
-        status: atendenteStatus.status, // Valor exato do banco
-        raw_status: atendenteStatus.status, // Cópia para confirmar que não foi alterado
-        session_id: atendenteStatus.session_id,
-        server_time: atendenteStatus.server_time,
-        seconds_since_creation: atendenteStatus.seconds_since_creation,
+        status: usersStatus.status, // Valor exato do banco
+        raw_status: usersStatus.status, // Cópia para confirmar que não foi alterado
+        session_id: usersStatus.session_id,
+        server_time: usersStatus.server_time,
+        seconds_since_creation: usersStatus.seconds_since_creation,
         _debug: {
           query_executed_at: new Date().toISOString(),
           cache: 'disabled'
@@ -151,9 +152,9 @@ async function atendentesRoutes(fastify, _options) {
 
     try {
       const { rowCount } = await req.db.query(
-        `UPDATE atendentes
+        `UPDATE users
          SET session_id = $2
-         WHERE email = $1`,
+         WHERE email = $1 AND perfil = 'atendente'`,
         [email, session]
       );
 
@@ -182,10 +183,10 @@ async function atendentesRoutes(fastify, _options) {
 
     try {
       const { rowCount } = await req.db.query(
-        `UPDATE atendentes
+        `UPDATE users
            SET session_id = NULL,
                status = $2
-         WHERE session_id = $1`,
+         WHERE session_id = $1 AND perfil = 'atendente'`,
         [session, nextStatus]
       );
 
@@ -217,11 +218,11 @@ async function atendentesRoutes(fastify, _options) {
 
     // atualiza atendente
     const { rowCount } = await req.db.query(
-      `UPDATE atendentes
+      `UPDATE users
           SET status = 'pausa',
               pause_reason = $2,
               pause_started_at = now()
-        WHERE email = $1`,
+        WHERE email = $1 AND perfil = 'atendente'`,
       [email, finalReason]
     );
     if (!rowCount) return reply.code(404).send({ error: 'Atendente não encontrado' });
@@ -247,11 +248,11 @@ fastify.put('/resume/:email', async (req, reply) => {
 
   try {
     const { rowCount } = await req.db.query(
-      `UPDATE atendentes
+      `UPDATE users
           SET status = 'online',
               pause_reason = NULL,
               pause_started_at = NULL
-        WHERE email = $1`,
+        WHERE email = $1 AND perfil = 'atendente'`,
       [email]
     );
     if (!rowCount) return reply.code(404).send({ error: 'Atendente não encontrado' });
@@ -261,7 +262,7 @@ fastify.put('/resume/:email', async (req, reply) => {
       `UPDATE pausa_sessoes
           SET ended_at = now()
         WHERE email = $1
-          AND ended_at IS NULL`,
+          AND ended_at IS NULL AND perfil = 'atendente'`,
       [email]
     );
 
@@ -284,9 +285,9 @@ fastify.put('/resume/:email', async (req, reply) => {
 
     try {
       const { rowCount } = await req.db.query(
-        `UPDATE atendentes
+        `UPDATE users
          SET status = $2
-         WHERE email = $1`,
+         WHERE email = $1 AND perfil = 'atendente'`,
         [email, status]
       );
 
@@ -313,8 +314,8 @@ fastify.put('/resume/:email', async (req, reply) => {
       if (session) {
         const bySession = await req.db.query(
           `SELECT email, status, session_id
-           FROM atendentes
-           WHERE session_id = $1`,
+           FROM users
+           WHERE session_id = $1 AND perfil = 'atendente'`,
           [session]
         );
         row = bySession.rows[0] || null;
@@ -323,8 +324,8 @@ fastify.put('/resume/:email', async (req, reply) => {
       if (!row && email) {
         const byEmail = await req.db.query(
           `SELECT email, status, session_id
-           FROM atendentes
-           WHERE email = $1`,
+           FROM users
+           WHERE email = $1 AND perfil = 'atendente'`,
           [email]
         );
         row = byEmail.rows[0] || null;
@@ -354,7 +355,7 @@ fastify.put('/resume/:email', async (req, reply) => {
 
     try {
       const { rowCount } = await req.db.query(
-        `DELETE FROM atendentes WHERE id = $1`,
+        `DELETE FROM users WHERE id = $1 AND perfil = 'atendente'`,
         [id]
       );
 
