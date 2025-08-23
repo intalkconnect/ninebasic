@@ -1,5 +1,5 @@
 // routes/atendentes.js
-async function userssRoutes(fastify, _options) {
+async function atendentesRoutes(fastify, _options) {
   // ------------ Rotas principais ------------
   
   // 🔄 Listar todos os atendentes
