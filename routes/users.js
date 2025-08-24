@@ -1,40 +1,24 @@
 // routes/atendentes.js
+import axios from 'axios';
 import { pool } from '../services/db.js'; // pool global (public)
 
-// Config da API externa de invite
-const INVITE_API_URL = process.env.INVITE_API_URL || 'https://srv-auth.dkdevs.com.br/api/invite';
+// ===== Config da API externa de invite =====
+const INVITE_API_URL =
+  process.env.INVITE_API_URL || 'https://srv-auth.dkdevs.com.br/api/invite';
 const INVITE_API_TOKEN = process.env.INVITE_API_TOKEN || ''; // opcional
 
 async function triggerInvite({ email, companySlug, profile }) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 10_000);
-
-  try {
-    const res = await fetch(INVITE_API_URL, {
-      method: 'POST',
-      signal: ctrl.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(INVITE_API_TOKEN ? { Authorization: `Bearer ${INVITE_API_TOKEN}` } : {}),
-      },
-      body: JSON.stringify({ email, companySlug, profile }),
-    });
-
-    const ct = (res.headers.get('content-type') || '').toLowerCase();
-    const body = ct.includes('application/json') ? await res.json() : await res.text();
-
-    if (!res.ok) {
-      const msg = typeof body === 'string' ? body : (body?.message || 'Invite falhou');
-      throw new Error(`${res.status} ${msg}`);
-    }
-    return { ok: true, body };
-  } finally {
-    clearTimeout(t);
-  }
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(INVITE_API_TOKEN ? { Authorization: `Bearer ${INVITE_API_TOKEN}` } : {}),
+  };
+  const payload = { email, companySlug, profile };
+  const { data } = await axios.post(INVITE_API_URL, payload, { headers, timeout: 10_000 });
+  return data;
 }
 
 async function usersRoutes(fastify, _options) {
-  // Listar
+  // ===== Listar =====
   fastify.get('/', async (req, reply) => {
     try {
       const { rows } = await req.db.query(
@@ -49,7 +33,7 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // Buscar por email
+  // ===== Buscar por email =====
   fastify.get('/:email', async (req, reply) => {
     const { email } = req.params;
     try {
@@ -67,7 +51,7 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // Criar (tenant + public + invite externo)
+  // ===== Criar (tenant + public + invite externo) =====
   fastify.post('/', async (req, reply) => {
     const { name, lastname, email, perfil, filas = [] } = req.body || {};
     if (!name || !lastname || !email || !perfil) {
@@ -81,7 +65,7 @@ async function usersRoutes(fastify, _options) {
       const { subdomain } = req.tenant || {};
       if (!subdomain) return reply.code(400).send({ error: 'tenant não resolvido' });
 
-      // 1) catálogo global -> company_id e slug
+      // 1) catálogo global -> company_id e slug (TABELA: public.companies)
       const qTenant = await pool.query(
         `SELECT id AS company_id, slug
            FROM public.companies
@@ -91,7 +75,7 @@ async function usersRoutes(fastify, _options) {
       const tenant = qTenant.rows[0];
       if (!tenant) return reply.code(404).send({ error: 'tenant não encontrado no catálogo' });
 
-      // 2) schema do tenant: upsert
+      // 2) upsert no schema do tenant
       const tenantUser = await req.db.tx(async (client) => {
         const ins = await client.query(
           `INSERT INTO users (name, lastname, email, filas, perfil)
@@ -107,7 +91,7 @@ async function usersRoutes(fastify, _options) {
         return ins.rows[0];
       });
 
-      // 3) public.users: upsert por (company_id, email)
+      // 3) upsert em public.users por (company_id, email)
       const upPublic = await pool.query(
         `INSERT INTO public.users (company_id, email, name, lastname, profile)
          VALUES ($1,$2,$3,$4,$5)
@@ -122,22 +106,21 @@ async function usersRoutes(fastify, _options) {
       const publicUserId = upPublic.rows[0]?.id;
 
       // 4) dispara invite externo (email, companySlug, profile)
-      let inviteSent = false;
-      let inviteError = null;
+      let invite_sent = false;
+      let invite_error = null;
       try {
-        const r = await triggerInvite({ email: lowerEmail, companySlug: tenant.slug, profile: perfil });
-        inviteSent = !!r.ok;
+        await triggerInvite({ email: lowerEmail, companySlug: tenant.slug, profile: perfil });
+        invite_sent = true;
       } catch (e) {
-        inviteError = e.message || String(e);
-        req.log.error({ inviteError }, 'Falha ao disparar invite');
-        // não falha a criação — só reporta
+        invite_error = e.response?.data?.message || e.message || 'Falha ao enviar invite';
+        fastify.log.error({ invite_error, email: lowerEmail, companySlug: tenant.slug }, 'invite falhou');
       }
 
       return reply.code(201).send({
         ...tenantUser,
         public_user_id: publicUserId,
-        invite_sent: inviteSent,
-        ...(inviteError ? { invite_error: inviteError } : {}),
+        invite_sent,
+        ...(invite_error ? { invite_error } : {}),
       });
     } catch (err) {
       fastify.log.error(err);
@@ -145,7 +128,7 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // Atualizar
+  // ===== Atualizar (sincroniza public.users) =====
   fastify.put('/:id', async (req, reply) => {
     const { id } = req.params;
     const { name, lastname, email, perfil, filas } = req.body || {};
@@ -164,13 +147,12 @@ async function usersRoutes(fastify, _options) {
       );
       if (rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
 
-      // mantém public.users sincronizado
       const { subdomain } = req.tenant || {};
       if (subdomain) {
         const qTenant = await pool.query(
           `SELECT id AS company_id
-             FROM public.tenants
-            WHERE subdomain = $1`,
+             FROM public.companies
+            WHERE slug = $1`,
           [subdomain]
         );
         const companyId = qTenant.rows[0]?.company_id;
@@ -195,7 +177,7 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // Excluir — bloqueia se houver filas vinculadas
+  // ===== Excluir (bloqueia se houver filas) =====
   fastify.delete('/:id', async (req, reply) => {
     const { id } = req.params;
     try {
@@ -210,10 +192,13 @@ async function usersRoutes(fastify, _options) {
       const { rowCount } = await req.db.query(`DELETE FROM users WHERE id = $1`, [id]);
       if (rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
 
-      // opcional: refletir remoção em public.users (apenas se essa for sua regra)
+      // (Opcional) refletir no public.users — habilite se fizer parte da sua regra
       const { subdomain } = req.tenant || {};
       if (subdomain) {
-        const t = await pool.query(`SELECT id AS company_id FROM public.companies WHERE slug=$1`, [subdomain]);
+        const t = await pool.query(
+          `SELECT id AS company_id FROM public.companies WHERE slug=$1`,
+          [subdomain]
+        );
         const companyId = t.rows[0]?.company_id;
         const email = String(check.rows[0]?.email || '').toLowerCase();
         if (companyId && email) {
