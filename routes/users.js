@@ -2,21 +2,28 @@
 import axios from 'axios';
 import { pool } from '../services/db.js'; // pool global (public)
 
-// ===== Config da API externa de invite =====
-const INVITE_API_URL =
-  process.env.INVITE_API_URL || 'https://srv-auth.dkdevs.com.br/api/invite';
-const INVITE_API_TOKEN = process.env.INVITE_API_TOKEN || ''; // opcional
+// ===== Config da API externa =====
+// Invite: já existia
+const AUTH_API_TOKEN =
+  process.env.AUTH_API_TOKEN || 'https://srv-auth.dkdevs.com.br/api/invite';
+// Token opcional para ambas as chamadas
+const AUTH_API_TOKEN = process.env.AUTH_API_TOKEN || '';
 
+// Delete externo (novo): usa o serviço auth que você expõe em /api/users
+const AUTH_API_BASE = (process.env.AUTH_API_BASE || 'https://srv-auth.dkdevs.com.br').replace(/\/+$/,'');
+const AUTH_DELETE_URL = `${AUTH_API_BASE}/api/users`;
+
+// ---------- helpers HTTP ----------
 async function triggerInvite({ email, companySlug, profile }, log) {
   const headers = {
     'Content-Type': 'application/json',
-    ...(INVITE_API_TOKEN ? { Authorization: `Bearer ${INVITE_API_TOKEN}` } : {}),
+    ...(AUTH_API_TOKEN ? { Authorization: `Bearer ${AUTH_API_TOKEN}` } : {}),
   };
   const payload = { email, companySlug, profile };
 
-  log?.info({ payload, url: INVITE_API_URL }, '➡️ Chamando INVITE API');
+  log?.info({ payload, url: `${AUTH_API_TOKEN}/api/invite` }, '➡️ Chamando INVITE API');
 
-  const { data, status } = await axios.post(INVITE_API_URL, payload, {
+  const { data, status } = await axios.post(`${AUTH_API_BASE}/api/invite`, payload, {
     headers,
     timeout: 10_000,
     validateStatus: () => true,
@@ -28,7 +35,31 @@ async function triggerInvite({ email, companySlug, profile }, log) {
     const msg = (data && (data.message || data.error)) || `HTTP ${status}`;
     throw new Error(`Invite falhou: ${msg}`);
   }
+  return data;
+}
 
+async function triggerExternalDelete({ email, companySlug }, log) {
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(INVITE_API_TOKEN ? { Authorization: `Bearer ${AUTH_API_TOKEN}` } : {}),
+  };
+  const payload = { email, companySlug };
+
+  log?.info({ payload, url: `${AUTH_DELETE_URL}/api/users` }, '➡️ Chamando AUTH DELETE /api/users');
+
+  const { data, status } = await axios.delete(AUTH_API_BASE, {
+    headers,
+    timeout: 10_000,
+    validateStatus: () => true,
+    data: payload, // body no DELETE
+  });
+
+  log?.info({ status, data }, '🗑️ AUTH DELETE respondeu');
+
+  if (status < 200 || status >= 300) {
+    const msg = (data && (data.message || data.error)) || `HTTP ${status}`;
+    throw new Error(`Auth delete falhou: ${msg}`);
+  }
   return data;
 }
 
@@ -151,7 +182,7 @@ async function usersRoutes(fastify, _options) {
       const { subdomain } = req.tenant || {};
       if (!subdomain) return reply.code(400).send({ error: 'tenant não resolvido' });
 
-      // 1) catálogo global: company_id e slug em public.companies
+      // 1) catálogo global: company_id e slug
       const qTenant = await pool.query(
         `SELECT id AS company_id, slug
            FROM public.companies
@@ -161,7 +192,7 @@ async function usersRoutes(fastify, _options) {
       const tenant = qTenant.rows[0];
       if (!tenant) return reply.code(404).send({ error: 'tenant não encontrado no catálogo' });
 
-      // 2) UPSERT no schema do tenant (colunas dinâmicas)
+      // 2) UPSERT no schema do tenant
       const cols = await detectUserColumns(req);
       req.log.info({ cols }, '🧩 colunas detectadas (POST /users)');
       if (!cols.emailCol) return reply.code(500).send({ error: 'Tabela users do tenant não possui coluna "email"' });
@@ -185,7 +216,7 @@ async function usersRoutes(fastify, _options) {
         perfil:   u[cols.perfilCol] ?? u.perfil ?? perfil,
       };
 
-      // 3) public.users — **somente** company_id, email, profile
+      // 3) public.users — company_id, email, profile
       await pool.query(
         `INSERT INTO public.users (company_id, email, profile)
          VALUES ($1,$2,$3)
@@ -241,7 +272,7 @@ async function usersRoutes(fastify, _options) {
       const r = await req.db.query(sql, values);
       if (r.rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
 
-      // sincroniza somente profile em public.users (e email, caso tenha mudado)
+      // sincroniza profile em public.users
       const { subdomain } = req.tenant || {};
       if (subdomain) {
         const qTenant = await pool.query(
@@ -268,30 +299,46 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // Excluir
+  // Excluir (tenant) + chamada externa para remover em public.users
   fastify.delete('/:id', async (req, reply) => {
     const { id } = req.params;
     try {
       const cols = await detectUserColumns(req);
       if (!cols.idCol) return reply.code(500).send({ error: 'Tabela users não possui coluna "id"' });
 
-      // checa filas vinculadas se existir coluna
-      if (cols.filasCol) {
-        const check = await req.db.query(
-          `SELECT ${cols.filasCol} AS filas, ${cols.emailCol || 'NULL'} AS email
-             FROM users WHERE ${cols.idCol} = $1`,
-          [id]
-        );
-        if (check.rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+      // 1) Buscar email e filas antes de excluir (email é necessário para a chamada externa)
+      const selFields = [cols.emailCol ? `${cols.emailCol} AS email` : `'__noemail__' AS email`];
+      if (cols.filasCol) selFields.push(`${cols.filasCol} AS filas`);
 
-        const filas = check.rows[0]?.filas || [];
-        if (Array.isArray(filas) && filas.length > 0) {
-          return reply.code(409).send({ error: 'Desvincule as filas antes de excluir o usuário.' });
-        }
+      const pre = await req.db.query(
+        `SELECT ${selFields.join(', ')} FROM users WHERE ${cols.idCol} = $1`,
+        [id]
+      );
+      if (pre.rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+
+      const email = String(pre.rows[0].email || '').toLowerCase();
+      const filas = cols.filasCol ? (pre.rows[0]?.filas || []) : [];
+
+      if (cols.filasCol && Array.isArray(filas) && filas.length > 0) {
+        return reply.code(409).send({ error: 'Desvincule as filas antes de excluir o usuário.' });
       }
 
-      const { rowCount } = await req.db.query(`DELETE FROM users WHERE ${cols.idCol} = $1`, [id]);
-      if (rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+      // 2) Exclui no tenant
+      const del = await req.db.query(`DELETE FROM users WHERE ${cols.idCol} = $1`, [id]);
+      if (del.rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+
+      // 3) Chama o serviço externo para remover de public.users
+      try {
+        const companySlug = req.tenant?.subdomain;
+        if (email && companySlug) {
+          await triggerExternalDelete({ email, companySlug }, fastify.log);
+        } else {
+          fastify.log.warn({ email, companySlug }, '⚠️ Não foi possível chamar AUTH DELETE — dados insuficientes');
+        }
+      } catch (extErr) {
+        fastify.log.error({ err: extErr?.message }, '❌ Falha ao remover em AUTH /api/users (public.users)');
+        // Não falha a operação principal
+      }
 
       return reply.send({ success: true });
     } catch (err) {
