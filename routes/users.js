@@ -7,34 +7,114 @@ const INVITE_API_URL =
   process.env.INVITE_API_URL || 'https://srv-auth.dkdevs.com.br/api/invite';
 const INVITE_API_TOKEN = process.env.INVITE_API_TOKEN || ''; // opcional
 
-async function triggerInvite({ email, companySlug, profile, log }) {
+async function triggerInvite({ email, companySlug, profile }, log) {
   const headers = {
     'Content-Type': 'application/json',
     ...(INVITE_API_TOKEN ? { Authorization: `Bearer ${INVITE_API_TOKEN}` } : {}),
   };
   const payload = { email, companySlug, profile };
 
-  log.info({ payload }, '➡️ Chamando INVITE API');
+  log?.info({ payload, url: INVITE_API_URL }, '➡️ Chamando INVITE API');
 
   const { data, status } = await axios.post(INVITE_API_URL, payload, {
     headers,
     timeout: 10_000,
+    validateStatus: () => true,
   });
 
-  log.info({ status, data }, '✅ Invite API respondeu');
+  log?.info({ status, data }, '📩 Invite API respondeu');
+
+  if (status < 200 || status >= 300) {
+    const msg = (data && (data.message || data.error)) || `HTTP ${status}`;
+    throw new Error(`Invite falhou: ${msg}`);
+  }
 
   return data;
 }
 
+/** Detecta nomes de colunas existentes na <schema>.users do tenant */
+async function detectUserColumns(req) {
+  const q = `
+    SELECT column_name
+      FROM information_schema.columns
+     WHERE table_schema = current_schema()
+       AND table_name = 'users'
+  `;
+  const { rows } = await req.db.query(q);
+  const cols = new Set(rows.map(r => r.column_name.toLowerCase()));
+
+  const nameCol =
+    (cols.has('name') && 'name') ||
+    (cols.has('first_name') && 'first_name') ||
+    (cols.has('nome') && 'nome') ||
+    null;
+
+  const lastCol =
+    (cols.has('lastname') && 'lastname') ||
+    (cols.has('last_name') && 'last_name') ||
+    (cols.has('sobrenome') && 'sobrenome') ||
+    null;
+
+  const emailCol  = cols.has('email')  ? 'email'  : null;
+  const filasCol  = cols.has('filas')  ? 'filas'  : null;
+  const perfilCol =
+    (cols.has('perfil') && 'perfil') ||
+    (cols.has('profile') && 'profile') ||
+    null;
+
+  const statusCol = cols.has('status') ? 'status' : null;
+  const idCol     = cols.has('id')     ? 'id'     : null;
+
+  return { idCol, nameCol, lastCol, emailCol, filasCol, perfilCol, statusCol, all: cols };
+}
+
+function buildSelect(cols) {
+  const fields = [];
+  if (cols.idCol)     fields.push(`${cols.idCol} as id`);
+  if (cols.nameCol)   fields.push(`${cols.nameCol} as name`);
+  if (cols.lastCol)   fields.push(`${cols.lastCol} as lastname`);
+  if (cols.emailCol)  fields.push(`${cols.emailCol} as email`);
+  if (cols.statusCol) fields.push(`${cols.statusCol} as status`);
+  if (cols.filasCol)  fields.push(`${cols.filasCol} as filas`);
+  if (cols.perfilCol) fields.push(`${cols.perfilCol} as perfil`);
+  if (!fields.length) fields.push('*');
+  return `SELECT ${fields.join(', ')} FROM users`;
+}
+
+function buildUpsert(cols, data) {
+  const insertCols = [];
+  const values = [];
+  const sets = [];
+  let i = 1;
+
+  if (cols.nameCol && data.name != null)       { insertCols.push(cols.nameCol);   values.push(data.name);     sets.push(`${cols.nameCol}=EXCLUDED.${cols.nameCol}`); }
+  if (cols.lastCol && data.lastname != null)   { insertCols.push(cols.lastCol);   values.push(data.lastname); sets.push(`${cols.lastCol}=EXCLUDED.${cols.lastCol}`); }
+  if (cols.emailCol && data.email != null)     { insertCols.push(cols.emailCol);  values.push(data.email); }
+  if (cols.filasCol && data.filas != null)     { insertCols.push(cols.filasCol);  values.push(data.filas);    sets.push(`${cols.filasCol}=EXCLUDED.${cols.filasCol}`); }
+  if (cols.perfilCol && data.perfil != null)   { insertCols.push(cols.perfilCol); values.push(data.perfil);   sets.push(`${cols.perfilCol}=EXCLUDED.${cols.perfilCol}`); }
+
+  const placeholders = insertCols.map(() => `$${i++}`).join(', ');
+  const conflictKey = cols.emailCol || 'email';
+
+  const text = `
+    INSERT INTO users (${insertCols.join(', ')})
+    VALUES (${placeholders})
+    ON CONFLICT (${conflictKey}) DO UPDATE
+      SET ${sets.join(', ')}
+    RETURNING *
+  `;
+  return { text, values };
+}
+
 async function usersRoutes(fastify, _options) {
-  // ===== Listar =====
+  // Listar
   fastify.get('/', async (req, reply) => {
     try {
-      const { rows } = await req.db.query(
-        `SELECT id, name, lastname, email, status, filas, perfil
-           FROM users
-           ORDER BY name, lastname`
-      );
+      const cols = await detectUserColumns(req);
+      req.log.info({ cols }, '🔎 colunas detectadas (GET /users)');
+      const order = (cols.nameCol && cols.lastCol) ? ` ORDER BY ${cols.nameCol}, ${cols.lastCol}` : '';
+      const sql = buildSelect(cols) + order;
+      const { rows } = await req.db.query(sql);
       return reply.send(rows);
     } catch (err) {
       fastify.log.error(err);
@@ -42,16 +122,15 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // ===== Buscar por email =====
+  // Buscar por email
   fastify.get('/:email', async (req, reply) => {
     const { email } = req.params;
     try {
-      const { rows } = await req.db.query(
-        `SELECT id, name, lastname, email, status, filas, perfil
-           FROM users
-          WHERE email = $1`,
-        [email]
-      );
+      const cols = await detectUserColumns(req);
+      req.log.info({ cols }, '🔎 colunas detectadas (GET /users/:email)');
+      if (!cols.emailCol) return reply.code(500).send({ error: 'Tabela users não possui coluna "email"' });
+      const sql = buildSelect(cols) + ` WHERE ${cols.emailCol} = $1`;
+      const { rows } = await req.db.query(sql, [email]);
       if (rows.length === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
       return reply.send(rows[0]);
     } catch (err) {
@@ -60,21 +139,19 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // ===== Criar (tenant + public + invite externo) =====
+  // Criar (tenant + public + invite)
   fastify.post('/', async (req, reply) => {
     const { name, lastname, email, perfil, filas = [] } = req.body || {};
-    if (!name || !lastname || !email || !perfil) {
-      return reply.code(400).send({ error: 'name, lastname, perfil e email são obrigatórios' });
-    }
+    if (!email || !perfil) return reply.code(400).send({ error: 'email e perfil são obrigatórios' });
 
-    const filasToSave = perfil === 'atendente' ? (Array.isArray(filas) ? filas : []) : [];
     const lowerEmail = String(email).toLowerCase();
+    const filasToSave = Array.isArray(filas) ? filas : [];
 
     try {
       const { subdomain } = req.tenant || {};
       if (!subdomain) return reply.code(400).send({ error: 'tenant não resolvido' });
 
-      // 1) catálogo global -> company_id e slug
+      // 1) catálogo global: company_id e slug em public.companies
       const qTenant = await pool.query(
         `SELECT id AS company_id, slug
            FROM public.companies
@@ -84,87 +161,87 @@ async function usersRoutes(fastify, _options) {
       const tenant = qTenant.rows[0];
       if (!tenant) return reply.code(404).send({ error: 'tenant não encontrado no catálogo' });
 
-      // 2) upsert no schema do tenant
-      const tenantUser = await req.db.tx(async (client) => {
-        const ins = await client.query(
-          `INSERT INTO users (name, lastname, email, filas, perfil)
-           VALUES ($1,$2,$3,$4,$5)
-           ON CONFLICT (email) DO UPDATE
-             SET name = EXCLUDED.name,
-                 lastname = EXCLUDED.lastname,
-                 filas = EXCLUDED.filas,
-                 perfil = EXCLUDED.perfil
-           RETURNING id, name, lastname, email, status, filas, perfil`,
-          [name, lastname, lowerEmail, filasToSave, perfil]
-        );
-        return ins.rows[0];
+      // 2) UPSERT no schema do tenant (colunas dinâmicas)
+      const cols = await detectUserColumns(req);
+      req.log.info({ cols }, '🧩 colunas detectadas (POST /users)');
+      if (!cols.emailCol) return reply.code(500).send({ error: 'Tabela users do tenant não possui coluna "email"' });
+
+      const up = buildUpsert(cols, {
+        name: name ?? null,
+        lastname: lastname ?? null,
+        email: lowerEmail,
+        filas: cols.filasCol ? filasToSave : null,
+        perfil: perfil ?? null,
       });
+      const ins = await req.db.query(up.text, up.values);
+      const u = ins.rows[0] || {};
+      const out = {
+        id:       u[cols.idCol]     ?? u.id     ?? null,
+        name:     u[cols.nameCol]   ?? u.name   ?? null,
+        lastname: u[cols.lastCol]   ?? u.lastname ?? null,
+        email:    u[cols.emailCol]  ?? u.email  ?? lowerEmail,
+        status:   cols.statusCol ? (u[cols.statusCol] ?? u.status ?? null) : null,
+        filas:    cols.filasCol ? (u[cols.filasCol] ?? u.filas ?? []) : [],
+        perfil:   u[cols.perfilCol] ?? u.perfil ?? perfil,
+      };
 
-      // 3) upsert em public.users
-      const upPublic = await pool.query(
-        `INSERT INTO public.users (company_id, email, name, lastname, profile)
-         VALUES ($1,$2,$3,$4,$5)
+      // 3) public.users — **somente** company_id, email, profile
+      await pool.query(
+        `INSERT INTO public.users (company_id, email, profile)
+         VALUES ($1,$2,$3)
          ON CONFLICT (company_id, email) DO UPDATE
-           SET name = COALESCE(EXCLUDED.name, public.users.name),
-               lastname = COALESCE(EXCLUDED.lastname, public.users.lastname),
-               profile = COALESCE(EXCLUDED.profile, public.users.profile),
-               updated_at = NOW()
-         RETURNING id`,
-        [tenant.company_id, lowerEmail, name, lastname, perfil]
+           SET profile = COALESCE(EXCLUDED.profile, public.users.profile),
+               updated_at = NOW()`,
+        [tenant.company_id, lowerEmail, perfil]
       );
-      const publicUserId = upPublic.rows[0]?.id;
 
-      // 4) dispara invite externo
+      // 4) Invite externo
       let invite_sent = false;
       let invite_error = null;
       try {
-        await triggerInvite({
-          email: lowerEmail,
-          companySlug: tenant.slug,
-          profile: perfil,
-          log: fastify.log,
-        });
+        await triggerInvite({ email: lowerEmail, companySlug: tenant.slug, profile: perfil }, fastify.log);
         invite_sent = true;
       } catch (e) {
-        invite_error =
-          e.response?.data?.message || e.message || 'Falha ao enviar invite';
-        fastify.log.error(
-          { invite_error, email: lowerEmail, companySlug: tenant.slug },
-          '❌ Invite falhou'
-        );
+        invite_error = e.response?.data?.message || e.message || 'Falha ao enviar invite';
+        fastify.log.error({ invite_error, email: lowerEmail, companySlug: tenant.slug }, '❌ Invite falhou');
       }
 
-      return reply.code(201).send({
-        ...tenantUser,
-        public_user_id: publicUserId,
-        invite_sent,
-        ...(invite_error ? { invite_error } : {}),
-      });
+      return reply.code(201).send({ ...out, invite_sent, ...(invite_error ? { invite_error } : {}) });
     } catch (err) {
       fastify.log.error(err);
       return reply.code(500).send({ error: 'Erro ao criar atendente' });
     }
   });
 
-  // ===== Atualizar =====
+  // Atualizar (sincroniza public.users: apenas profile)
   fastify.put('/:id', async (req, reply) => {
     const { id } = req.params;
     const { name, lastname, email, perfil, filas } = req.body || {};
-    if (!name || !lastname || !email || !perfil) {
-      return reply.code(400).send({ error: 'Campos inválidos' });
-    }
-
-    const filasToSave = perfil === 'atendente' ? (Array.isArray(filas) ? filas : []) : [];
+    if (!email || !perfil) return reply.code(400).send({ error: 'email e perfil são obrigatórios' });
 
     try {
-      const { rowCount } = await req.db.query(
-        `UPDATE users
-            SET name = $1, lastname = $2, email = $3, filas = $4, perfil = $5
-          WHERE id = $6`,
-        [name, lastname, email, filasToSave, perfil, id]
-      );
-      if (rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+      const cols = await detectUserColumns(req);
+      if (!cols.idCol)    return reply.code(500).send({ error: 'Tabela users não possui coluna "id"' });
+      if (!cols.emailCol) return reply.code(500).send({ error: 'Tabela users não possui coluna "email"' });
 
+      const sets = [];
+      const values = [];
+      let i = 1;
+
+      if (cols.nameCol   && name != null)     { sets.push(`${cols.nameCol}=$${i++}`);   values.push(name); }
+      if (cols.lastCol   && lastname != null) { sets.push(`${cols.lastCol}=$${i++}`);   values.push(lastname); }
+      if (cols.emailCol  && email != null)    { sets.push(`${cols.emailCol}=$${i++}`);  values.push(String(email).toLowerCase()); }
+      if (cols.perfilCol && perfil != null)   { sets.push(`${cols.perfilCol}=$${i++}`); values.push(perfil); }
+      if (cols.filasCol  && Array.isArray(filas)) { sets.push(`${cols.filasCol}=$${i++}`); values.push(filas); }
+
+      if (!sets.length) return reply.code(400).send({ error: 'Nada para atualizar' });
+
+      const sql = `UPDATE users SET ${sets.join(', ')} WHERE ${cols.idCol} = $${i}`;
+      values.push(id);
+      const r = await req.db.query(sql, values);
+      if (r.rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+
+      // sincroniza somente profile em public.users (e email, caso tenha mudado)
       const { subdomain } = req.tenant || {};
       if (subdomain) {
         const qTenant = await pool.query(
@@ -174,14 +251,12 @@ async function usersRoutes(fastify, _options) {
         const companyId = qTenant.rows[0]?.company_id;
         if (companyId) {
           await pool.query(
-            `INSERT INTO public.users (company_id, email, name, lastname, profile)
-             VALUES ($1,$2,$3,$4,$5)
+            `INSERT INTO public.users (company_id, email, profile)
+             VALUES ($1,$2,$3)
              ON CONFLICT (company_id, email) DO UPDATE
-               SET name = COALESCE(EXCLUDED.name, public.users.name),
-                   lastname = COALESCE(EXCLUDED.lastname, public.users.lastname),
-                   profile = COALESCE(EXCLUDED.profile, public.users.profile),
+               SET profile = COALESCE(EXCLUDED.profile, public.users.profile),
                    updated_at = NOW()`,
-            [companyId, String(email).toLowerCase(), name, lastname, perfil]
+            [companyId, String(email).toLowerCase(), perfil]
           );
         }
       }
@@ -193,19 +268,29 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // ===== Excluir =====
+  // Excluir
   fastify.delete('/:id', async (req, reply) => {
     const { id } = req.params;
     try {
-      const check = await req.db.query(`SELECT filas, email FROM users WHERE id = $1`, [id]);
-      if (check.rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+      const cols = await detectUserColumns(req);
+      if (!cols.idCol) return reply.code(500).send({ error: 'Tabela users não possui coluna "id"' });
 
-      const filas = check.rows[0]?.filas || [];
-      if (Array.isArray(filas) && filas.length > 0) {
-        return reply.code(409).send({ error: 'Desvincule as filas antes de excluir o usuário.' });
+      // checa filas vinculadas se existir coluna
+      if (cols.filasCol) {
+        const check = await req.db.query(
+          `SELECT ${cols.filasCol} AS filas, ${cols.emailCol || 'NULL'} AS email
+             FROM users WHERE ${cols.idCol} = $1`,
+          [id]
+        );
+        if (check.rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+
+        const filas = check.rows[0]?.filas || [];
+        if (Array.isArray(filas) && filas.length > 0) {
+          return reply.code(409).send({ error: 'Desvincule as filas antes de excluir o usuário.' });
+        }
       }
 
-      const { rowCount } = await req.db.query(`DELETE FROM users WHERE id = $1`, [id]);
+      const { rowCount } = await req.db.query(`DELETE FROM users WHERE ${cols.idCol} = $1`, [id]);
       if (rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
 
       return reply.send({ success: true });
