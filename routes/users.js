@@ -3,15 +3,13 @@ import axios from 'axios';
 import { pool } from '../services/db.js'; // pool global (public)
 
 // ===== Config da API externa =====
-// Invite: já existia
-const AUTH_API_BASE =
-  process.env.AUTH_API_BASE || 'https://srv-auth.dkdevs.com.br';
 // Token opcional para ambas as chamadas
 const AUTH_API_TOKEN = process.env.AUTH_API_TOKEN || '';
 
 // Delete externo (novo): usa o serviço auth que você expõe em /api/users
 const AUTH_API_BASE = (process.env.AUTH_API_BASE || 'https://srv-auth.dkdevs.com.br').replace(/\/+$/,'');
 const AUTH_DELETE_URL = `${AUTH_API_BASE}/api/users`;
+const INVITE_API_URL = `${AUTH_API_BASE}/api/invite`;
 
 // ---------- helpers HTTP ----------
 async function triggerInvite({ email, companySlug, profile }, log) {
@@ -21,9 +19,9 @@ async function triggerInvite({ email, companySlug, profile }, log) {
   };
   const payload = { email, companySlug, profile };
 
-  log?.info({ payload, url: `${AUTH_API_TOKEN}/api/invite` }, '➡️ Chamando INVITE API');
+  log?.info({ payload, url: INVITE_API_URL }, '➡️ Chamando INVITE API');
 
-  const { data, status } = await axios.post(`${AUTH_API_BASE}/api/invite`, payload, {
+  const { data, status } = await axios.post(INVITE_API_URL, payload, {
     headers,
     timeout: 10_000,
     validateStatus: () => true,
@@ -41,13 +39,13 @@ async function triggerInvite({ email, companySlug, profile }, log) {
 async function triggerExternalDelete({ email, companySlug }, log) {
   const headers = {
     'Content-Type': 'application/json',
-    ...(INVITE_API_TOKEN ? { Authorization: `Bearer ${AUTH_API_TOKEN}` } : {}),
+    ...(AUTH_API_TOKEN ? { Authorization: `Bearer ${AUTH_API_TOKEN}` } : {}),
   };
   const payload = { email, companySlug };
 
-  log?.info({ payload, url: `${AUTH_DELETE_URL}/api/users` }, '➡️ Chamando AUTH DELETE /api/users');
+  log?.info({ payload, url: AUTH_DELETE_URL }, '➡️ Chamando AUTH DELETE /api/users');
 
-  const { data, status } = await axios.delete(AUTH_API_BASE, {
+  const { data, status } = await axios.delete(AUTH_DELETE_URL, {
     headers,
     timeout: 10_000,
     validateStatus: () => true,
