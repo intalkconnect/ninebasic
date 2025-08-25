@@ -4,8 +4,8 @@ import { pool } from '../services/db.js'; // pool global (public)
 
 // ===== Config da API externa =====
 // Invite: já existia
-const AUTH_API_TOKEN =
-  process.env.AUTH_API_TOKEN || 'https://srv-auth.dkdevs.com.br/api/invite';
+const AUTH_API_BASE =
+  process.env.AUTH_API_BASE || 'https://srv-auth.dkdevs.com.br';
 // Token opcional para ambas as chamadas
 const AUTH_API_TOKEN = process.env.AUTH_API_TOKEN || '';
 
