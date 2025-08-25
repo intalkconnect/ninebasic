@@ -50,7 +50,7 @@ export default async function analyticsRoutes(fastify, opts) {
         b.tempo_espera_min
       FROM base b
       JOIN clientes c ON c.user_id = b.user_id
-      LEFT JOIN atendentes a ON a.email::text = b.assigned_to
+      LEFT JOIN users a ON a.email::text = b.assigned_to
       ORDER BY b.created_at;
     `);
 
@@ -544,7 +544,7 @@ fastify.get('/agents/realtime', async (req, reply) => {
           a.filas,
           a.last_seen,
           a.session_id,
-          -- sessão de pausa aberta em hmg.pausa_sessoes (preferida, pois tem reason)
+          -- sessão de pausa aberta em pausa_sessoes (preferida, pois tem reason)
           ps.reason      AS pausa_motivo,
           ps.started_at  AS pausa_inicio,
           CASE
@@ -554,7 +554,7 @@ fastify.get('/agents/realtime', async (req, reply) => {
               THEN EXTRACT(EPOCH FROM (now() - a.pause_started_at))/60.0
             ELSE NULL
           END AS pausa_duracao_min
-        FROM hmg.atendentes a
+        FROM users a
         LEFT JOIN hmg.pausa_sessoes ps
           ON ps.email = a.email AND ps.ended_at IS NULL
       ),
