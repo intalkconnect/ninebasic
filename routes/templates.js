@@ -1,15 +1,11 @@
 // server/routes/templates.js
-// (sem import de node-fetch; usa globalThis.fetch do Node 18+)
+// Node 18+: usa globalThis.fetch
+import { pool } from '../services/db.js'; // pool global (schema public)
 
-/**
- * Plugin Fastify (prefix-friendly).
- * Registre com: fastify.register(templatesRoutes, { prefix: '/api/v1/templates' })
- */
 async function templatesRoutes(fastify, _opts) {
+  // ====== ENV (globais) ======
   const GV = process.env.GRAPH_VERSION || process.env.GRAPH_VER || 'v23.0';
   const GRAPH = `https://graph.facebook.com/${GV}`;
-  const BUS_ID = process.env.YOUR_BUSINESS_ID;
-  const WABA_ENV = process.env.WABA_ID; // opcional
   const TOKEN =
     process.env.WHATSAPP_TOKEN ||
     process.env.SYSTEM_USER_TOKEN ||
@@ -18,8 +14,6 @@ async function templatesRoutes(fastify, _opts) {
   const fail = (reply, code, msg, err) =>
     reply.code(code).send({
       error: msg,
-      // inclui detalhes se vierem (útil para depurar chamadas à Graph),
-      // mas não depende de NODE_ENV
       details: err ? String(err?.message || err) : undefined,
     });
 
@@ -28,18 +22,34 @@ async function templatesRoutes(fastify, _opts) {
     return { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' };
   };
 
-  async function resolveWabaId() {
-    if (WABA_ENV) return WABA_ENV;
-    if (!BUS_ID) throw new Error('Env YOUR_BUSINESS_ID ausente para descobrir o WABA.');
-    const r = await fetch(`${GRAPH}/${BUS_ID}/owned_whatsapp_business_accounts?limit=1`, { headers: graphHeaders() });
-    const j = await r.json();
-    if (!r.ok) throw new Error(JSON.stringify(j));
-    const id = j?.data?.[0]?.id;
-    if (!id) throw new Error('Nenhum WABA encontrado para o BUSINESS_ID informado.');
-    return id;
+  // -------- helpers multi-tenant --------
+  function extractSubdomain(req) {
+    const fromTenant = req?.tenant?.subdomain;
+    if (fromTenant) return String(fromTenant).toLowerCase();
+    const host = String(req.headers?.host || '').toLowerCase();
+    const parts = host.split(':')[0].split('.');
+    if (parts.length >= 3) return parts[0];
+    return null;
   }
 
-  // GET / -> lista com filtros opcionais ?status= & ?q=
+  async function resolveWabaId(req) {
+    const sub = extractSubdomain(req);
+    if (!sub) throw new Error('Não foi possível resolver o subdomínio do tenant.');
+    const { rows } = await pool.query(
+      `SELECT whatsapp_external_id
+         FROM public.tenants
+        WHERE slug = $1
+        LIMIT 1`,
+      [sub]
+    );
+    const waba = rows[0]?.whatsapp_external_id || null;
+    if (!waba) throw new Error(`Tenant "${sub}" não possui whatsapp_external_id configurado em public.tenants.`);
+    return waba;
+  }
+
+  // ===== Rotas locais (DB do tenant) =====
+
+  // GET / -> lista local com filtros opcionais ?status= & ?q=
   fastify.get('/', async (req, reply) => {
     try {
       const { status, q } = req.query || {};
@@ -59,7 +69,6 @@ async function templatesRoutes(fastify, _opts) {
          ORDER BY updated_at DESC, created_at DESC
          LIMIT 500
       `;
-
       const { rows } = await req.db.query(sql, params);
       return reply.send(rows);
     } catch (error) {
@@ -107,7 +116,9 @@ async function templatesRoutes(fastify, _opts) {
     }
   });
 
-  // POST /:id/submit -> submete direto à Graph (sem filas)
+  // ===== Rotas que falam com a Graph =====
+
+  // POST /:id/submit -> submete na Graph
   fastify.post('/:id/submit', async (req, reply) => {
     try {
       const { id } = req.params;
@@ -118,7 +129,7 @@ async function templatesRoutes(fastify, _opts) {
         return reply.code(409).send({ error: 'Apenas templates draft/rejected podem ser submetidos' });
       }
 
-      // monta components para Graph
+      // monta components
       const components = [];
       if (t.header_type && t.header_type !== 'NONE') {
         const header = { type: 'HEADER', format: t.header_type }; // TEXT | IMAGE | VIDEO | DOCUMENT
@@ -131,7 +142,7 @@ async function templatesRoutes(fastify, _opts) {
         components.push({ type: 'BUTTONS', buttons: t.buttons });
       }
 
-      const WABA = await resolveWabaId();
+      const WABA = await resolveWabaId(req);
       const res = await fetch(`${GRAPH}/${WABA}/message_templates`, {
         method: 'POST',
         headers: graphHeaders(),
@@ -177,8 +188,9 @@ async function templatesRoutes(fastify, _opts) {
       if (t.provider_id) {
         url = `${GRAPH}/${t.provider_id}?fields=name,language,category,status,rejected_reason`;
       } else {
-        const WABA = await resolveWabaId();
-        url = `${GRAPH}/${WABA}/message_templates?name=${encodeURIComponent(t.name)}&language=${encodeURIComponent(t.language_code)}`;
+        const WABA = await resolveWabaId(req);
+        const lang = (t.language_code || 'pt_BR').replace('-', '_'); // ✅ underscore
+        url = `${GRAPH}/${WABA}/message_templates?name=${encodeURIComponent(t.name)}&language=${encodeURIComponent(lang)}`;
       }
 
       const res = await fetch(url, { headers: graphHeaders() });
@@ -204,6 +216,107 @@ async function templatesRoutes(fastify, _opts) {
     } catch (error) {
       fastify.log.error('Erro ao sincronizar template:', error);
       return fail(reply, 500, 'Erro interno ao sincronizar template', error);
+    }
+  });
+
+  // (opcional) GET /provider -> lista direto da Graph (útil pra ver hello_world sem importar)
+  fastify.get('/provider', async (req, reply) => {
+    try {
+      const { status, q, limit = 200 } = req.query || {};
+      const WABA = await resolveWabaId(req);
+
+      const fields = 'name,language,category,status,rejected_reason,quality_score,components';
+      let url = `${GRAPH}/${WABA}/message_templates?fields=${encodeURIComponent(fields)}&limit=100`;
+      if (status) url += `&status=${encodeURIComponent(String(status).toUpperCase())}`;
+
+      const out = [];
+      while (url && out.length < Number(limit)) {
+        const res = await fetch(url, { headers: graphHeaders() });
+        const data = await res.json();
+        if (!res.ok) return fail(reply, 502, 'Falha ao consultar Graph API', data?.error || data);
+
+        let page = Array.isArray(data?.data) ? data.data : [];
+        const qnorm = (q || '').toLowerCase();
+        if (qnorm) {
+          page = page.filter(t =>
+            (t?.name || '').toLowerCase().includes(qnorm) ||
+            (t?.components || []).some(c => c?.type === 'BODY' && (c?.text || '').toLowerCase().includes(qnorm))
+          );
+        }
+
+        out.push(...page);
+        url = data?.paging?.next || null;
+      }
+
+      return reply.send(out.slice(0, Number(limit)));
+    } catch (error) {
+      fastify.log.error('Erro ao listar templates (provider):', error);
+      return fail(reply, 500, 'Erro interno ao listar templates (provider)', error);
+    }
+  });
+
+  // (opcional) POST /sync-all -> importa/atualiza todos para o banco local
+  fastify.post('/sync-all', async (req, reply) => {
+    try {
+      const { upsert = true } = req.body || {};
+      const WABA = await resolveWabaId(req);
+
+      const fields = 'name,language,category,status,rejected_reason,components';
+      let url = `${GRAPH}/${WABA}/message_templates?fields=${encodeURIComponent(fields)}&limit=100`;
+      const collected = [];
+
+      while (url) {
+        const res = await fetch(url, { headers: graphHeaders() });
+        const data = await res.json();
+        if (!res.ok) return fail(reply, 502, 'Falha ao consultar Graph API', data?.error || data);
+        collected.push(...(Array.isArray(data?.data) ? data.data : []));
+        url = data?.paging?.next || null;
+      }
+
+      for (const t of collected) {
+        const body = (t.components || []).find(c => c.type === 'BODY');
+        const header = (t.components || []).find(c => c.type === 'HEADER');
+        const footer = (t.components || []).find(c => c.type === 'FOOTER');
+        const buttons = (t.components || []).find(c => c.type === 'BUTTONS');
+
+        if (upsert) {
+          await req.db.query(
+            `
+            INSERT INTO templates (name, language_code, category, header_type, header_text, body_text, footer_text, buttons, status, provider_id, reject_reason, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
+            ON CONFLICT (name, language_code) DO UPDATE
+               SET category=EXCLUDED.category,
+                   header_type=EXCLUDED.header_type,
+                   header_text=EXCLUDED.header_text,
+                   body_text=EXCLUDED.body_text,
+                   footer_text=EXCLUDED.footer_text,
+                   buttons=EXCLUDED.buttons,
+                   status=EXCLUDED.status,
+                   provider_id=EXCLUDED.provider_id,
+                   reject_reason=EXCLUDED.reject_reason,
+                   updated_at=NOW()
+            `,
+            [
+              t.name,
+              (t.language || 'pt_BR').replace('-', '_'),
+              t.category || 'UTILITY',
+              header?.format || (header ? 'TEXT' : 'NONE'),
+              header?.text || null,
+              body?.text || null,
+              footer?.text || null,
+              buttons?.buttons || null,
+              (t.status || '').toLowerCase(),
+              t.id || null,
+              t.rejected_reason || null
+            ]
+          );
+        }
+      }
+
+      return reply.send({ ok: true, imported: collected.length });
+    } catch (error) {
+      fastify.log.error('Erro no sync-all:', error);
+      return fail(reply, 500, 'Erro interno ao sincronizar todos os templates', error);
     }
   });
 }
