@@ -1,5 +1,5 @@
 // server/routes/templates.js
-// Node 18+: usa globalThis.fetch
+// Node 18+: usa globalThis.fetch (sem node-fetch)
 import { pool } from '../services/db.js'; // pool global (schema public)
 
 async function templatesRoutes(fastify, _opts) {
@@ -11,6 +11,7 @@ async function templatesRoutes(fastify, _opts) {
     process.env.SYSTEM_USER_TOKEN ||
     process.env.SYSTEM_USER_ADMIN_TOKEN;
 
+  // ---------- helpers genéricos ----------
   const fail = (reply, code, msg, err) =>
     reply.code(code).send({
       error: msg,
@@ -18,33 +19,83 @@ async function templatesRoutes(fastify, _opts) {
     });
 
   const graphHeaders = () => {
-    if (!TOKEN) throw new Error('Token Meta ausente: defina WHATSAPP_TOKEN (ou SYSTEM_USER_TOKEN / SYSTEM_USER_ADMIN_TOKEN).');
+    if (!TOKEN) {
+      throw new Error(
+        'Token Meta ausente: defina WHATSAPP_TOKEN (ou SYSTEM_USER_TOKEN / SYSTEM_USER_ADMIN_TOKEN).'
+      );
+    }
     return { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' };
   };
 
-  // -------- helpers multi-tenant --------
   function extractSubdomain(req) {
     const fromTenant = req?.tenant?.subdomain;
     if (fromTenant) return String(fromTenant).toLowerCase();
-    const host = String(req.headers?.host || '').toLowerCase();
+
+    const host = String(req.headers?.host || '').toLowerCase(); // ex.: acme.suaapp.com
     const parts = host.split(':')[0].split('.');
-    if (parts.length >= 3) return parts[0];
+    if (parts.length >= 3) return parts[0]; // "acme"
     return null;
   }
 
   async function resolveWabaId(req) {
     const sub = extractSubdomain(req);
     if (!sub) throw new Error('Não foi possível resolver o subdomínio do tenant.');
+
+    // case-insensitive por segurança
     const { rows } = await pool.query(
-      `SELECT whatsapp_external_id
-         FROM public.tenants
-        WHERE subdomain = $1
-        LIMIT 1`,
+      `
+      SELECT whatsapp_external_id
+        FROM public.tenants
+       WHERE LOWER(subdomain) = LOWER($1)
+       LIMIT 1
+      `,
       [sub]
     );
+
     const waba = rows[0]?.whatsapp_external_id || null;
-    if (!waba) throw new Error(`Tenant "${sub}" não possui whatsapp_external_id configurado em public.tenants.`);
+    if (!waba) {
+      throw new Error(
+        `Tenant "${sub}" não possui whatsapp_external_id configurado em public.tenants.`
+      );
+    }
     return waba;
+  }
+
+  // verifica se existe unique index/constraint para (name, language_code)
+  async function hasUniqueOnNameLang(req) {
+    const q = `
+      SELECT 1
+        FROM pg_index i
+        JOIN pg_class t  ON t.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+       WHERE i.indisunique
+         AND n.nspname = current_schema()
+         AND t.relname = 'templates'
+         AND EXISTS (
+               SELECT 1
+                 FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                 JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+                WHERE a.attname IN ('name','language_code')
+              )
+    `;
+    const r = await req.db.query(q);
+    // Heurística: se há unique que inclui as colunas, assumimos compatível
+    return r.rowCount > 0;
+  }
+
+  async function columnExists(req, table, column) {
+    const r = await req.db.query(
+      `
+      SELECT 1
+        FROM information_schema.columns
+       WHERE table_schema = current_schema()
+         AND table_name   = $1
+         AND column_name  = $2
+      LIMIT 1
+      `,
+      [table, column]
+    );
+    return r.rowCount > 0;
   }
 
   // ===== Rotas locais (DB do tenant) =====
@@ -56,10 +107,15 @@ async function templatesRoutes(fastify, _opts) {
       const params = [];
       const where = [];
 
-      if (status) { params.push(status); where.push(`status = $${params.length}`); }
+      if (status) {
+        params.push(status);
+        where.push(`status = $${params.length}`);
+      }
       if (q) {
         params.push(`%${q}%`);
-        where.push(`(LOWER(name) LIKE LOWER($${params.length}) OR LOWER(body_text) LIKE LOWER($${params.length}))`);
+        where.push(
+          `(LOWER(name) LIKE LOWER($${params.length}) OR LOWER(body_text) LIKE LOWER($${params.length}))`
+        );
       }
 
       const sql = `
@@ -80,9 +136,15 @@ async function templatesRoutes(fastify, _opts) {
   // POST / -> cria rascunho local
   fastify.post('/', async (req, reply) => {
     const {
-      name, language_code = 'pt_BR', category = 'UTILITY',
-      header_type = 'NONE', header_text = null,
-      body_text, footer_text = null, buttons = null, example = null,
+      name,
+      language_code = 'pt_BR',
+      category = 'UTILITY',
+      header_type = 'NONE',
+      header_text = null,
+      body_text,
+      footer_text = null,
+      buttons = null,
+      example = null,
     } = req.body || {};
 
     if (!name || !body_text) {
@@ -91,10 +153,12 @@ async function templatesRoutes(fastify, _opts) {
 
     try {
       const { rows } = await req.db.query(
-        `INSERT INTO templates
-           (name, language_code, category, header_type, header_text, body_text, footer_text, buttons, example, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'draft')
-         RETURNING *`,
+        `
+        INSERT INTO templates
+           (name, language_code, category, header_type, header_text, body_text, footer_text, buttons, example, status, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'draft',NOW(),NOW())
+         RETURNING *
+        `,
         [name, language_code, category, header_type, header_text, body_text, footer_text, buttons, example]
       );
       return reply.code(201).send(rows[0]);
@@ -160,12 +224,14 @@ async function templatesRoutes(fastify, _opts) {
       }
 
       await req.db.query(
-        `UPDATE templates
-            SET status='submitted',
-                provider_id=$2,
-                reject_reason=NULL,
-                updated_at=NOW()
-          WHERE id=$1`,
+        `
+        UPDATE templates
+           SET status='submitted',
+               provider_id=$2,
+               reject_reason=NULL,
+               updated_at=NOW()
+         WHERE id=$1
+        `,
         [id, data?.id || null]
       );
 
@@ -176,7 +242,7 @@ async function templatesRoutes(fastify, _opts) {
     }
   });
 
-  // POST /:id/sync -> sincroniza status com a Graph
+  // POST /:id/sync -> sincroniza status com a Graph (e qualidade, se coluna existir)
   fastify.post('/:id/sync', async (req, reply) => {
     try {
       const { id } = req.params;
@@ -184,13 +250,21 @@ async function templatesRoutes(fastify, _opts) {
       const t = rows[0];
       if (!t) return reply.code(404).send({ error: 'Template não encontrado' });
 
+      const hasQuality = await columnExists(req, 'templates', 'quality_score');
+
+      const fields = 'name,language,category,status,rejected_reason,quality_score';
       let url;
       if (t.provider_id) {
-        url = `${GRAPH}/${t.provider_id}?fields=name,language,category,status,rejected_reason`;
+        url = `${GRAPH}/${t.provider_id}?fields=${encodeURIComponent(fields)}`;
       } else {
         const WABA = await resolveWabaId(req);
-        const lang = (t.language_code || 'pt_BR').replace('-', '_'); // ✅ underscore
-        url = `${GRAPH}/${WABA}/message_templates?name=${encodeURIComponent(t.name)}&language=${encodeURIComponent(lang)}`;
+        const lang = (t.language_code || 'pt_BR').replace('-', '_');
+        url =
+          `${GRAPH}/${WABA}/message_templates` +
+          `?name=${encodeURIComponent(t.name)}` +
+          `&language=${encodeURIComponent(lang)}` +
+          `&fields=${encodeURIComponent(fields)}` +
+          `&limit=1`;
       }
 
       const res = await fetch(url, { headers: graphHeaders() });
@@ -199,27 +273,44 @@ async function templatesRoutes(fastify, _opts) {
 
       const rawStatus = (data?.status || data?.data?.[0]?.status || '').toUpperCase();
       const rawReason = data?.rejected_reason || data?.data?.[0]?.rejected_reason || null;
+      const rawQuality = data?.quality_score || data?.data?.[0]?.quality_score || null;
 
       const map = { APPROVED: 'approved', REJECTED: 'rejected', IN_REVIEW: 'submitted', PENDING: 'submitted' };
       const status = map[rawStatus] || t.status;
 
-      await req.db.query(
-        `UPDATE templates
-            SET status=$2,
-                reject_reason=$3,
-                updated_at=NOW()
-          WHERE id=$1`,
-        [id, status, rawReason]
-      );
+      if (hasQuality) {
+        await req.db.query(
+          `
+          UPDATE templates
+             SET status=$2,
+                 reject_reason=$3,
+                 quality_score=$4,
+                 updated_at=NOW()
+           WHERE id=$1
+          `,
+          [id, status, rawReason, rawQuality]
+        );
+      } else {
+        await req.db.query(
+          `
+          UPDATE templates
+             SET status=$2,
+                 reject_reason=$3,
+                 updated_at=NOW()
+           WHERE id=$1
+          `,
+          [id, status, rawReason]
+        );
+      }
 
-      return reply.send({ ok: true, status, provider: data });
+      return reply.send({ ok: true, status, quality_score: rawQuality ?? null, provider: data });
     } catch (error) {
       fastify.log.error('Erro ao sincronizar template:', error);
       return fail(reply, 500, 'Erro interno ao sincronizar template', error);
     }
   });
 
-  // (opcional) GET /provider -> lista direto da Graph (útil pra ver hello_world sem importar)
+  // GET /provider -> lista direto da Graph (útil pra ver hello_world sem importar)
   fastify.get('/provider', async (req, reply) => {
     try {
       const { status, q, limit = 200 } = req.query || {};
@@ -238,9 +329,12 @@ async function templatesRoutes(fastify, _opts) {
         let page = Array.isArray(data?.data) ? data.data : [];
         const qnorm = (q || '').toLowerCase();
         if (qnorm) {
-          page = page.filter(t =>
-            (t?.name || '').toLowerCase().includes(qnorm) ||
-            (t?.components || []).some(c => c?.type === 'BODY' && (c?.text || '').toLowerCase().includes(qnorm))
+          page = page.filter(
+            (t) =>
+              (t?.name || '').toLowerCase().includes(qnorm) ||
+              (t?.components || []).some(
+                (c) => c?.type === 'BODY' && (c?.text || '').toLowerCase().includes(qnorm)
+              )
           );
         }
 
@@ -255,13 +349,13 @@ async function templatesRoutes(fastify, _opts) {
     }
   });
 
-  // (opcional) POST /sync-all -> importa/atualiza todos para o banco local
+  // POST /sync-all -> importa/atualiza todos para o banco local
   fastify.post('/sync-all', async (req, reply) => {
     try {
       const { upsert = true } = req.body || {};
       const WABA = await resolveWabaId(req);
 
-      const fields = 'name,language,category,status,rejected_reason,components';
+      const fields = 'name,language,category,status,rejected_reason,quality_score,components';
       let url = `${GRAPH}/${WABA}/message_templates?fields=${encodeURIComponent(fields)}&limit=100`;
       const collected = [];
 
@@ -273,43 +367,158 @@ async function templatesRoutes(fastify, _opts) {
         url = data?.paging?.next || null;
       }
 
-      for (const t of collected) {
-        const body = (t.components || []).find(c => c.type === 'BODY');
-        const header = (t.components || []).find(c => c.type === 'HEADER');
-        const footer = (t.components || []).find(c => c.type === 'FOOTER');
-        const buttons = (t.components || []).find(c => c.type === 'BUTTONS');
+      // capacidades do schema corrente
+      const hasQuality = await columnExists(req, 'templates', 'quality_score');
+      const canConflict = await hasUniqueOnNameLang(req);
 
-        if (upsert) {
-          await req.db.query(
-            `
-            INSERT INTO templates (name, language_code, category, header_type, header_text, body_text, footer_text, buttons, status, provider_id, reject_reason, created_at, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
+      for (const t of collected) {
+        const body = (t.components || []).find((c) => c.type === 'BODY');
+        const header = (t.components || []).find((c) => c.type === 'HEADER');
+        const footer = (t.components || []).find((c) => c.type === 'FOOTER');
+        const buttons = (t.components || []).find((c) => c.type === 'BUTTONS');
+
+        const payload = {
+          name: t.name,
+          language_code: (t.language || 'pt_BR').replace('-', '_'),
+          category: t.category || 'UTILITY',
+          header_type: header?.format || (header ? 'TEXT' : 'NONE'),
+          header_text: header?.text || null,
+          body_text: body?.text || null,
+          footer_text: footer?.text || null,
+          buttons: buttons?.buttons || null,
+          status: (t.status || '').toLowerCase(),
+          provider_id: t.id || null,
+          reject_reason: t.rejected_reason || null,
+          quality_score: t.quality_score || null,
+        };
+
+        if (!upsert) continue;
+
+        if (canConflict) {
+          // ---------- caminho INSERT ... ON CONFLICT ----------
+          const baseCols =
+            'name, language_code, category, header_type, header_text, body_text, footer_text, buttons, status, provider_id, reject_reason';
+          const cols = hasQuality ? `${baseCols}, quality_score, created_at, updated_at` : `${baseCols}, created_at, updated_at`;
+
+          const values = [
+            payload.name,
+            payload.language_code,
+            payload.category,
+            payload.header_type,
+            payload.header_text,
+            payload.body_text,
+            payload.footer_text,
+            payload.buttons,
+            payload.status,
+            payload.provider_id,
+            payload.reject_reason,
+          ];
+          if (hasQuality) values.push(payload.quality_score);
+
+          const placeholders = values.map((_, i) => `$${i + 1}`).join(', ');
+
+          const setBase = `
+              category=EXCLUDED.category,
+              header_type=EXCLUDED.header_type,
+              header_text=EXCLUDED.header_text,
+              body_text=EXCLUDED.body_text,
+              footer_text=EXCLUDED.footer_text,
+              buttons=EXCLUDED.buttons,
+              status=EXCLUDED.status,
+              provider_id=EXCLUDED.provider_id,
+              reject_reason=EXCLUDED.reject_reason
+          `;
+          const setClause = hasQuality
+            ? `${setBase}, quality_score=EXCLUDED.quality_score, updated_at=NOW()`
+            : `${setBase}, updated_at=NOW()`;
+
+          const sql = `
+            INSERT INTO templates (${cols})
+            VALUES (${placeholders}${hasQuality ? '' : ''})
             ON CONFLICT (name, language_code) DO UPDATE
-               SET category=EXCLUDED.category,
-                   header_type=EXCLUDED.header_type,
-                   header_text=EXCLUDED.header_text,
-                   body_text=EXCLUDED.body_text,
-                   footer_text=EXCLUDED.footer_text,
-                   buttons=EXCLUDED.buttons,
-                   status=EXCLUDED.status,
-                   provider_id=EXCLUDED.provider_id,
-                   reject_reason=EXCLUDED.reject_reason,
-                   updated_at=NOW()
-            `,
-            [
-              t.name,
-              (t.language || 'pt_BR').replace('-', '_'),
-              t.category || 'UTILITY',
-              header?.format || (header ? 'TEXT' : 'NONE'),
-              header?.text || null,
-              body?.text || null,
-              footer?.text || null,
-              buttons?.buttons || null,
-              (t.status || '').toLowerCase(),
-              t.id || null,
-              t.rejected_reason || null
-            ]
-          );
+              SET ${setClause}
+          `;
+
+          await req.db.query(sql, values);
+        } else {
+          // ---------- fallback UPDATE → INSERT ----------
+          const updValues = [
+            payload.category,
+            payload.header_type,
+            payload.header_text,
+            payload.body_text,
+            payload.footer_text,
+            payload.buttons,
+            payload.status,
+            payload.provider_id,
+            payload.reject_reason,
+          ];
+          let updSet = `
+              category=$1,
+              header_type=$2,
+              header_text=$3,
+              body_text=$4,
+              footer_text=$5,
+              buttons=$6,
+              status=$7,
+              provider_id=$8,
+              reject_reason=$9,
+              updated_at=NOW()
+          `;
+          if (hasQuality) {
+            updSet = `
+              category=$1,
+              header_type=$2,
+              header_text=$3,
+              body_text=$4,
+              footer_text=$5,
+              buttons=$6,
+              status=$7,
+              provider_id=$8,
+              reject_reason=$9,
+              quality_score=$10,
+              updated_at=NOW()
+            `;
+            updValues.push(payload.quality_score);
+          }
+          updValues.push(payload.name, payload.language_code); // WHERE
+
+          const updSql = `
+            UPDATE templates
+               SET ${updSet}
+             WHERE name=$${updValues.length - 1} AND language_code=$${updValues.length}
+          `;
+          const r = await req.db.query(updSql, updValues);
+
+          if (r.rowCount === 0) {
+            const insValues = [
+              payload.name,
+              payload.language_code,
+              payload.category,
+              payload.header_type,
+              payload.header_text,
+              payload.body_text,
+              payload.footer_text,
+              payload.buttons,
+              payload.status,
+              payload.provider_id,
+              payload.reject_reason,
+            ];
+            const insColsBase =
+              'name, language_code, category, header_type, header_text, body_text, footer_text, buttons, status, provider_id, reject_reason';
+            let insCols = `${insColsBase}, created_at, updated_at`;
+            if (hasQuality) {
+              insCols = `${insColsBase}, quality_score, created_at, updated_at`;
+              insValues.push(payload.quality_score);
+            }
+            const ph = insValues.map((_, i) => `$${i + 1}`).join(', ');
+
+            const insSql = `
+              INSERT INTO templates (${insCols})
+              VALUES (${ph}, NOW(), NOW())
+            `;
+            await req.db.query(insSql, insValues);
+          }
         }
       }
 
