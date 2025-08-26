@@ -38,7 +38,7 @@ async function templatesRoutes(fastify, _opts) {
     const { rows } = await pool.query(
       `SELECT whatsapp_external_id
          FROM public.tenants
-        WHERE slug = $1
+        WHERE subdomain = $1
         LIMIT 1`,
       [sub]
     );
