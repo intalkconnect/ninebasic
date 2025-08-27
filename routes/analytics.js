@@ -610,4 +610,42 @@ fastify.get('/agents/realtime', async (req, reply) => {
   }
 });
 
+// GET /analytics/metrics/new-clients?group=day&from&to
+fastify.get('/metrics/new-clients', async (req, reply) => {
+  try {
+    const q = req.query || {};
+    const group = ['day','month'].includes(q.group) ? q.group : 'day';
+    const { has, fromISO, toISO } = parseWindow(q);
+
+    const params = [];
+    let whereSQL = '';
+    if (has) {
+      params.push(fromISO, toISO);
+      whereSQL = `WHERE c.created_at >= $1 AND c.created_at < $2`;
+    }
+
+    const groupExpr = group === 'month'
+      ? `DATE_TRUNC('month', c.created_at)`
+      : `DATE_TRUNC('day', c.created_at)`;
+
+    const { rows } = await req.db.query(
+      `
+      SELECT ${groupExpr} AS group_key,
+             COUNT(*) AS total
+      FROM clientes c
+      ${whereSQL}
+      GROUP BY 1
+      ORDER BY 1;
+      `,
+      params
+    );
+
+    return { group_by: group, metrics: rows };
+  } catch (err) {
+    req.log.error(err, '[analytics] /metrics/new-clients erro');
+    return reply.status(500).send({ error: 'Erro em novos clientes' });
+  }
+});
+
+  
 }
