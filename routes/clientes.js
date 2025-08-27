@@ -4,7 +4,6 @@ function isValidUserId(userId) {
 
 async function clientesRoutes(fastify, options) {
 
-  async function clientesRoutes(fastify) {
   // GET /clientes?page=&page_size=&q=
   fastify.get('/', async (req, reply) => {
     const { q = '', page = 1, page_size = 10 } = req.query || {};
