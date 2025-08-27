@@ -3,6 +3,56 @@ function isValidUserId(userId) {
 }
 
 async function clientesRoutes(fastify, options) {
+
+  async function clientesRoutes(fastify) {
+  // GET /clientes?page=&page_size=&q=
+  fastify.get('/', async (req, reply) => {
+    const { q = '', page = 1, page_size = 10 } = req.query || {};
+
+    // page_size permitido: 10,20,30,40
+    const allowed = new Set([10, 20, 30, 40]);
+    const pageSize = allowed.has(Number(page_size)) ? Number(page_size) : 10;
+    const pageNum  = Math.max(1, Number(page) || 1);
+    const offset   = (pageNum - 1) * pageSize;
+
+    const paramsWhere = [];
+    const where = [];
+
+    if (q) {
+      paramsWhere.push(`%${q}%`);
+      where.push(`(
+        LOWER(COALESCE(c.name,''))    LIKE LOWER($${paramsWhere.length})
+        OR LOWER(COALESCE(c.user_id,'')) LIKE LOWER($${paramsWhere.length})
+        OR LOWER(COALESCE(c.phone,''))   LIKE LOWER($${paramsWhere.length})
+      )`);
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const sqlCount = `SELECT COUNT(*)::bigint AS total FROM clientes c ${whereSql}`;
+    const sqlList  = `
+      SELECT c.user_id, c.name, c.phone, c.channel, c.created_at, c.updated_at
+        FROM clientes c
+        ${whereSql}
+       ORDER BY c.updated_at DESC NULLS LAST, c.created_at DESC
+       LIMIT $${paramsWhere.length + 1}
+      OFFSET $${paramsWhere.length + 2}
+    `;
+
+    try {
+      const countRes = await req.db.query(sqlCount, paramsWhere);
+      const total = Number(countRes.rows?.[0]?.total || 0);
+
+      const listRes = await req.db.query(sqlList, [...paramsWhere, pageSize, offset]);
+      const data = listRes.rows || [];
+
+      const total_pages = Math.max(1, Math.ceil(total / pageSize));
+      return reply.send({ data, page: pageNum, page_size: pageSize, total, total_pages });
+    } catch (error) {
+      req.log.error('Erro ao listar clientes:', error);
+      return reply.code(500).send({ error: 'Erro interno ao listar clientes' });
+    }
+  });
+    
   // GET /clientes/:user_id
   fastify.get('/:user_id', async (req, reply) => {
   const { user_id } = req.params;
