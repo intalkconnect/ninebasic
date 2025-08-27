@@ -260,6 +260,83 @@ fastify.put('/:user_id', async (req, reply) => {
   }
 });
 
+  // GET /tickets/history?page=&page_size=&q=&from=&to=
+// Lista tickets com status 'closed' com busca e filtro por data (fechamento).
+fastify.get('/history', async (req, reply) => {
+  const { q = '', page = 1, page_size = 10, from = '', to = '' } = req.query || {};
+
+  const allowed = new Set([10, 20, 30, 40]);
+  const pageSize = allowed.has(Number(page_size)) ? Number(page_size) : 10;
+  const pageNum  = Math.max(1, Number(page) || 1);
+  const offset   = (pageNum - 1) * pageSize;
+
+  const where = [`status = 'closed'`];
+  const params = [];
+
+  // Busca fulltext simples
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`(
+      LOWER(COALESCE(ticket_number::text,'')) LIKE LOWER($${params.length})
+      OR LOWER(COALESCE(user_id,''))          LIKE LOWER($${params.length})
+      OR LOWER(COALESCE(fila,''))             LIKE LOWER($${params.length})
+      OR LOWER(COALESCE(assigned_to,''))      LIKE LOWER($${params.length})
+    )`);
+  }
+
+  // Filtro de data pelo momento do fechamento (updated_at)
+  // Aceita from/to como YYYY-MM-DD (timezone do DB)
+  let fromIdx, toIdx;
+  if (from) {
+    params.push(from + ' 00:00:00');
+    fromIdx = params.length;
+    where.push(`updated_at >= $${fromIdx}`);
+  }
+  if (to) {
+    params.push(to + ' 23:59:59.999');
+    toIdx = params.length;
+    where.push(`updated_at <= $${toIdx}`);
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+  const sqlCount = `SELECT COUNT(*)::bigint AS total FROM tickets ${whereSql}`;
+  const sqlList  = `
+    SELECT
+      id,
+      ticket_number,
+      user_id,
+      fila,
+      assigned_to,
+      created_at,
+      updated_at
+    FROM tickets
+    ${whereSql}
+    ORDER BY updated_at DESC NULLS LAST, id DESC
+    LIMIT $${params.length + 1}
+    OFFSET $${params.length + 2}
+  `;
+
+  try {
+    const rCount = await req.db.query(sqlCount, params);
+    const total = Number(rCount.rows?.[0]?.total || 0);
+
+    const rList = await req.db.query(sqlList, [...params, pageSize, offset]);
+    const data = rList.rows || [];
+
+    return reply.send({
+      data,
+      page: pageNum,
+      page_size: pageSize,
+      total,
+      total_pages: Math.max(1, Math.ceil(total / pageSize)),
+    });
+  } catch (err) {
+    req.log.error('Erro em GET /tickets/history:', err);
+    return reply.code(500).send({ error: 'Erro interno ao listar histórico' });
+  }
+});
+
 
 }
 
