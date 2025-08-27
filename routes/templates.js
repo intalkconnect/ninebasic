@@ -1,5 +1,5 @@
 // server/routes/templates.js
-// Node 18+ (usa globalThis.fetch)
+// Node 18+: usa globalThis.fetch
 import { pool } from '../services/db.js'; // pool global (schema public)
 
 async function templatesRoutes(fastify, _opts) {
@@ -11,6 +11,7 @@ async function templatesRoutes(fastify, _opts) {
     process.env.SYSTEM_USER_TOKEN ||
     process.env.SYSTEM_USER_ADMIN_TOKEN;
 
+  // ---------- helpers ----------
   const fail = (reply, code, msg, err) =>
     reply.code(code).send({
       error: msg,
@@ -18,11 +19,14 @@ async function templatesRoutes(fastify, _opts) {
     });
 
   const graphHeaders = () => {
-    if (!TOKEN) throw new Error('Token Meta ausente: defina WHATSAPP_TOKEN (ou SYSTEM_USER_TOKEN / SYSTEM_USER_ADMIN_TOKEN).');
+    if (!TOKEN)
+      throw new Error(
+        'Token Meta ausente: defina WHATSAPP_TOKEN (ou SYSTEM_USER_TOKEN / SYSTEM_USER_ADMIN_TOKEN).'
+      );
     return { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' };
   };
 
-  // -------- helpers multi-tenant --------
+  // subdomínio atual (req.tenant.subdomain OU Host)
   function extractSubdomain(req) {
     const fromTenant = req?.tenant?.subdomain;
     if (fromTenant) return String(fromTenant).toLowerCase();
@@ -32,6 +36,7 @@ async function templatesRoutes(fastify, _opts) {
     return null;
   }
 
+  // resolve WABA no catálogo público
   async function resolveWabaId(req) {
     const sub = extractSubdomain(req);
     if (!sub) throw new Error('Não foi possível resolver o subdomínio do tenant.');
@@ -47,7 +52,29 @@ async function templatesRoutes(fastify, _opts) {
     return waba;
   }
 
-  // ===== Rotas locais (DB do tenant) =====
+  // normalizadores para JSON (evita 500 por tipo inválido no Postgres)
+  function toJsonOrNull(v, fieldName = 'json') {
+    if (v == null || v === '') return null;
+    if (typeof v === 'object') return v; // já é objeto/array
+    if (typeof v === 'string') {
+      try {
+        return JSON.parse(v);
+      } catch {
+        throw new Error(`Campo ${fieldName} possui JSON inválido`);
+      }
+    }
+    return null;
+  }
+
+  function normalizeButtons(btns) {
+    const parsed = toJsonOrNull(btns, 'buttons');
+    if (!parsed) return null;
+    if (Array.isArray(parsed)) return parsed;
+    if (typeof parsed === 'object' && Array.isArray(parsed.buttons)) return parsed.buttons;
+    return null; // formato inesperado -> ignora para não quebrar
+  }
+
+  // ========================= Rotas locais (DB do tenant) =========================
 
   // GET / -> lista local com filtros opcionais ?status= & ?q=
   fastify.get('/', async (req, reply) => {
@@ -56,10 +83,15 @@ async function templatesRoutes(fastify, _opts) {
       const params = [];
       const where = [];
 
-      if (status) { params.push(status); where.push(`status = $${params.length}`); }
+      if (status) {
+        params.push(status);
+        where.push(`status = $${params.length}`);
+      }
       if (q) {
         params.push(`%${q}%`);
-        where.push(`(LOWER(name) LIKE LOWER($${params.length}) OR LOWER(body_text) LIKE LOWER($${params.length}))`);
+        where.push(
+          `(LOWER(name) LIKE LOWER($${params.length}) OR LOWER(body_text) LIKE LOWER($${params.length}))`
+        );
       }
 
       const sql = `
@@ -72,17 +104,23 @@ async function templatesRoutes(fastify, _opts) {
       const { rows } = await req.db.query(sql, params);
       return reply.send(rows);
     } catch (error) {
-      fastify.log.error('Erro ao listar templates:', error);
+      req.log.error(error, 'Erro ao listar templates');
       return fail(reply, 500, 'Erro interno ao listar templates', error);
     }
   });
 
-  // POST / -> cria rascunho local
+  // POST / -> cria rascunho local (MANTENDO example)
   fastify.post('/', async (req, reply) => {
     const {
-      name, language_code = 'pt_BR', category = 'UTILITY',
-      header_type = 'NONE', header_text = null,
-      body_text, footer_text = null, buttons = null, example = null,
+      name,
+      language_code = 'pt_BR',
+      category = 'UTILITY',
+      header_type = 'NONE',
+      header_text = null,
+      body_text,
+      footer_text = null,
+      buttons = null,
+      example = null, // mantido
     } = req.body || {};
 
     if (!name || !body_text) {
@@ -90,17 +128,41 @@ async function templatesRoutes(fastify, _opts) {
     }
 
     try {
-      const { rows } = await req.db.query(
-        `INSERT INTO templates
-           (name, language_code, category, header_type, header_text, body_text, footer_text, buttons, example, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'draft')
-         RETURNING *`,
-        [name, language_code, category, header_type, header_text, body_text, footer_text, buttons, example]
-      );
+      const lang = String(language_code || 'pt_BR').replace('-', '_');
+      const btns = normalizeButtons(buttons);
+      const sample = toJsonOrNull(example, 'example');
+
+      // coerção: se header_type não for TEXT, não armazena header_text
+      const headerType = (header_type || 'NONE').toUpperCase();
+      const headerText = headerType === 'TEXT' ? header_text : null;
+
+      const sql = `
+        INSERT INTO templates
+          (name, language_code, category, header_type, header_text, body_text, footer_text, buttons, example, status)
+        VALUES
+          ($1,   $2,            $3,       $4,         $5,          $6,        $7,          $8,      $9,      'draft')
+        RETURNING *
+      `;
+      const params = [
+        name,
+        lang,
+        category,
+        headerType,
+        headerText,
+        body_text,
+        footer_text,
+        btns,
+        sample,
+      ];
+
+      const { rows } = await req.db.query(sql, params);
       return reply.code(201).send(rows[0]);
     } catch (error) {
-      fastify.log.error('Erro ao criar template:', error);
-      return fail(reply, 500, 'Erro interno ao criar template', error);
+      req.log.error({ err: error, body: req.body }, 'Erro ao criar template');
+      return reply.code(500).send({
+        error: 'Erro interno ao criar template',
+        details: error.detail || error.message,
+      });
     }
   });
 
@@ -111,12 +173,12 @@ async function templatesRoutes(fastify, _opts) {
       await req.db.query('DELETE FROM templates WHERE id=$1', [id]);
       return reply.send({ ok: true });
     } catch (error) {
-      fastify.log.error('Erro ao excluir template:', error);
+      req.log.error(error, 'Erro ao excluir template');
       return fail(reply, 500, 'Erro interno ao excluir template', error);
     }
   });
 
-  // ===== Rotas que falam com a Graph =====
+  // ========================= Rotas que falam com a Graph =========================
 
   // POST /:id/submit -> submete na Graph
   fastify.post('/:id/submit', async (req, reply) => {
@@ -126,12 +188,15 @@ async function templatesRoutes(fastify, _opts) {
       const t = rows[0];
       if (!t) return reply.code(404).send({ error: 'Template não encontrado' });
       if (!['draft', 'rejected'].includes(t.status)) {
-        return reply.code(409).send({ error: 'Apenas templates draft/rejected podem ser submetidos' });
+        return reply
+          .code(409)
+          .send({ error: 'Apenas templates draft/rejected podem ser submetidos' });
       }
 
+      // monta components
       const components = [];
       if (t.header_type && t.header_type !== 'NONE') {
-        const header = { type: 'HEADER', format: t.header_type };
+        const header = { type: 'HEADER', format: t.header_type }; // TEXT | IMAGE | VIDEO | DOCUMENT
         if (t.header_type === 'TEXT' && t.header_text) header.text = t.header_text;
         components.push(header);
       }
@@ -150,11 +215,12 @@ async function templatesRoutes(fastify, _opts) {
           language: (t.language_code || 'pt_BR').replace('-', '_'),
           category: t.category || 'UTILITY',
           components,
-          ...(t.example ? { example: t.example } : {}),
+          ...(t.example ? { example: t.example } : {}), // usa example se existir
         }),
       });
       const data = await res.json();
-      if (!res.ok) return fail(reply, 502, 'Falha ao submeter template na Graph API', data?.error || data);
+      if (!res.ok)
+        return fail(reply, 502, 'Falha ao submeter template na Graph API', data?.error || data);
 
       await req.db.query(
         `UPDATE templates
@@ -167,7 +233,7 @@ async function templatesRoutes(fastify, _opts) {
 
       return reply.send({ ok: true, provider: data });
     } catch (error) {
-      fastify.log.error('Erro no submit do template:', error);
+      req.log.error(error, 'Erro no submit do template');
       return fail(reply, 500, 'Erro interno ao submeter template', error);
     }
   });
@@ -187,21 +253,28 @@ async function templatesRoutes(fastify, _opts) {
       } else {
         const WABA = await resolveWabaId(req);
         const lang = (t.language_code || 'pt_BR').replace('-', '_');
-        url = `${GRAPH}/${WABA}/message_templates?name=${encodeURIComponent(t.name)}&language=${encodeURIComponent(lang)}&fields=${encodeURIComponent(fields)}&limit=1`;
+        url = `${GRAPH}/${WABA}/message_templates?name=${encodeURIComponent(
+          t.name
+        )}&language=${encodeURIComponent(lang)}&fields=${encodeURIComponent(fields)}&limit=1`;
       }
 
       const res = await fetch(url, { headers: graphHeaders() });
       const data = await res.json();
       if (!res.ok) return fail(reply, 502, 'Falha ao consultar Graph API', data?.error || data);
 
-      const rawStatus  = (data?.status || data?.data?.[0]?.status || '').toUpperCase();
-      const rawReason  =  data?.rejected_reason || data?.data?.[0]?.rejected_reason || null;
-      const rawQuality =  data?.quality_score   || data?.data?.[0]?.quality_score   || null;
+      const rawStatus = (data?.status || data?.data?.[0]?.status || '').toUpperCase();
+      const rawReason = data?.rejected_reason || data?.data?.[0]?.rejected_reason || null;
+      const rawQuality = data?.quality_score || data?.data?.[0]?.quality_score || null;
 
-      const map = { APPROVED: 'approved', REJECTED: 'rejected', IN_REVIEW: 'submitted', PENDING: 'submitted' };
+      const map = {
+        APPROVED: 'approved',
+        REJECTED: 'rejected',
+        IN_REVIEW: 'submitted',
+        PENDING: 'submitted',
+      };
       const status = map[rawStatus] || t.status;
 
-      // tenta atualizar com quality_score; se a coluna não existir, refaz sem ela
+      // tenta atualizar com quality_score; se coluna não existir, refaz sem ela
       try {
         await req.db.query(
           `UPDATE templates
@@ -210,7 +283,7 @@ async function templatesRoutes(fastify, _opts) {
           [id, status, rawReason, rawQuality]
         );
       } catch (e) {
-        if (e?.code === '42703') { // undefined_column
+        if (e?.code === '42703') {
           await req.db.query(
             `UPDATE templates
                 SET status=$2, reject_reason=$3
@@ -222,21 +295,28 @@ async function templatesRoutes(fastify, _opts) {
         }
       }
 
-      return reply.send({ ok: true, status, quality_score: rawQuality ?? null, provider: data });
+      return reply.send({
+        ok: true,
+        status,
+        quality_score: rawQuality ?? null,
+        provider: data,
+      });
     } catch (error) {
-      fastify.log.error('Erro ao sincronizar template:', error);
+      req.log.error(error, 'Erro ao sincronizar template');
       return fail(reply, 500, 'Erro interno ao sincronizar template', error);
     }
   });
 
-  // GET /provider -> lista direto da Graph (traz quality_score)
+  // (opcional) GET /provider -> lista direto da Graph (útil pra ver hello_world sem importar)
   fastify.get('/provider', async (req, reply) => {
     try {
       const { status, q, limit = 200 } = req.query || {};
       const WABA = await resolveWabaId(req);
 
       const fields = 'name,language,category,status,rejected_reason,quality_score,components';
-      let url = `${GRAPH}/${WABA}/message_templates?fields=${encodeURIComponent(fields)}&limit=100`;
+      let url = `${GRAPH}/${WABA}/message_templates?fields=${encodeURIComponent(
+        fields
+      )}&limit=100`;
       if (status) url += `&status=${encodeURIComponent(String(status).toUpperCase())}`;
 
       const out = [];
@@ -248,9 +328,12 @@ async function templatesRoutes(fastify, _opts) {
         let page = Array.isArray(data?.data) ? data.data : [];
         const qnorm = (q || '').toLowerCase();
         if (qnorm) {
-          page = page.filter(t =>
-            (t?.name || '').toLowerCase().includes(qnorm) ||
-            (t?.components || []).some(c => c?.type === 'BODY' && (c?.text || '').toLowerCase().includes(qnorm))
+          page = page.filter(
+            (t) =>
+              (t?.name || '').toLowerCase().includes(qnorm) ||
+              (t?.components || []).some(
+                (c) => c?.type === 'BODY' && (c?.text || '').toLowerCase().includes(qnorm)
+              )
           );
         }
 
@@ -260,19 +343,21 @@ async function templatesRoutes(fastify, _opts) {
 
       return reply.send(out.slice(0, Number(limit)));
     } catch (error) {
-      fastify.log.error('Erro ao listar templates (provider):', error);
+      req.log.error(error, 'Erro ao listar templates (provider)');
       return fail(reply, 500, 'Erro interno ao listar templates (provider)', error);
     }
   });
 
-  // POST /sync-all -> importa/atualiza todos para o banco local (sem ON CONFLICT)
+  // (opcional) POST /sync-all -> importa/atualiza todos para o banco local (sem ON CONFLICT)
   fastify.post('/sync-all', async (req, reply) => {
     try {
       const { upsert = true } = req.body || {};
       const WABA = await resolveWabaId(req);
 
       const fields = 'name,language,category,status,rejected_reason,quality_score,components';
-      let url = `${GRAPH}/${WABA}/message_templates?fields=${encodeURIComponent(fields)}&limit=100`;
+      let url = `${GRAPH}/${WABA}/message_templates?fields=${encodeURIComponent(
+        fields
+      )}&limit=100`;
       const collected = [];
 
       while (url) {
@@ -288,10 +373,10 @@ async function templatesRoutes(fastify, _opts) {
       }
 
       for (const t of collected) {
-        const body    = (t.components || []).find(c => c.type === 'BODY');
-        const header  = (t.components || []).find(c => c.type === 'HEADER');
-        const footer  = (t.components || []).find(c => c.type === 'FOOTER');
-        const buttons = (t.components || []).find(c => c.type === 'BUTTONS');
+        const body = (t.components || []).find((c) => c.type === 'BODY');
+        const header = (t.components || []).find((c) => c.type === 'HEADER');
+        const footer = (t.components || []).find((c) => c.type === 'FOOTER');
+        const buttons = (t.components || []).find((c) => c.type === 'BUTTONS');
 
         const payload = {
           name: t.name,
@@ -308,7 +393,7 @@ async function templatesRoutes(fastify, _opts) {
           quality_score: t.quality_score || null,
         };
 
-        // 1) tenta UPDATE com quality_score; se coluna não existir, tenta sem
+        // tenta UPDATE (com quality_score); se coluna não existir, tenta sem; se não existir, INSERT
         let r;
         try {
           r = await req.db.query(
@@ -320,10 +405,18 @@ async function templatesRoutes(fastify, _opts) {
             WHERE name=$1 AND language_code=$2
             `,
             [
-              payload.name, payload.language_code,
-              payload.category, payload.header_type, payload.header_text, payload.body_text,
-              payload.footer_text, payload.buttons, payload.status, payload.provider_id,
-              payload.reject_reason, payload.quality_score
+              payload.name,
+              payload.language_code,
+              payload.category,
+              payload.header_type,
+              payload.header_text,
+              payload.body_text,
+              payload.footer_text,
+              payload.buttons,
+              payload.status,
+              payload.provider_id,
+              payload.reject_reason,
+              payload.quality_score,
             ]
           );
         } catch (e) {
@@ -337,10 +430,17 @@ async function templatesRoutes(fastify, _opts) {
               WHERE name=$1 AND language_code=$2
               `,
               [
-                payload.name, payload.language_code,
-                payload.category, payload.header_type, payload.header_text, payload.body_text,
-                payload.footer_text, payload.buttons, payload.status, payload.provider_id,
-                payload.reject_reason
+                payload.name,
+                payload.language_code,
+                payload.category,
+                payload.header_type,
+                payload.header_text,
+                payload.body_text,
+                payload.footer_text,
+                payload.buttons,
+                payload.status,
+                payload.provider_id,
+                payload.reject_reason,
               ]
             );
           } else {
@@ -348,8 +448,8 @@ async function templatesRoutes(fastify, _opts) {
           }
         }
 
-        // 2) se não existia, INSERT (tenta com quality_score, senão sem)
         if (r.rowCount === 0) {
+          // INSERT
           try {
             await req.db.query(
               `
@@ -359,9 +459,18 @@ async function templatesRoutes(fastify, _opts) {
                 ($1,   $2,            $3,       $4,         $5,          $6,        $7,          $8,      $9,     $10,         $11,           $12)
               `,
               [
-                payload.name, payload.language_code, payload.category, payload.header_type,
-                payload.header_text, payload.body_text, payload.footer_text, payload.buttons,
-                payload.status, payload.provider_id, payload.reject_reason, payload.quality_score
+                payload.name,
+                payload.language_code,
+                payload.category,
+                payload.header_type,
+                payload.header_text,
+                payload.body_text,
+                payload.footer_text,
+                payload.buttons,
+                payload.status,
+                payload.provider_id,
+                payload.reject_reason,
+                payload.quality_score,
               ]
             );
           } catch (e) {
@@ -374,9 +483,17 @@ async function templatesRoutes(fastify, _opts) {
                   ($1,   $2,            $3,       $4,         $5,          $6,        $7,          $8,      $9,     $10,         $11)
                 `,
                 [
-                  payload.name, payload.language_code, payload.category, payload.header_type,
-                  payload.header_text, payload.body_text, payload.footer_text, payload.buttons,
-                  payload.status, payload.provider_id, payload.reject_reason
+                  payload.name,
+                  payload.language_code,
+                  payload.category,
+                  payload.header_type,
+                  payload.header_text,
+                  payload.body_text,
+                  payload.footer_text,
+                  payload.buttons,
+                  payload.status,
+                  payload.provider_id,
+                  payload.reject_reason,
                 ]
               );
             } else {
@@ -388,7 +505,7 @@ async function templatesRoutes(fastify, _opts) {
 
       return reply.send({ ok: true, imported: collected.length });
     } catch (error) {
-      fastify.log.error('Erro no sync-all:', error);
+      req.log.error(error, 'Erro no sync-all');
       return fail(reply, 500, 'Erro interno ao sincronizar todos os templates', error);
     }
   });
