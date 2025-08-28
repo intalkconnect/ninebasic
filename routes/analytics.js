@@ -672,7 +672,6 @@ fastify.get('/metrics/new-clients', async (req, reply) => {
  * CREATE INDEX IF NOT EXISTS ix_feedback_metrics_type ON feedback_metrics (type);
  * --------------------------------------------------------------------
  */
-async function metricsRoutes(fastify, _options) {
   // Helpers --------------------------------------------------------------
   function asInt(x) {
     const n = parseInt(x, 10);
@@ -683,7 +682,7 @@ async function metricsRoutes(fastify, _options) {
   }
 
   // POST /metrics/feedback  -> salva NPS/CSAT
-  fastify.post('/feedback', async (req, reply) => {
+  fastify.post('/metrics/feedback', async (req, reply) => {
     try {
       const {
         type,               // 'nps' | 'csat'
@@ -782,5 +781,4 @@ async function metricsRoutes(fastify, _options) {
       return reply.code(500).send({ error: 'Erro ao gerar série CSAT' });
     }
   });
-}
 }
