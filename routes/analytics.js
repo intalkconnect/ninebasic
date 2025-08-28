@@ -732,53 +732,103 @@ fastify.get('/metrics/new-clients', async (req, reply) => {
     }
   });
 
-  // GET /metrics/series/nps  -> série temporal para gráficos
-  fastify.get('/metrics/series/nps', async (req, reply) => {
-    const { bucket = 'day' } = req.query || {}; // 'day' | 'week' | 'month'
-    const trunc = bucket === 'month' ? 'month' : bucket === 'week' ? 'week' : 'day';
-    try {
-      const { rows } = await req.db.query(
-        `
-        SELECT
-          date_trunc('${trunc}', created_at) AS bucket,
-          AVG(score)::float AS avg_score,
-          100.0 * SUM(CASE WHEN category='promoter'  THEN 1 ELSE 0 END)::float / COUNT(*) AS pct_promoters,
-          100.0 * SUM(CASE WHEN category='detractor' THEN 1 ELSE 0 END)::float / COUNT(*) AS pct_detractors,
-          COUNT(*) AS total
-        FROM feedback_metrics
-        WHERE type='nps'
-        GROUP BY 1
-        ORDER BY 1;
-        `
-      );
-      return reply.send(rows);
-    } catch (err) {
-      fastify.log.error(err, 'Erro ao gerar série NPS');
-      return reply.code(500).send({ error: 'Erro ao gerar série NPS' });
-    }
-  });
+ // GET /metrics/series/nps  -> série temporal para gráficos (com NPS e distribuição)
+fastify.get('/metrics/series/nps', async (req, reply) => {
+  const { bucket = 'day', from, to } = req.query || {};
+  const trunc = bucket === 'month' ? 'month' : bucket === 'week' ? 'week' : 'day';
 
-  // GET /metrics/series/csat -> série temporal para gráficos
-  fastify.get('/metrics/series/csat', async (req, reply) => {
-    const { bucket = 'day' } = req.query || {};
-    const trunc = bucket === 'month' ? 'month' : bucket === 'week' ? 'week' : 'day';
-    try {
-      const { rows } = await req.db.query(
-        `
+  // Filtros dinâmicos
+  const params = [];
+  let where = `WHERE type = 'nps'`;
+  if (from) { params.push(new Date(from)); where += ` AND created_at >= $${params.length}`; }
+  if (to)   { params.push(new Date(to));   where += ` AND created_at <  $${params.length}`; }
+
+  try {
+    const { rows } = await req.db.query(
+      `
+      WITH base AS (
+        SELECT
+          date_trunc('${trunc}', created_at)       AS bucket,
+          COUNT(*)                                 AS total,
+          -- usa category se existir, senão classifica por score (robustez)
+          SUM(CASE WHEN category='promoter'  OR score BETWEEN  9 AND 10 THEN 1 ELSE 0 END) AS promoters,
+          SUM(CASE WHEN category='passive'   OR score BETWEEN  7 AND  8 THEN 1 ELSE 0 END) AS passives,
+          SUM(CASE WHEN category='detractor' OR score BETWEEN  0 AND  6 THEN 1 ELSE 0 END) AS detractors,
+          AVG(score)::float                        AS avg_score
+        FROM feedback_metrics
+        ${where}
+        GROUP BY 1
+      )
+      SELECT
+        bucket,
+        avg_score,
+        total,
+        promoters        AS promoters_count,
+        passives         AS passives_count,
+        detractors       AS detractors_count,
+        100.0 * promoters  / NULLIF(total,0) AS pct_promoters,
+        100.0 * passives   / NULLIF(total,0) AS pct_passives,
+        100.0 * detractors / NULLIF(total,0) AS pct_detractors,
+        -- valor pronto para o "velocímetro" de NPS (-100..100)
+        (100.0 * promoters / NULLIF(total,0)) - (100.0 * detractors / NULLIF(total,0)) AS nps
+      FROM base
+      ORDER BY 1;
+      `,
+      params
+    );
+    return reply.send(rows);
+  } catch (err) {
+    req.log.error(err, 'Erro ao gerar série NPS');
+    return reply.code(500).send({ error: 'Erro ao gerar série NPS' });
+  }
+});
+
+
+// GET /metrics/series/csat -> série temporal para gráficos (com distribuição e gauge)
+fastify.get('/metrics/series/csat', async (req, reply) => {
+  const { bucket = 'day', from, to } = req.query || {};
+  const trunc = bucket === 'month' ? 'month' : bucket === 'week' ? 'week' : 'day';
+
+  const params = [];
+  let where = `WHERE type = 'csat'`;
+  if (from) { params.push(new Date(from)); where += ` AND created_at >= $${params.length}`; }
+  if (to)   { params.push(new Date(to));   where += ` AND created_at <  $${params.length}`; }
+
+  try {
+    const { rows } = await req.db.query(
+      `
+      WITH base AS (
         SELECT
           date_trunc('${trunc}', created_at) AS bucket,
-          AVG(score)::float AS avg_score,
-          COUNT(*) AS total
+          COUNT(*)                           AS total,
+          AVG(score)::float                  AS avg_score,
+          SUM((score = 1)::int)              AS count_1,
+          SUM((score = 2)::int)              AS count_2,
+          SUM((score = 3)::int)              AS count_3,
+          SUM((score = 4)::int)              AS count_4,
+          SUM((score = 5)::int)              AS count_5
         FROM feedback_metrics
-        WHERE type='csat'
+        ${where}
         GROUP BY 1
-        ORDER BY 1;
-        `
-      );
-      return reply.send(rows);
-    } catch (err) {
-      fastify.log.error(err, 'Erro ao gerar série CSAT');
-      return reply.code(500).send({ error: 'Erro ao gerar série CSAT' });
-    }
-  });
+      )
+      SELECT
+        bucket,
+        avg_score,
+        total,
+        count_1, count_2, count_3, count_4, count_5,
+        100.0 * (count_4 + count_5) / NULLIF(total,0)                    AS pct_satisfied,
+        -- porcentagem pronta para "termômetro" (0..100) a partir da média 1..5
+        GREATEST(0, LEAST(100, 100.0 * (avg_score - 1.0) / 4.0))         AS gauge_pct
+      FROM base
+      ORDER BY 1;
+      `,
+      params
+    );
+    return reply.send(rows);
+  } catch (err) {
+    req.log.error(err, 'Erro ao gerar série CSAT');
+    return reply.code(500).send({ error: 'Erro ao gerar série CSAT' });
+  }
+});
+
 }
