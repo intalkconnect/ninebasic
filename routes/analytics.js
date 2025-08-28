@@ -783,8 +783,4 @@ async function metricsRoutes(fastify, _options) {
     }
   });
 }
-
-export default metricsRoutes;
-
-  
 }
