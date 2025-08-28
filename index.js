@@ -19,7 +19,6 @@ import quickRepliesRoutes from './routes/quickReplies.js';
 import analyticsRoutes from './routes/analytics.js';
 import pausasRoutes from './routes/pause.js';
 import queueHoursRoutes from './routes/queueHoursRoutes.js';
-import metricsRoutes from './routes/metrics.js';
 import templatesRoutes from './routes/templates.js';
 import usersRoutes from './routes/users.js';
 
@@ -55,7 +54,6 @@ async function buildServer() {
   fastify.register(analyticsRoutes,   { prefix: '/api/v1/analytics' });
   fastify.register(pausasRoutes,      { prefix: '/api/v1/pausas' });
   fastify.register(queueHoursRoutes,      { prefix: '/api/v1/queueHours' });
-  fastify.register(metricsRoutes,      { prefix: '/api/v1/metrics' });
   fastify.register(templatesRoutes,      { prefix: '/api/v1/templates' });
   fastify.register(usersRoutes,      { prefix: '/api/v1/users' });
   
@@ -81,6 +79,7 @@ async function start() {
 }
 
 start();
+
 
 
 
