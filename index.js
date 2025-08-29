@@ -21,6 +21,7 @@ import pausasRoutes from './routes/pause.js';
 import queueHoursRoutes from './routes/queueHoursRoutes.js';
 import templatesRoutes from './routes/templates.js';
 import usersRoutes from './routes/users.js';
+import telegramRoutes from './routes/telegram.js';
 
 // 👉 NOVO
 import waEmbeddedRoutes from './routes/waEmbedded.js';
@@ -60,6 +61,7 @@ async function buildServer() {
 
   // 👉 NOVO: Embedded Signup (prefixo próprio)
   fastify.register(waEmbeddedRoutes,  { prefix: '/api/v1/wa' });
+  fastify.register(telegramRoutes,  { prefix: '/api/v1/tg' });
 
   return fastify;
 }
@@ -79,6 +81,7 @@ async function start() {
 }
 
 start();
+
 
 
 
