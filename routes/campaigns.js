@@ -155,8 +155,8 @@ export default async function campaignsRoutes(fastify) {
 
   // 6) Disparo imediato ou agendado
   if (!start_at) {
-    const tenant = req.tenant?.subdomain || 'default';
-    const res = await enqueueCampaignFromDB(campaignId, { tenant });
+    const tenant = req.tenant?.subdomain || undefined; // pode vir undefined
+    const res = await enqueueCampaignFromDB(req.db, campaignId, { tenant }); // serviço faz fallback p/ TENANT/PG_SCHEMA/default
     await req.db.query(`UPDATE campaigns SET status='finished', updated_at=NOW() WHERE id=$1`, [campaignId]);
     return {
       ok: true,
