@@ -148,5 +148,3 @@ export default async function telegramRoutes(fastify) {
     }
   });
 }
-
-}
