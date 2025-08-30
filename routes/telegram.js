@@ -1,8 +1,6 @@
 // routes/telegram.js
-import { request } from 'undici';
-
 export default async function telegramRoutes(fastify) {
-  const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL; // ex: https://hmg.ninechat.com.br
+  const WEBHOOK_BASE_URL = process.env.WEBHOOK_BASE_URL; // ex.: https://hmg.ninechat.com.br
   if (!PUBLIC_BASE_URL) fastify.log.warn('PUBLIC_BASE_URL não definido');
 
   fastify.post('/connect', async (req, reply) => {
@@ -13,57 +11,43 @@ export default async function telegramRoutes(fastify) {
     if (!req.db) return reply.code(500).send({ error: 'db_not_available' });
 
     try {
-      // 1) resolve tenant
+      // 1) tenant
       const tRes = await req.db.query(
         `SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1`,
         [subdomain]
       );
       const tenant = tRes.rows[0];
       if (!tenant) return reply.code(404).send({ error: 'tenant_not_found' });
-      const tenantId = tenant.id;
 
-      // 2) getMe pra validar token e obter id/username
-      const meRes = await request(`https://api.telegram.org/bot${botToken}/getMe`, { method: 'GET' });
-      const me = await meRes.body.json();
+      // 2) valida token (getMe)
+      const meRes = await fetch(`https://api.telegram.org/bot${botToken}/getMe`);
+      const me = await meRes.json();
       if (!me?.ok || !me?.result?.id) {
         return reply.code(400).send({ error: 'invalid_bot_token', details: me });
       }
       const botId = String(me.result.id);
       const username = me.result.username || null;
 
-      // 3) define webhook único (identificação por secret no header do Telegram)
-      const WEBHOOK_URL = `${PUBLIC_BASE_URL}/webhooks/telegram`;
-      const swRes = await request(`https://api.telegram.org/bot${botToken}/setWebhook`, {
+      // 3) configura webhook único (Telegram envia o header x-telegram-bot-api-secret-token)
+      const swRes = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           url: WEBHOOK_URL,
-          secret_token: secret,                // Telegram vai enviar no header
-          allowed_updates: ['message','callback_query']
+          secret_token: secret,
+          allowed_updates: ['message', 'callback_query']
         })
       });
-      const sw = await swRes.body.json();
+      const sw = await swRes.json();
       if (!sw?.ok) {
         fastify.log.warn({ sw }, '[tg/connect] setWebhook falhou');
-        // não bloqueio a conexão; apenas aviso
+        // segue mesmo assim; o usuário pode tentar de novo
       }
 
-      // 4) prepara credencial (opcional: encriptar botToken)
-      let credBuf = null;
-      try {
-        // Se você tiver util de criptografia:
-        // const b64 = fastify.crypto.encrypt(JSON.stringify({ botToken }));
-        // credBuf = Buffer.from(b64, 'base64');
-        // Como fallback, não salva nada em bytea:
-        credBuf = null;
-      } catch (e) {
-        fastify.log.warn(e, '[tg/connect] falha ao encriptar credencial; seguindo sem credentials_encrypted');
-      }
-
-      // 5) salva/atualiza conexão
-      const AUTH_MODE = 'system_user'; // ou crie 'bot_token' no enum auth_mode
+      // 4) salva/atualiza conexão
+      const AUTH_MODE = 'system_user'; // use 'bot_token' se você adicionar ao enum
       const settings = {
-        secret_token: secret,        // usado para mapear tenant no webhook único
+        secret_token: secret,
         webhook_url: WEBHOOK_URL,
         bot_username: username,
         raw: { getMe: me?.result }
@@ -87,18 +71,15 @@ export default async function telegramRoutes(fastify) {
       `;
 
       await req.db.query(upsertSql, [
-        tenantId,
-        subdomain,
-        botId,                     // account_id → uso o id do bot
-        botId,                     // external_id → id do bot também (chave de conflito por tenant+canal+external)
-        username,                  // display_name
-        AUTH_MODE,                 // auth_mode (enum existente)
-        credBuf,                   // ::bytea (NULL ok)
-        JSON.stringify(settings)   // ::jsonb
+        tenant.id,           // $1::uuid
+        subdomain,           // $2::text
+        botId,               // $3::text (account_id)
+        botId,               // $4::text (external_id)
+        username,            // $5::text (display_name)
+        AUTH_MODE,           // $6::auth_mode
+        null,                // $7::bytea (credentials_encrypted) – opcional encriptar token depois
+        JSON.stringify(settings) // $8::jsonb
       ]);
-
-      // (opcional) também pode gravar em tenants.telegram_external_id se quiser:
-      // await req.db.query(`UPDATE public.tenants SET telegram_external_id = $1 WHERE id = $2`, [botId, tenantId]);
 
       return reply.send({
         ok: true,
