@@ -86,7 +86,7 @@ async function telegramRoutes(fastify) {
         INSERT INTO public.tenant_channel_connections
           (tenant_id, subdomain, channel, provider, account_id, external_id, display_name, auth_mode, credentials_encrypted, settings, is_active)
         VALUES
-          ($1,        $2,        'telegram','telegram', $3,       $4,          $5,           'api_key', $6,
+          ($1,        $2,        'telegram','telegram', $3,       $4,          $5,           'bot_token', $6,
            jsonb_build_object('webhook_secret',$7,'allowed_updates',$8::jsonb,'bot_id',$9,'username',$10,'raw_me',$11),
            true)
         ON CONFLICT (tenant_id, channel, external_id)
