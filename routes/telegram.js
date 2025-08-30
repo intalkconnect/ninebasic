@@ -1,7 +1,7 @@
 // routes/telegram.js
 export default async function telegramRoutes(fastify) {
-  const WEBHOOK_BASE_URL = process.env.WEBHOOK_BASE_URL; // ex.: https://hmg.ninechat.com.br
-  if (!WEBHOOK_BASE_URL) fastify.log.warn('PUBLIC_BASE_URL não definido');
+  const WEBHOOK_URL = process.env.WEBHOOK_BASE_URL; // ex.: https://hmg.ninechat.com.br
+  if (!WEBHOOK_URL) fastify.log.warn('PUBLIC_BASE_URL não definido');
 
   fastify.post('/connect', async (req, reply) => {
     const { subdomain, botToken, secret } = req.body || {};
@@ -45,7 +45,7 @@ export default async function telegramRoutes(fastify) {
       }
 
       // 4) salva/atualiza conexão
-      const AUTH_MODE = 'system_user'; // use 'bot_token' se você adicionar ao enum
+      const AUTH_MODE = 'bot_token'; // use 'bot_token' se você adicionar ao enum
       const settings = {
         secret_token: secret,
         webhook_url: WEBHOOK_URL,
