@@ -18,12 +18,12 @@ function hydrateComponents(components, vars) {
  * Enfileira itens de campanha lendo com o DB do TENANT (req.db) e publicando na fila do TENANT.
  * @param {object} db       // req.db (tenant-scoped)
  * @param {string} campaignId
- * @param {{ tenant: string, queueName?: string }} opts
+ * @param {{ tenant?: string, queueName?: string }} opts
  */
 export async function enqueueCampaignFromDB(db, campaignId, opts = {}) {
-  const tenant = String(opts.tenant || '').trim().toLowerCase();
-  if (!tenant) throw new Error('[enqueueCampaignFromDB] "tenant" é obrigatório');
-
+  // 🔒 robusto: aceita da rota OU pega de env (TENANT/PG_SCHEMA) OU 'default'
+  const envTenant = process.env.TENANT || process.env.PG_SCHEMA || '';
+  const tenant = String((opts.tenant ?? envTenant) || 'default').trim().toLowerCase();
   const queueName = opts.queueName || `${tenant}.campaign`;
 
   // Rabbit
