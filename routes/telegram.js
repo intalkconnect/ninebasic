@@ -92,4 +92,61 @@ export default async function telegramRoutes(fastify) {
       return reply.code(500).send({ error: 'tg_connect_failed', message: err?.message });
     }
   });
+
+  fastify.get('/status', async (req, reply) => {
+    const subdomain =
+      req?.tenant?.subdomain ||
+      req?.tenant?.name ||
+      req?.headers['x-tenant-subdomain'] ||
+      req?.query?.subdomain;
+
+    if (!subdomain) {
+      return reply.code(400).send({ ok: false, error: 'missing_subdomain' });
+    }
+    if (!req.db) {
+      return reply.code(500).send({ ok: false, error: 'db_not_available' });
+    }
+
+    try {
+      const tRes = await req.db.query(
+        `SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1`,
+        [subdomain]
+      );
+      const tenant = tRes.rows[0];
+      if (!tenant) return reply.send({ ok: true, connected: false });
+
+      const q = `
+        SELECT external_id AS bot_id,
+               display_name AS username,
+               is_active,
+               settings
+          FROM public.tenant_channel_connections
+         WHERE tenant_id = $1
+           AND channel   = 'telegram'
+           AND provider  = 'telegram'
+         LIMIT 1
+      `;
+      const { rows } = await req.db.query(q, [tenant.id]);
+      const row = rows[0];
+
+      if (!row) {
+        return reply.send({ ok: true, connected: false, bot_id: null, username: null, webhook_url: null });
+      }
+
+      const webhook_url = row?.settings?.webhook_url || null;
+
+      return reply.send({
+        ok: true,
+        connected: !!row.is_active,
+        bot_id: row.bot_id || null,
+        username: row.username || null,
+        webhook_url
+      });
+    } catch (err) {
+      fastify.log.error({ err }, '[tg/status] failed');
+      return reply.code(500).send({ ok: false, error: 'tg_status_failed' });
+    }
+  });
+}
+
 }
