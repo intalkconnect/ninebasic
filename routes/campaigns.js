@@ -16,63 +16,119 @@ export default async function campaignsRoutes(fastify) {
   //  - file: CSV (obrigatório) com coluna 'to' + variáveis
   //  - meta: JSON string { name, template:{name, language:{code}, components?}, start_at? }
   fastify.post('/', async (req, reply) => {
-    const mp = await req.file();
-    if (!mp) return reply.code(400).send({ error: 'CSV (campo file) é obrigatório' });
+  // Vamos iterar todas as partes: pegamos o arquivo e os campos (meta ou planos)
+  const parts = req.parts(); // @fastify/multipart
+  let tempPath, tempName;
+  let metaStr = null;
 
-    let meta = {};
-    const fields = mp.fields || {};
-    if (fields.meta?.value) {
-      try { meta = JSON.parse(fields.meta.value); } catch {}
+  // fallback de campos planos
+  let flat = {
+    name: null,
+    template_name: null,
+    language_code: null,
+    components: null,
+    start_at: null,
+  };
+
+  // 1) Varre multipart
+  for await (const part of parts) {
+    if (part.type === 'file' && part.fieldname === 'file') {
+      tempName = `${uuidv4()}.csv`;
+      tempPath = path.join(UPLOAD_DIR, tempName);
+      await new Promise((res, rej) => {
+        const ws = fs.createWriteStream(tempPath);
+        part.file.pipe(ws);
+        ws.on('finish', res);
+        ws.on('error', rej);
+      });
+    } else if (part.type === 'field') {
+      if (part.fieldname === 'meta') {
+        metaStr = String(part.value || '');
+      } else if (Object.prototype.hasOwnProperty.call(flat, part.fieldname)) {
+        flat[part.fieldname] = String(part.value || '');
+      }
     }
+  }
 
-    const { name, template, start_at } = meta || {};
-    if (!name) return reply.code(400).send({ error: 'name é obrigatório' });
-    if (!template?.name || !template?.language?.code) {
-      return reply.code(400).send({ error: 'template{name, language.code} é obrigatório' });
+  if (!tempPath) return reply.code(400).send({ error: 'CSV (campo file) é obrigatório' });
+
+  // 2) Monta o "meta" a partir de JSON ou dos campos planos
+  let meta = {};
+  if (metaStr) {
+    try { meta = JSON.parse(metaStr); } catch { /* meta fica {} */ }
+  } else {
+    // campos planos → converte para o shape esperado
+    if (flat.name) {
+      meta.name = flat.name;
+      if (flat.start_at) meta.start_at = flat.start_at;
+      // components pode vir como JSON em texto
+      let comps = null;
+      if (flat.components) {
+        try { comps = JSON.parse(flat.components); } catch { /* deixa null */ }
+      }
+      if (!flat.template_name || !flat.language_code) {
+        return reply.code(400).send({ error: 'template_name e language_code são obrigatórios quando não usar meta' });
+      }
+      meta.template = {
+        name: flat.template_name,
+        language: { code: flat.language_code },
+        ...(comps ? { components: comps } : {})
+      };
     }
+  }
 
-    // Salva temp para parse robusto (será excluído ao final)
-    const tempName = `${uuidv4()}.csv`;
-    const tempPath = path.join(UPLOAD_DIR, tempName);
-    await new Promise((resolve, reject) => {
-      const ws = fs.createWriteStream(tempPath);
-      mp.file.pipe(ws);
-      ws.on('finish', resolve);
-      ws.on('error', reject);
-    });
+  const { name, template, start_at } = meta || {};
+  if (!name) return reply.code(400).send({ error: 'name é obrigatório' });
+  if (!template?.name || !template?.language?.code) {
+    return reply.code(400).send({ error: 'template{name, language.code} é obrigatório' });
+  }
 
-    const campaignId = uuidv4();
+  const campaignId = uuidv4();
 
-    // Cria campanha no DB (tenant-aware via req.db)
-    const { rows } = await req.db.query(
-      `INSERT INTO campaigns (id, name, template_name, language_code, components, start_at, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
-       RETURNING *`,
-      [campaignId, name, template.name, template.language.code, template.components || null,
-       start_at ? new Date(start_at) : null, start_at ? 'scheduled' : 'started']
-    );
+  // 3) Cria campanha (tenant-aware via req.db)
+  const { rows } = await req.db.query(
+    `INSERT INTO campaigns (id, name, template_name, language_code, components, start_at, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)
+     RETURNING *`,
+    [campaignId, name, template.name, template.language.code, template.components || null,
+     start_at ? new Date(start_at) : null, start_at ? 'scheduled' : 'started']
+  );
 
-    // Parse CSV -> inserir em campaign_items (streaming, usando csv-parse)
-    let inserted = 0, skipped = 0;
-    await new Promise((resolve, reject) => {
-      const rowsToInsert = [];
+  // 4) Parse CSV -> inserir em campaign_items (streaming)
+  let inserted = 0, skipped = 0;
+  await new Promise((resolve, reject) => {
+    const rowsToInsert = [];
+    fs.createReadStream(tempPath)
+      .pipe(csvParser({
+        delimiter: ',',
+        bom: true,
+        skip_empty_lines: true,
+        columns: (header) => header.map(h => String(h).trim())
+      }))
+      .on('data', (row) => {
+        const to = String(row.to || '').replace(/\D/g, '');
+        if (!to) { skipped++; return; }
+        const vars = { ...row }; delete vars.to;
+        rowsToInsert.push({ to, vars });
 
-      fs.createReadStream(tempPath)
-        .pipe(csvParser({
-          delimiter: ',',
-          bom: true,
-          skip_empty_lines: true,
-          // columns como função para normalizar os headers (trim)
-          columns: (header) => header.map(h => String(h).trim())
-        }))
-        .on('data', (row) => {
-          const to = String(row.to || '').replace(/\D/g, '');
-          if (!to) { skipped++; return; }
-          const vars = { ...row }; delete vars.to;
-          rowsToInsert.push({ to, vars });
-
-          if (rowsToInsert.length >= 500) {
-            // flush em lote
+        if (rowsToInsert.length >= 500) {
+          const values = [];
+          const params = [];
+          let i = 1;
+          for (const it of rowsToInsert) {
+            values.push(`($${i++}, $${i++}, $${i++}, $${i++})`);
+            params.push(uuidv4(), campaignId, it.to, JSON.stringify(it.vars));
+          }
+          rowsToInsert.length = 0;
+          req.db.query(
+            `INSERT INTO campaign_items (id, campaign_id, to_msisdn, variables) VALUES ${values.join(',')}`,
+            params
+          ).then(() => { inserted += params.length / 4; }).catch(reject);
+        }
+      })
+      .on('end', async () => {
+        try {
+          if (rowsToInsert.length) {
             const values = [];
             const params = [];
             let i = 1;
@@ -80,58 +136,40 @@ export default async function campaignsRoutes(fastify) {
               values.push(`($${i++}, $${i++}, $${i++}, $${i++})`);
               params.push(uuidv4(), campaignId, it.to, JSON.stringify(it.vars));
             }
-            rowsToInsert.length = 0;
-            req.db.query(
+            await req.db.query(
               `INSERT INTO campaign_items (id, campaign_id, to_msisdn, variables) VALUES ${values.join(',')}`,
               params
-            ).then(() => { inserted += params.length / 4; }).catch(reject);
+            );
+            inserted += params.length / 4;
           }
-        })
-        .on('end', async () => {
-          try {
-            if (rowsToInsert.length) {
-              const values = [];
-              const params = [];
-              let i = 1;
-              for (const it of rowsToInsert) {
-                values.push(`($${i++}, $${i++}, $${i++}, $${i++})`);
-                params.push(uuidv4(), campaignId, it.to, JSON.stringify(it.vars));
-              }
-              await req.db.query(
-                `INSERT INTO campaign_items (id, campaign_id, to_msisdn, variables) VALUES ${values.join(',')}`,
-                params
-              );
-              inserted += params.length / 4;
-            }
-            resolve();
-          } catch (e) {
-            reject(e);
-          }
-        })
-        .on('error', reject);
-    });
-
-    // Exclui o CSV temporário
-    try { fs.unlinkSync(tempPath); } catch {}
-
-    // Se start_at AUSENTE -> dispara AGORA a partir do DB e marca finished
-    if (!start_at) {
-      const tenant = req.tenant?.subdomain || 'default';     // ✅ pega o tenant da request
-      const res = await enqueueCampaignFromDB(campaignId, { tenant }); // ✅ fila = `${tenant}.campaign`
-      await req.db.query(`UPDATE campaigns SET status='finished', updated_at=NOW() WHERE id=$1`, [campaignId]);
-
-      return {
-        ok: true,
-        campaign: rows[0],
-        inserted,
-        skipped,
-        launched: true,
-        published: res.published,
-        queue: `${tenant}.campaign`
-      };
-    }
-
-    // Programada: quem dispara é o worker-campaign-scheduler (lendo do DB)
-    return { ok: true, campaign: rows[0], inserted, skipped, launched: false, message: 'Campanha agendada' };
+          resolve();
+        } catch (e) {
+          reject(e);
+        }
+      })
+      .on('error', reject);
   });
+
+  // 5) Exclui o CSV temporário
+  try { fs.unlinkSync(tempPath); } catch {}
+
+  // 6) Disparo imediato ou agendado
+  if (!start_at) {
+    const tenant = req.tenant?.subdomain || 'default';
+    const res = await enqueueCampaignFromDB(campaignId, { tenant });
+    await req.db.query(`UPDATE campaigns SET status='finished', updated_at=NOW() WHERE id=$1`, [campaignId]);
+    return {
+      ok: true,
+      campaign: rows[0],
+      inserted,
+      skipped,
+      launched: true,
+      published: res.published,
+      queue: `${tenant}.campaign`
+    };
+  }
+
+  return { ok: true, campaign: rows[0], inserted, skipped, launched: false, message: 'Campanha agendada' };
+});
+
 }
