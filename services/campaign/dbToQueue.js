@@ -1,6 +1,6 @@
 // services/campaign/dbToQueue.js
 import amqplib from 'amqplib';
-import { dbPool } from '../../engine/services/db.js';
+import { dbPool } from '../db.js';
 
 const AMQP_URL = process.env.AMQP_URL || 'amqp://guest:guest@rabbitmq:5672/';
 
