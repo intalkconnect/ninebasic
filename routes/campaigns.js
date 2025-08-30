@@ -9,7 +9,6 @@ import { enqueueCampaignFromDB } from '../services/campaign/dbToQueue.js';
 const UPLOAD_DIR = process.env.CAMPAIGN_UPLOAD_DIR || path.join(os.tmpdir(), 'campaign_csv');
 
 export default async function campaignsRoutes(fastify) {
-  fastify.register(fastifyMultipart);
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
   // POST /campaigns
