@@ -18,7 +18,7 @@ export default async function campaignsRoutes(fastify) {
   // multipart:
   //  - file: CSV (obrigatório) com coluna 'to' + variáveis
   //  - meta: JSON string { name, template:{name, language:{code}, components?}, start_at? }
-  fastify.post('/campaigns', async (req, reply) => {
+  fastify.post('/', async (req, reply) => {
     const mp = await req.file();
     if (!mp) return reply.code(400).send({ error: 'CSV (campo file) é obrigatório' });
 
