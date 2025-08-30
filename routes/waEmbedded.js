@@ -173,6 +173,71 @@ fastify.post('/es/pick-number', async (req, reply) => {
       });
     }
   });
+
+  fastify.get('/status', async (req, reply) => {
+    const subdomain =
+      req?.tenant?.subdomain ||
+      req?.tenant?.name ||
+      req?.headers['x-tenant-subdomain'] ||
+      req?.query?.subdomain;
+
+    if (!subdomain) {
+      return reply.code(400).send({ ok: false, error: 'missing_subdomain' });
+    }
+    if (!req.db) {
+      return reply.code(500).send({ ok: false, error: 'db_not_available' });
+    }
+
+    try {
+      const tRes = await req.db.query(
+        `SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1`,
+        [subdomain]
+      );
+      const tenant = tRes.rows[0];
+      if (!tenant) return reply.send({ ok: true, connected: false });
+
+      // Todas as conexões WA/Meta do tenant
+      const q = `
+        SELECT external_id, display_name, is_active, settings
+          FROM public.tenant_channel_connections
+         WHERE tenant_id = $1
+           AND channel   = 'whatsapp'
+           AND provider  = 'meta'
+      `;
+      const { rows } = await req.db.query(q, [tenant.id]);
+
+      if (!rows.length) {
+        return reply.send({ ok: true, connected: false, waba_id: null, numbers: [] });
+      }
+
+      // waba_id do primeiro registro que tiver essa info
+      const waba_id =
+        rows.find(r => r?.settings?.waba_id)?.settings?.waba_id ||
+        rows[0]?.settings?.waba_id ||
+        null;
+
+      const numbers = rows.map(r => {
+        const raw = r?.settings?.raw || {};
+        return {
+          id: r.external_id,
+          display_phone_number: raw.display_phone_number || r.display_name || null,
+          verified_name: raw.verified_name || null,
+          is_active: !!r.is_active,
+        };
+      });
+
+      return reply.send({
+        ok: true,
+        connected: true,   // existe pelo menos uma conexão salva
+        waba_id,
+        numbers
+      });
+    } catch (err) {
+      fastify.log.error({ err }, '[wa/status] failed');
+      return reply.code(500).send({ ok: false, error: 'wa_status_failed' });
+    }
+  });
+  
 }
 
 export default waEmbeddedRoutes;
