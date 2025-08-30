@@ -1,12 +1,8 @@
-// services/campaign/dbToQueue.js
+// services/campaign/dbToQueue.js (API)
 import amqplib from 'amqplib';
-import { dbPool } from '../db.js';
 
-const AMQP_URL = process.env.AMQP_URL || 'amqp://guest:guest@rabbitmq:5672/';
+const AMQP_URL = process.env.AMQP_URL || 'amqp://guest:guest@rabbit:5672/';
 
-/**
- * Substitui placeholders {chave} nos components usando as variáveis da linha
- */
 function hydrateComponents(components, vars) {
   if (!components) return undefined;
   try {
@@ -19,29 +15,26 @@ function hydrateComponents(components, vars) {
 }
 
 /**
- * Enfileira todos os itens de uma campanha lendo do DB e publicando na fila do tenant.
- * A fila SEMPRE é `${tenant}.campaign` (ex.: "hmg.campaign").
- *
+ * Enfileira itens de campanha lendo com o DB do TENANT (req.db) e publicando na fila do TENANT.
+ * @param {object} db       // req.db (tenant-scoped)
  * @param {string} campaignId
- * @param {object} opts
- * @param {string} opts.tenant   // subdomínio do tenant (obrigatório), ex.: "hmg"
- * @returns {Promise<{published:number, queueName:string, tenant:string}>}
+ * @param {{ tenant: string, queueName?: string }} opts
  */
-export async function enqueueCampaignFromDB(campaignId, opts = {}) {
+export async function enqueueCampaignFromDB(db, campaignId, opts = {}) {
   const tenant = String(opts.tenant || '').trim().toLowerCase();
   if (!tenant) throw new Error('[enqueueCampaignFromDB] "tenant" é obrigatório');
-  const queueName = `${tenant}.campaign`;
 
+  const queueName = opts.queueName || `${tenant}.campaign`;
+
+  // Rabbit
   const conn = await amqplib.connect(AMQP_URL, { heartbeat: 15 });
   const ch = await conn.createChannel();
   await ch.assertQueue(queueName, { durable: true });
 
-  const client = await dbPool.connect();
   let published = 0;
-
   try {
-    // Cabeçalho da campanha
-    const { rows: camps } = await client.query(
+    // Cabeçalho da campanha (LENDO NO SCHEMA DO TENANT via req.db)
+    const { rows: camps } = await db.query(
       `SELECT template_name, language_code, components
          FROM campaigns
         WHERE id=$1`,
@@ -50,11 +43,11 @@ export async function enqueueCampaignFromDB(campaignId, opts = {}) {
     if (!camps.length) throw new Error('Campanha não encontrada');
     const camp = camps[0];
 
-    // Paginação para não estourar memória
+    // paginação
     const pageSize = 500;
     let offset = 0;
 
-    const { rows: cntRows } = await client.query(
+    const { rows: cntRows } = await db.query(
       `SELECT COUNT(*)::int AS c
          FROM campaign_items
         WHERE campaign_id=$1`,
@@ -63,7 +56,7 @@ export async function enqueueCampaignFromDB(campaignId, opts = {}) {
     const total = cntRows[0].c;
 
     while (offset < total) {
-      const { rows: items } = await client.query(
+      const { rows: items } = await db.query(
         `SELECT to_msisdn, variables
            FROM campaign_items
           WHERE campaign_id=$1
@@ -94,7 +87,6 @@ export async function enqueueCampaignFromDB(campaignId, opts = {}) {
       }
     }
   } finally {
-    client.release();
     await ch.close();
     await conn.close();
   }
