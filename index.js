@@ -21,10 +21,12 @@ import pausasRoutes from './routes/pause.js';
 import queueHoursRoutes from './routes/queueHoursRoutes.js';
 import templatesRoutes from './routes/templates.js';
 import usersRoutes from './routes/users.js';
-import telegramRoutes from './routes/telegram.js';
+import campaignsRoutes from './routes/campaings.js';
+
 
 // 👉 NOVO
 import waEmbeddedRoutes from './routes/waEmbedded.js';
+import telegramRoutes from './routes/telegram.js';
 
 dotenv.config();
 
@@ -57,6 +59,7 @@ async function buildServer() {
   fastify.register(queueHoursRoutes,      { prefix: '/api/v1/queueHours' });
   fastify.register(templatesRoutes,      { prefix: '/api/v1/templates' });
   fastify.register(usersRoutes,      { prefix: '/api/v1/users' });
+  fastify.register(campaignsRoutes,      { prefix: '/api/v1/campaings' });
   
 
   // 👉 NOVO: Embedded Signup (prefixo próprio)
@@ -81,6 +84,7 @@ async function start() {
 }
 
 start();
+
 
 
 
