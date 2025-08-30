@@ -111,48 +111,93 @@ export default async function messagesRoutes(fastify) {
     return reply.send({ success: true, enqueued: true, message: pending, channel });
   });
 
-  // POST /api/v1/messages/send/template
-  fastify.post('/send/template', async (req, reply) => {
-    const { to, templateName, languageCode, components } = req.body || {};
-    if (!to || !templateName || !languageCode) {
-      return reply.code(400).send({ error: 'to, templateName, languageCode são obrigatórios' });
+ // POST /api/v1/messages/send/template
+fastify.post('/send/template', async (req, reply) => {
+  // Suporta ambos formatos:
+  // Novo (WABA): { to, template: { name, language: { code }, components? } }
+  // Antigo:      { to, templateName, languageCode, components? }
+  const { to } = req.body || {};
+  let { template } = req.body || {};
+
+  // Retrocompat: mapear antigo -> novo
+  if (!template) {
+    const { templateName, languageCode, components } = req.body || {};
+    if (templateName && languageCode) {
+      template = {
+        name: templateName,
+        language: { code: languageCode },
+        ...(components ? { components } : {})
+      };
     }
-    const channel = 'whatsapp';
-    const userId = formatUserId(to, channel);
-    const tempId = uuidv4();
+  }
 
-    const meta = JSON.stringify({ languageCode, components });
-    const { rows } = await req.db.query(
-      `INSERT INTO messages (
-         user_id, message_id, direction, "type", "content",
-         "timestamp", status, metadata, created_at, updated_at, channel
-       ) VALUES ($1,$2,'outgoing','template',$3,
-                 NOW(),'pending',$4,NOW(),NOW(),$5)
-       RETURNING *`,
-      [userId, tempId, templateName, meta, channel]
-    );
-    const pending = rows[0];
+  // Validação
+  if (!to) {
+    return reply.code(400).send({ error: 'to é obrigatório' });
+  }
+  if (!template || typeof template !== 'object') {
+    return reply.code(400).send({ error: 'template é obrigatório' });
+  }
+  if (!template.name || !template.language || !template.language.code) {
+    return reply.code(400).send({
+      error: 'template.name e template.language.code são obrigatórios'
+    });
+  }
+  if (template.components && !Array.isArray(template.components)) {
+    return reply.code(400).send({
+      error: 'template.components, se fornecido, deve ser um array'
+    });
+  }
 
-    const ch = await ensureAMQP();
-    ch.sendToQueue(
-      OUTGOING_QUEUE,
-      Buffer.from(JSON.stringify({
-        tempId,
-        channel: 'whatsapp',
-        to,
-        type: 'template',
-        content: { templateName, languageCode, components }
-      })),
-      { persistent: true, headers: { 'x-attempts': 0 } }
-    );
+  const channel = 'whatsapp';
+  const userId = formatUserId(to, channel);
+  const tempId = uuidv4();
 
-    try {
-      fastify.io?.to(`chat-${userId}`).emit('new_message', pending);
-      fastify.io?.emit('new_message', pending);
-    } catch {}
+  // Guardar o nome do template em content e o resto em metadata
+  const content = template.name;
+  const metaObj = {
+    languageCode: template.language.code,
+    components: template.components || null
+  };
+  const meta = JSON.stringify(metaObj);
 
-    return reply.send({ success: true, enqueued: true, message: pending, channel });
-  });
+  const { rows } = await req.db.query(
+    `INSERT INTO messages (
+       user_id, message_id, direction, "type", "content",
+       "timestamp", status, metadata, created_at, updated_at, channel
+     ) VALUES ($1,$2,'outgoing','template',$3,
+               NOW(),'pending',$4,NOW(),NOW(),$5)
+     RETURNING *`,
+    [userId, tempId, content, meta, channel]
+  );
+  const pending = rows[0];
+
+  const ch = await ensureAMQP();
+  ch.sendToQueue(
+    OUTGOING_QUEUE,
+    Buffer.from(JSON.stringify({
+      tempId,
+      channel: 'whatsapp',
+      to,
+      type: 'template',
+      // Enviar já no formato correto que o worker publicará no WABA:
+      template: {
+        name: template.name,
+        language: { code: template.language.code },
+        ...(template.components ? { components: template.components } : {})
+      }
+    })),
+    { persistent: true, headers: { 'x-attempts': 0 } }
+  );
+
+  try {
+    fastify.io?.to(`chat-${userId}`).emit('new_message', pending);
+    fastify.io?.emit('new_message', pending);
+  } catch {}
+
+  return reply.send({ success: true, enqueued: true, message: pending, channel });
+});
+
 
   // ===================== STATUS / CONTAGEM =====================
 
@@ -220,4 +265,5 @@ export default async function messagesRoutes(fastify) {
     return rows;
   });
 }
+
 
