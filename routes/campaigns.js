@@ -1,8 +1,7 @@
-
 // routes/campaigns.js
 import { v4 as uuidv4 } from 'uuid';
 import fastifyMultipart from '@fastify/multipart';
-import csvParser from 'csv-parser';
+import { parse as csvParser } from 'csv-parse';   // ✅ usamos csv-parse (stream), NÃO csv-parser
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -46,7 +45,7 @@ export default async function campaignsRoutes(fastify) {
 
     const campaignId = uuidv4();
 
-    // Cria campanha no DB (sem csv_path; guardamos só atributos do template)
+    // Cria campanha no DB (tenant-aware via req.db)
     const { rows } = await req.db.query(
       `INSERT INTO campaigns (id, name, template_name, language_code, components, start_at, status)
        VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -55,17 +54,25 @@ export default async function campaignsRoutes(fastify) {
        start_at ? new Date(start_at) : null, start_at ? 'scheduled' : 'started']
     );
 
-    // Parse CSV -> inserir em campaign_items
+    // Parse CSV -> inserir em campaign_items (streaming, usando csv-parse)
     let inserted = 0, skipped = 0;
     await new Promise((resolve, reject) => {
       const rowsToInsert = [];
+
       fs.createReadStream(tempPath)
-        .pipe(csvParser({ separator: ',', mapHeaders: ({ header }) => header.trim() }))
+        .pipe(csvParser({
+          delimiter: ',',
+          bom: true,
+          skip_empty_lines: true,
+          // columns como função para normalizar os headers (trim)
+          columns: (header) => header.map(h => String(h).trim())
+        }))
         .on('data', (row) => {
           const to = String(row.to || '').replace(/\D/g, '');
           if (!to) { skipped++; return; }
           const vars = { ...row }; delete vars.to;
           rowsToInsert.push({ to, vars });
+
           if (rowsToInsert.length >= 500) {
             // flush em lote
             const values = [];
@@ -109,11 +116,21 @@ export default async function campaignsRoutes(fastify) {
     // Exclui o CSV temporário
     try { fs.unlinkSync(tempPath); } catch {}
 
-    // Se start_at ausente -> dispara AGORA a partir do DB e marca finished
+    // Se start_at AUSENTE -> dispara AGORA a partir do DB e marca finished
     if (!start_at) {
-      const res = await enqueueCampaignFromDB(campaignId);
+      const tenant = req.tenant?.subdomain || 'default';     // ✅ pega o tenant da request
+      const res = await enqueueCampaignFromDB(campaignId, { tenant }); // ✅ fila = `${tenant}.campaign`
       await req.db.query(`UPDATE campaigns SET status='finished', updated_at=NOW() WHERE id=$1`, [campaignId]);
-      return { ok: true, campaign: rows[0], inserted, skipped, launched: true, published: res.published };
+
+      return {
+        ok: true,
+        campaign: rows[0],
+        inserted,
+        skipped,
+        launched: true,
+        published: res.published,
+        queue: `${tenant}.campaign`
+      };
     }
 
     // Programada: quem dispara é o worker-campaign-scheduler (lendo do DB)
