@@ -1,6 +1,5 @@
 // routes/campaigns.js
 import { v4 as uuidv4 } from 'uuid';
-import fastifyMultipart from '@fastify/multipart';
 import { parse as csvParser } from 'csv-parse';   // ✅ usamos csv-parse (stream), NÃO csv-parser
 import fs from 'fs';
 import os from 'os';
