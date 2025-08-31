@@ -19,60 +19,54 @@ export default async function campaignsRoutes(fastify) {
   //   - limit/offset (opcional; default 100/0)
   // Retorna também agregados de campaign_items para progresso.
   // =============================================================================
-  fastify.get('/', async (req, reply) => {
-    const { status = '', q = '', limit = '100', offset = '0' } = req.query || {};
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
-    const off = Math.max(parseInt(offset, 10) || 0, 0);
 
-    // só aceitamos status conhecidos; string vazia não filtra
-    const allowed = new Set(['queued', 'scheduled', 'finished', 'failed']);
-    const st = String(status || '');
-    const statusFilter = allowed.has(st) ? st : null;
+fastify.get('/', async (req) => {
+  const { status = '', q = '', limit = '100', offset = '0' } = req.query || {};
+  const lim = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+  const off = Math.max(parseInt(offset, 10) || 0, 0);
 
-    // agregados (lidos do worker de status e do scheduler):
-    // delivery_status em campaign_items pode ser: sent | delivered | read | failed (ou null)
-    const { rows } = await req.db.query(
-      `
-      WITH agg AS (
-        SELECT
-          campaign_id,
-          COUNT(*)::int                                               AS total_items,
-          COUNT(*) FILTER (WHERE COALESCE(delivery_status,'') <> '')::int
-                                                                      AS processed_count,
-          COUNT(*) FILTER (WHERE delivery_status = 'sent')::int       AS sent_count,
-          COUNT(*) FILTER (WHERE delivery_status = 'delivered')::int  AS delivered_count,
-          COUNT(*) FILTER (WHERE delivery_status = 'read')::int       AS read_count,
-          COUNT(*) FILTER (WHERE delivery_status = 'failed')::int     AS failed_count,
-          MAX(updated_at)                                            AS items_updated_at
-        FROM campaign_items
-        GROUP BY campaign_id
-      )
+  const allowed = new Set(['queued', 'scheduled', 'finished', 'failed']);
+  const st = String(status || '');
+  const statusFilter = allowed.has(st) ? st : null;
+
+  const { rows } = await req.db.query(
+    `
+    WITH agg AS (
       SELECT
-        c.id,
-        c.name,
-        c.template_name,
-        c.language_code,
-        c.status,
-        c.start_at,
-        c.updated_at,
-        COALESCE(a.total_items, 0)       AS total_items,
-        COALESCE(a.processed_count, 0)   AS processed_count,
-        COALESCE(a.sent_count, 0)        AS sent_count,
-        COALESCE(a.delivered_count, 0)   AS delivered_count,
-        COALESCE(a.read_count, 0)        AS read_count,
-        COALESCE(a.failed_count, 0)      AS failed_count
-      FROM campaigns c
-      LEFT JOIN agg a ON a.campaign_id = c.id
-      WHERE ($1::text IS NULL OR c.status = $1::text)
-        AND ($2::text IS NULL OR c.name ILIKE '%'||$2::text||'%')
-      ORDER BY c.updated_at DESC NULLS LAST, c.created_at DESC
-      LIMIT $3 OFFSET $4
-      `,
-      [statusFilter, q ? String(q) : null, lim, off]
-    );
+        campaign_id,
+        COUNT(*)::int                                               AS total_items,
+        COUNT(*) FILTER (WHERE COALESCE(delivery_status,'') <> '')::int
+                                                                    AS processed_count,
+        COUNT(*) FILTER (WHERE delivery_status = 'sent')::int       AS sent_count,
+        COUNT(*) FILTER (WHERE delivery_status = 'delivered')::int  AS delivered_count,
+        COUNT(*) FILTER (WHERE delivery_status = 'read')::int       AS read_count,
+        COUNT(*) FILTER (WHERE delivery_status = 'failed')::int     AS failed_count,
+        MAX(updated_at)                                            AS items_updated_at
+      FROM campaign_items
+      GROUP BY campaign_id
+    )
+    SELECT
+      c.id, c.name, c.template_name, c.language_code, c.status, c.start_at, c.updated_at,
+      COALESCE(a.total_items, 0)       AS total_items,
+      COALESCE(a.processed_count, 0)   AS processed_count,
+      COALESCE(a.sent_count, 0)        AS sent_count,
+      COALESCE(a.delivered_count, 0)   AS delivered_count,
+      COALESCE(a.read_count, 0)        AS read_count,
+      COALESCE(a.failed_count, 0)      AS failed_count,
+      GREATEST(COALESCE(a.total_items,0) - COALESCE(a.processed_count,0), 0) AS remaining
+    FROM campaigns c
+    LEFT JOIN agg a ON a.campaign_id = c.id
+    WHERE ($1::text IS NULL OR c.status = $1::text)
+      AND ($2::text IS NULL OR c.name ILIKE '%'||$2::text||'%')
+    ORDER BY c.updated_at DESC NULLS LAST, c.created_at DESC
+    LIMIT $3 OFFSET $4
+    `,
+    [statusFilter, q ? String(q) : null, lim, off]
+  );
 
-    return rows;
-  });
+  return rows;
+});
+
 
   // =============================================================================
   // GET /api/v1/campaigns/:id  → detalhes + agregados
