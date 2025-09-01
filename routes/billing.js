@@ -151,7 +151,7 @@ async function billingRoutes(fastify, _opts) {
 
   // ========== PRICING (public.billing_pricing) ==========
   // Listar preços
-  fastify.get('/pricing', async (_req, reply) => {
+  fastify.get('/pricing', async (req, reply) => {
     try {
       const { rows } = await req.db.query(
         `SELECT channel, price_cents, currency
@@ -160,7 +160,7 @@ async function billingRoutes(fastify, _opts) {
       );
       return reply.send(rows);
     } catch (err) {
-      _req.log.error(err, '[billing] pricing list');
+      req.log.error(err, '[billing] pricing list');
       return reply.code(500).send({ error: 'Erro ao listar preços' });
     }
   });
