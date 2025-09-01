@@ -89,7 +89,6 @@ export default async function campaignsRoutes(fastify) {
 
     return data;
   });
-}
 
 
   // =============================================================================
