@@ -5,7 +5,7 @@ async function pausasRoutes(fastify, _opts) {
   // Listar motivos (opcional ?active=true|false)
   fastify.get('/', async (req, reply) => {
     try {
-      const { active } = req.query || {};
+      const { active } = req.db.query || {};
       let q = `SELECT id, code, label, max_minutes, active, created_at, updated_at
                FROM pause_reasons`;
       const params = [];
