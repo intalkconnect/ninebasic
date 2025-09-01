@@ -23,7 +23,7 @@ async function billingRoutes(fastify, _opts) {
 
   // ========== EXTRATO AGREGADO (Geral por user_id+channel) ==========
   // GET /billing/statement?from=...&to=...&mode=start&channel=...
-  fastify.get('/billing/statement', async (req, reply) => {
+  fastify.get('/statement', async (req, reply) => {
     try {
       const from    = parseISO('from', req.query.from);
       const to      = parseISO('to',   req.query.to);
@@ -67,7 +67,7 @@ async function billingRoutes(fastify, _opts) {
 
   // ========== EXTRATO DIÁRIO (Geral por dia+canal) ==========
   // GET /billing/statement/daily?from=...&to=...&mode=start|activity&channel=...
-  fastify.get('/billing/statement/daily', async (req, reply) => {
+  fastify.get('/statement/daily', async (req, reply) => {
     try {
       const from    = parseISO('from', req.query.from);
       const to      = parseISO('to',   req.query.to);
@@ -106,7 +106,7 @@ async function billingRoutes(fastify, _opts) {
 
   // ========== DETALHE (lista cada sessão com preço) ==========
   // GET /billing/statement/detail?from=...&to=...&mode=start&channel=...&limit=100&offset=0
-  fastify.get('/billing/statement/detail', async (req, reply) => {
+  fastify.get('/statement/detail', async (req, reply) => {
     try {
       const from    = parseISO('from', req.query.from);
       const to      = parseISO('to',   req.query.to);
@@ -151,7 +151,7 @@ async function billingRoutes(fastify, _opts) {
 
   // ========== PRICING (public.billing_pricing) ==========
   // Listar preços
-  fastify.get('/billing/pricing', async (_req, reply) => {
+  fastify.get('/pricing', async (_req, reply) => {
     try {
       const { rows } = await req.db.query(
         `SELECT channel, price_cents, currency
@@ -166,7 +166,7 @@ async function billingRoutes(fastify, _opts) {
   });
 
   // Buscar preço de um canal
-  fastify.get('/billing/pricing/:channel', async (req, reply) => {
+  fastify.get('/pricing/:channel', async (req, reply) => {
     const { channel } = req.params;
     try {
       const { rows } = await req.db.query(
@@ -184,7 +184,7 @@ async function billingRoutes(fastify, _opts) {
   });
 
   // UPSERT de preço (por channel)
-  fastify.post('/billing/pricing', async (req, reply) => {
+  fastify.post('/pricing', async (req, reply) => {
     const { channel, price_cents, currency = 'BRL' } = req.body || {};
     if (!channel || typeof price_cents === 'undefined') {
       return reply.code(400).send({ error: 'channel e price_cents são obrigatórios' });
@@ -207,7 +207,7 @@ async function billingRoutes(fastify, _opts) {
   });
 
   // PUT preço
-  fastify.put('/billing/pricing/:channel', async (req, reply) => {
+  fastify.put('/pricing/:channel', async (req, reply) => {
     const { channel } = req.params;
     const { price_cents, currency = 'BRL' } = req.body || {};
     if (typeof price_cents === 'undefined') {
@@ -229,7 +229,7 @@ async function billingRoutes(fastify, _opts) {
   });
 
   // PATCH preço
-  fastify.patch('/billing/pricing/:channel', async (req, reply) => {
+  fastify.patch('/pricing/:channel', async (req, reply) => {
     const { channel } = req.params;
     const { price_cents, currency } = req.body || {};
     const sets = [];
@@ -255,7 +255,7 @@ async function billingRoutes(fastify, _opts) {
   });
 
   // DELETE preço
-  fastify.delete('/billing/pricing/:channel', async (req, reply) => {
+  fastify.delete('/pricing/:channel', async (req, reply) => {
     const { channel } = req.params;
     try {
       const { rowCount } = await req.db.query(
