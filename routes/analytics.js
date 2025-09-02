@@ -831,4 +831,101 @@ fastify.get('/metrics/series/csat', async (req, reply) => {
   }
 });
 
+fastify.get('/metrics/feedback/responses', async (req, reply) => {
+    try {
+      const {
+        from,
+        to,
+        type,            // 'nps' | 'csat' (opcional)
+        channel,         // ex: 'whatsapp' (opcional)
+        agentId,         // (opcional)
+        userId,          // (opcional)
+        q,               // busca textual em comment/user_id/agent_name/ticket_number/protocol
+        include_empty,   // 'true' para incluir respostas sem comment (default: false)
+        limit = '50',
+        offset = '0',
+        order = 'desc'
+      } = req.query || {};
+
+      // período padrão: 1º dia do mês atual (UTC) → agora
+      const now = new Date();
+      const startDefault = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0));
+      const start = from ? new Date(from) : startDefault;
+      const end   = to   ? new Date(to)   : now;
+
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()))
+        return reply.code(400).send({ error: 'Parâmetros de data inválidos' });
+      if (start > end)
+        return reply.code(400).send({ error: '`from` não pode ser maior que `to`' });
+
+      const lim = Math.max(1, Math.min(500, parseInt(limit, 10) || 50));
+      const off = Math.max(0, parseInt(offset, 10) || 0);
+      const ord = String(order).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+      const wantEmpty = include_empty === 'true' || include_empty === true;
+
+      const where = ['f.created_at >= $1', 'f.created_at < $2'];
+      const params = [start.toISOString(), end.toISOString()];
+
+      const add = (sql, val) => { where.push(sql.replace('?', `$${params.length + 1}`)); params.push(val); };
+
+      if (type && ['nps', 'csat'].includes(String(type).toLowerCase())) add('f.type = ?', String(type).toLowerCase());
+      if (channel) add('f.channel = ?', channel);
+      if (agentId) add('f.agent_id = ?', agentId);
+      if (userId)  add('f.user_id = ?', userId);
+
+      // por padrão só traz quem tem comentário
+      if (!wantEmpty) where.push('(f.comment IS NOT NULL AND length(btrim(f.comment)) > 0)');
+
+      if (q && String(q).trim()) {
+        const like = `%${String(q).trim()}%`;
+        const next = `$${params.length + 1}`;
+        where.push(`(f.comment ILIKE ${next}
+                 OR f.user_id ILIKE ${next}
+                 OR f.agent_name ILIKE ${next}
+                 OR f.ticket_number ILIKE ${next}
+                 OR f.protocol ILIKE ${next})`);
+        params.push(like);
+      }
+
+      const whereSql = where.join(' AND ');
+
+      // total para paginação
+      const totalSql = `SELECT COUNT(*)::int AS total FROM hmg.feedback_metrics f WHERE ${whereSql};`;
+      const { rows: totalRows } = await req.db.query(totalSql, params);
+      const total = totalRows[0]?.total || 0;
+
+      // lista paginada
+      const listSql = `
+        SELECT
+          f.id,
+          f.type,
+          f.score,
+          f.category,
+          f.label,
+          f.comment,
+          f.channel,
+          f.ticket_number,
+          f.protocol,
+          f.agent_id,
+          f.agent_name,
+          f.user_id,
+          f.created_at
+        FROM hmg.feedback_metrics f
+        WHERE ${whereSql}
+        ORDER BY f.created_at ${ord}
+        LIMIT ${lim} OFFSET ${off};
+      `;
+      const { rows } = await req.db.query(listSql, params);
+
+      return reply.send({
+        period: { from: start.toISOString(), to: end.toISOString() },
+        page:   { limit: lim, offset: off, order: ord.toLowerCase(), total },
+        data:   rows
+      });
+    } catch (err) {
+      fastify.log.error(err, 'Erro ao listar comentários de feedback');
+      return reply.code(500).send({ error: 'Erro ao listar comentários de feedback' });
+    }
+  });
+  
 }
