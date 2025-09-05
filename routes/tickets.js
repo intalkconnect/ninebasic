@@ -18,6 +18,116 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
+  // DENTRO de ticketsRoutes(fastify, options), ANTES da rota '/:user_id'
+
+/**
+ * GET /tickets/:id?include=messages&messages_limit=100
+ * - :id deve ser numérico (id da tabela tickets)
+ * - include=messages (opcional) para anexar o array de mensagens do hmg.messages
+ * - messages_limit (1..500, default 100)
+ */
+fastify.get('/:id', async (req, reply) => {
+  const { id } = req.params || {};
+  const { include, messages_limit } = req.query || {};
+
+  // Garante que esta rota só atende números e deixa '/:user_id' cuidar do restante
+  if (!/^\d+$/.test(String(id))) {
+    return reply.callNotFound();
+  }
+
+  const limit = Math.min(Math.max(parseInt(messages_limit || '100', 10) || 100, 1), 500);
+  const withMessages = String(include || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .includes('messages');
+
+  try {
+    // 1) Busca o ticket por ID
+    const tRes = await req.db.query(
+      `
+      SELECT
+        t.id,
+        t.ticket_number,
+        t.user_id,
+        t.fila,
+        t.assigned_to,
+        t.status,
+        t.created_at,
+        t.updated_at,
+        t.closed_at
+      FROM tickets t
+      WHERE t.id = $1
+      `,
+      [Number(id)]
+    );
+
+    if (tRes.rowCount === 0) {
+      return reply.code(404).send({ error: 'Ticket não encontrado' });
+    }
+    const ticket = tRes.rows[0];
+
+    // 2) (opcional) inclui mensagens pelo ticket_number
+    if (withMessages && ticket.ticket_number) {
+      const mRes = await req.db.query(
+        `
+        SELECT
+          m.id,
+          m.user_id,
+          m.message_id,
+          m.direction,
+          m."type",
+          m."content",
+          m."timestamp",
+          m.channel,
+          m.ticket_number,
+          m.assigned_to
+        FROM messages m
+        WHERE m.ticket_number = $1
+        ORDER BY m."timestamp" ASC, m.id ASC
+        LIMIT $2
+        `,
+        [String(ticket.ticket_number), limit]
+      );
+
+      // 3) mapeia para o formato esperado pelo front (minimalista)
+      const mapped = (mRes.rows || []).map((m) => {
+        const dir = String(m.direction || '').toLowerCase();
+        const fromAgent = dir === 'outgoing' || dir === 'system';
+        const sender =
+          dir === 'outgoing'
+            ? (m.assigned_to || ticket.assigned_to || 'Atendente')
+            : dir === 'system'
+            ? 'Sistema'
+            : 'Cliente';
+
+        return {
+          id: m.id,                              // uuid
+          direction: dir,                        // 'incoming' | 'outgoing' | 'system'
+          type: m.type,                          // ex.: 'text'
+          text: m.content,                       // seu esquema usa 'content' (text)
+          created_at: m.timestamp,               // timestamptz
+          channel: m.channel,
+          message_id: m.message_id,
+          ticket_number: m.ticket_number,
+          from_agent: fromAgent,
+          sender_name: sender,
+        };
+      });
+
+      ticket.messages = mapped;
+    }
+
+    return reply.send(ticket);
+  } catch (err) {
+    req.log.error({ err }, 'Erro em GET /tickets/:id (com messages)');
+    return reply.code(500).send({
+      error: 'Erro interno ao buscar ticket',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+});
+
+
   // GET /tickets/last/:user_id → retorna o ticket mais recente do usuário
 fastify.get('/last/:user_id', async (req, reply) => {
   const { user_id } = req.params;
