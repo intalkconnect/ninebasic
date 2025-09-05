@@ -160,7 +160,9 @@ fastify.get('/history/:id', async (req, reply) => {
           delivered_at: m.delivered_at,
           read_at: m.read_at,
           status: deriveStatus(m),       // 'read' | 'delivered' | 'sent' | 'received'
-          metadata: m.metadata || null
+          metadata: m.metadata || null,
+          reply_to: m.reply_to || m.metadata?.context?.message_id || null,
+          context: m.metadata?.context || null
         };
       });
     }
