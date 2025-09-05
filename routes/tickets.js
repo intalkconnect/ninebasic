@@ -24,7 +24,13 @@ async function ticketsRoutes(fastify, options) {
    * - include=messages (opcional) para anexar o array de mensagens de hmg.messages
    * - messages_limit (1..500, default 100)
    */
- fastify.get('/history/:id', async (req, reply) => {
+/**
+ * GET /tickets/history/:id?include=messages&messages_limit=100
+ * - :id é o UUID do ticket (hmg.tickets.id)
+ * - include=messages (opcional) para anexar as mensagens
+ * - messages_limit: 1..500 (default: 100)
+ */
+fastify.get('/history/:id', async (req, reply) => {
   const { id } = req.params || {};
   const { include, messages_limit } = req.query || {};
 
@@ -32,11 +38,11 @@ async function ticketsRoutes(fastify, options) {
   const limit = Math.min(Math.max(parseInt(messages_limit || '100', 10) || 100, 1), 500);
   const withMessages = String(include || '')
     .split(',')
-    .map((s) => s.trim().toLowerCase())
+    .map(s => s.trim().toLowerCase())
     .includes('messages');
 
   try {
-    // 1) Ticket por ID (UUID) — sem 'closed_at'
+    // 1) Ticket por ID (UUID). (Sem closed_at no seu schema)
     const tRes = await req.db.query(
       `
       SELECT
@@ -60,8 +66,8 @@ async function ticketsRoutes(fastify, options) {
 
     const ticket = tRes.rows[0];
 
-    // 2) Mensagens (opcional) via ticket_number
     if (withMessages && ticket.ticket_number) {
+      // 2) Mensagens do ticket por ticket_number (ordem cronológica)
       const mRes = await req.db.query(
         `
         SELECT
@@ -74,7 +80,10 @@ async function ticketsRoutes(fastify, options) {
           m."timestamp",
           m.channel,
           m.ticket_number,
-          m.assigned_to
+          m.assigned_to,
+          m.delivered_at,
+          m.read_at,
+          m.metadata
         FROM messages m
         WHERE m.ticket_number = $1
         ORDER BY m."timestamp" ASC, m.id ASC
@@ -83,28 +92,75 @@ async function ticketsRoutes(fastify, options) {
         [String(ticket.ticket_number), limit]
       );
 
-      // 3) Mapeia para o formato usado no front
+      // helpers de normalização (compatível com ChatWindow)
+      const safeParse = (raw) => {
+        if (raw == null) return null;
+        if (typeof raw === 'object') return raw;
+        const s = String(raw);
+        try {
+          const v = JSON.parse(s);
+          return v;
+        } catch {
+          // se a content for uma URL direta
+          if (/^https?:\/\//i.test(s)) return { url: s };
+          return s; // texto puro
+        }
+      };
+
+      const mergeContent = (rawContent, meta, type) => {
+        const c = safeParse(rawContent);
+        const out =
+          (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
+          (typeof c === 'string' ? { text: c } : {});
+        const m = meta || {};
+        out.url        ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
+        out.filename   ??= m.filename || m.name || null;
+        out.mime_type  ??= m.mime || m.mimetype || m.content_type || null;
+        out.caption    ??= m.caption || null;
+        out.voice      ??= m.voice || (String(type).toLowerCase() === 'audio' ? true : undefined);
+        out.size       ??= m.size || m.filesize || null;
+        out.width      ??= m.width || null;
+        out.height     ??= m.height || null;
+        out.duration   ??= m.duration || m.audio_duration || null;
+        return out;
+      };
+
+      const deriveStatus = (row) => {
+        if (row.read_at) return 'read';
+        if (row.delivered_at) return 'delivered';
+        if (String(row.direction).toLowerCase() === 'outgoing') return 'sent';
+        return 'received';
+      };
+
+      // 3) Mapeia para o formato do front
       ticket.messages = (mRes.rows || []).map((m) => {
         const dir = String(m.direction || '').toLowerCase();
-        const fromAgent = dir === 'outgoing' || dir === 'system';
-        const sender =
-          dir === 'outgoing'
-            ? (m.assigned_to || ticket.assigned_to || 'Atendente')
-            : dir === 'system'
-            ? 'Sistema'
-            : 'Cliente';
+        const type = String(m.type || '').toLowerCase(); // 'document' | 'image' | 'audio' | 'interactive' | 'text' | ...
+        const content = mergeContent(m.content, m.metadata, type);
 
         return {
           id: m.id,
-          direction: dir,          // 'incoming' | 'outgoing' | 'system'
-          type: m.type,            // ex.: 'text'
-          text: m.content,         // conteúdo textual
-          created_at: m.timestamp, // timestamptz
+          direction: dir,
+          type,                          // preserva o tipo original
+          content,                       // objeto/string normalizado
+          text:
+            typeof content === 'string' ? content :
+            (content.text || content.body || content.caption || null),
+          timestamp: m.timestamp,        // compatível com ChatWindow
+          created_at: m.timestamp,       // mantido por compatibilidade
           channel: m.channel,
           message_id: m.message_id,
           ticket_number: m.ticket_number,
-          from_agent: fromAgent,
-          sender_name: sender,
+          from_agent: dir === 'outgoing' || dir === 'system',
+          sender_name: dir === 'outgoing'
+            ? (m.assigned_to || ticket.assigned_to || 'Atendente')
+            : dir === 'system'
+            ? 'Sistema'
+            : null,                      // NÃO mostrar “Cliente”
+          delivered_at: m.delivered_at,
+          read_at: m.read_at,
+          status: deriveStatus(m),       // 'read' | 'delivered' | 'sent' | 'received'
+          metadata: m.metadata || null
         };
       });
     }
@@ -118,6 +174,7 @@ async function ticketsRoutes(fastify, options) {
     });
   }
 });
+
 
   // GET /tickets/last/:user_id → retorna o ticket mais recente do usuário
   fastify.get('/last/:user_id', async (req, reply) => {
