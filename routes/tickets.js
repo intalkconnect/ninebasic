@@ -26,7 +26,7 @@ async function ticketsRoutes(fastify, options) {
  * - include=messages (opcional) para anexar o array de mensagens do hmg.messages
  * - messages_limit (1..500, default 100)
  */
-fastify.get('/:id', async (req, reply) => {
+fastify.get('/history/:id', async (req, reply) => {
   const { id } = req.params || {};
   const { include, messages_limit } = req.query || {};
 
