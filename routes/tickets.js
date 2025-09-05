@@ -24,109 +24,100 @@ async function ticketsRoutes(fastify, options) {
    * - include=messages (opcional) para anexar o array de mensagens de hmg.messages
    * - messages_limit (1..500, default 100)
    */
-  fastify.get('/history/:id', async (req, reply) => {
-    const { id } = req.params || {};
-    const { include, messages_limit } = req.query || {};
+ fastify.get('/history/:id', async (req, reply) => {
+  const { id } = req.params || {};
+  const { include, messages_limit } = req.query || {};
 
-    // aceita número ou UUID
-    const idStr = String(id);
-    const isNumeric = /^\d+$/.test(idStr);
-    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idStr);
-    if (!isNumeric && !isUUID) {
-      return reply.code(400).send({ error: 'Parâmetro id inválido: use ID numérico ou UUID do ticket' });
+  const idStr = String(id);
+  const limit = Math.min(Math.max(parseInt(messages_limit || '100', 10) || 100, 1), 500);
+  const withMessages = String(include || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .includes('messages');
+
+  try {
+    // 1) Ticket por ID (UUID) — sem 'closed_at'
+    const tRes = await req.db.query(
+      `
+      SELECT
+        t.id::text        AS id,
+        t.ticket_number,
+        t.user_id,
+        t.fila,
+        t.assigned_to,
+        t.status,
+        t.created_at,
+        t.updated_at
+      FROM tickets t
+      WHERE t.id::text = $1
+      `,
+      [idStr]
+    );
+
+    if (tRes.rowCount === 0) {
+      return reply.code(404).send({ error: 'Ticket não encontrado' });
     }
 
-    const limit = Math.min(Math.max(parseInt(messages_limit || '100', 10) || 100, 1), 500);
-    const withMessages = String(include || '')
-      .split(',')
-      .map((s) => s.trim().toLowerCase())
-      .includes('messages');
+    const ticket = tRes.rows[0];
 
-    try {
-      // 1) Busca o ticket por ID (numérico OU uuid)
-      const tRes = await req.db.query(
+    // 2) Mensagens (opcional) via ticket_number
+    if (withMessages && ticket.ticket_number) {
+      const mRes = await req.db.query(
         `
         SELECT
-          t.id,
-          t.ticket_number,
-          t.user_id,
-          t.fila,
-          t.assigned_to,
-          t.status,
-          t.created_at,
-          t.updated_at,
-          t.closed_at
-        FROM tickets t
-        WHERE ${isNumeric ? 't.id = $1::bigint' : 't.id::text = $1'}
+          m.id::text      AS id,
+          m.user_id,
+          m.message_id,
+          m.direction,
+          m."type",
+          m."content",
+          m."timestamp",
+          m.channel,
+          m.ticket_number,
+          m.assigned_to
+        FROM messages m
+        WHERE m.ticket_number = $1
+        ORDER BY m."timestamp" ASC, m.id ASC
+        LIMIT $2
         `,
-        [idStr]
+        [String(ticket.ticket_number), limit]
       );
 
-      if (tRes.rowCount === 0) {
-        return reply.code(404).send({ error: 'Ticket não encontrado' });
-      }
-      const ticket = tRes.rows[0];
+      // 3) Mapeia para o formato usado no front
+      ticket.messages = (mRes.rows || []).map((m) => {
+        const dir = String(m.direction || '').toLowerCase();
+        const fromAgent = dir === 'outgoing' || dir === 'system';
+        const sender =
+          dir === 'outgoing'
+            ? (m.assigned_to || ticket.assigned_to || 'Atendente')
+            : dir === 'system'
+            ? 'Sistema'
+            : 'Cliente';
 
-      // 2) (opcional) inclui mensagens via ticket_number
-      if (withMessages && ticket.ticket_number) {
-        const mRes = await req.db.query(
-          `
-          SELECT
-            m.id,
-            m.user_id,
-            m.message_id,
-            m.direction,
-            m."type",
-            m."content",
-            m."timestamp",
-            m.channel,
-            m.ticket_number,
-            m.assigned_to
-          FROM messages m
-          WHERE m.ticket_number = $1
-          ORDER BY m."timestamp" ASC, m.id ASC
-          LIMIT $2
-          `,
-          [String(ticket.ticket_number), limit]
-        );
-
-        // mapeia para o formato do front
-        const mapped = (mRes.rows || []).map((m) => {
-          const dir = String(m.direction || '').toLowerCase();
-          const fromAgent = dir === 'outgoing' || dir === 'system';
-          const sender =
-            dir === 'outgoing'
-              ? (m.assigned_to || ticket.assigned_to || 'Atendente')
-              : dir === 'system'
-              ? 'Sistema'
-              : 'Cliente';
-
-          return {
-            id: m.id,                    // uuid
-            direction: dir,              // 'incoming' | 'outgoing' | 'system'
-            type: m.type,                // ex.: 'text'
-            text: m.content,             // conteúdo textual
-            created_at: m.timestamp,     // timestamptz
-            channel: m.channel,
-            message_id: m.message_id,
-            ticket_number: m.ticket_number,
-            from_agent: fromAgent,
-            sender_name: sender,
-          };
-        });
-
-        ticket.messages = mapped;
-      }
-
-      return reply.send(ticket);
-    } catch (err) {
-      req.log.error({ err }, 'Erro em GET /tickets/history/:id');
-      return reply.code(500).send({
-        error: 'Erro interno ao buscar ticket',
-        details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+        return {
+          id: m.id,
+          direction: dir,          // 'incoming' | 'outgoing' | 'system'
+          type: m.type,            // ex.: 'text'
+          text: m.content,         // conteúdo textual
+          created_at: m.timestamp, // timestamptz
+          channel: m.channel,
+          message_id: m.message_id,
+          ticket_number: m.ticket_number,
+          from_agent: fromAgent,
+          sender_name: sender,
+        };
       });
     }
-  });
+
+    return reply.send(ticket);
+  } catch (err) {
+    req.log.error({ err }, 'Erro em GET /tickets/history/:id');
+    return reply.code(500).send({
+      error: 'Erro interno ao buscar ticket',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+});
 
   // GET /tickets/last/:user_id → retorna o ticket mais recente do usuário
   fastify.get('/last/:user_id', async (req, reply) => {
