@@ -18,380 +18,352 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-// GET /tickets/history/:id/pdf -> download de PDF com layout "chat"
-// - outbound (outgoing/system) à direita (azul)
-// - inbound (incoming) à esquerda (cinza)
-// - título centralizado
-// - imagens embutidas; demais anexos com link "Baixar"
-fastify.get('/history/:id/pdf', async (req, reply) => {
-  const { createRequire } = await import('node:module');
-  const require     = createRequire(import.meta.url);
-  const PDFDocument = require('pdfkit');
+// routes/tickets.js (trecho) — GET /tickets/history/:id/pdf
+import { PassThrough, pipeline as _pipeline } from 'node:stream';
+import { promisify } from 'node:util';
+const pipeline = promisify(_pipeline);
 
-  const { id } = req.params || {};
+async function ticketsRoutes(fastify) {
+  // ...
 
-  // ========== Ticket + Cliente ==========
-  const tRes = await req.db.query(
-    `
-    SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
-           t.status, t.created_at, t.updated_at,
-           c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
-      FROM tickets t
-      LEFT JOIN clientes c ON c.user_id = t.user_id
-     WHERE t.id::text = $1
-    `,
-    [String(id)]
-  );
-  if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
-  const ticket   = tRes.rows[0];
-  const num      = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : null;
-  const filename = num ? `ticket-${num}.pdf` : `ticket-sem-numero.pdf`;
+  fastify.get('/history/:id/pdf', async (req, reply) => {
+    const { id } = req.params || {};
+    const { createRequire } = await import('node:module');
+    const require = createRequire(import.meta.url);
+    const PDFDocument = require('pdfkit'); // CJS em ESM
 
-  // ========== Mensagens ==========
-  const mRes = await req.db.query(
-    `
-    SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
-           m.metadata, m.assigned_to
-      FROM messages m
-     WHERE m.ticket_number = $1
-     ORDER BY m."timestamp" ASC, m.id ASC
-     LIMIT 1000
-    `,
-    [String(ticket.ticket_number || '')]
-  );
-  const msgs = mRes.rows || [];
+    // 1) Ticket + cliente
+    const tRes = await req.db.query(
+      `
+      SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
+             t.status, t.created_at, t.updated_at,
+             c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
+        FROM tickets t
+        LEFT JOIN clientes c ON c.user_id = t.user_id
+       WHERE t.id::text = $1
+      `,
+      [String(id)]
+    );
+    if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
+    const ticket = tRes.rows[0];
 
-  // ========== Helpers ==========
-  const parseText = (raw) => {
-    try {
-      if (!raw) return '';
-      if (typeof raw === 'object') {
-        const t = raw.text || raw.body || raw.caption || raw.message;
-        return typeof t === 'string' ? t : (t ? String(t) : JSON.stringify(raw));
-      }
+    // 2) Mensagens (ordenadas)
+    const mRes = await req.db.query(
+      `
+      SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
+             m.metadata, m.assigned_to
+        FROM messages m
+       WHERE m.ticket_number = $1
+       ORDER BY m."timestamp" ASC, m.id ASC
+       LIMIT 2000
+      `,
+      [String(ticket.ticket_number || '')]
+    );
+    const rows = mRes.rows || [];
+
+    // 3) Cabeçalho HTTP + PassThrough
+    const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
+    const filename = `ticket-${num}.pdf`;
+    reply
+      .header('Content-Type', 'application/pdf')
+      .header('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const out = new PassThrough();
+    // Importantíssimo: enviar o PassThrough e só escrever via pipeline
+    reply.send(out);
+
+    // 4) Helpers de conteúdo
+    const safeParse = (raw) => {
+      if (raw == null) return null;
+      if (typeof raw === 'object') return raw;
       const s = String(raw);
-      try { const o = JSON.parse(s); return o?.text || o?.body || o?.caption || s; }
-      catch { return s; }
-    } catch { return ''; }
-  };
-
-  const extractMeta = (metaLike) => {
-    try { return typeof metaLike === 'string' ? JSON.parse(metaLike || '{}') || {} : (metaLike || {}); }
-    catch { return {}; }
-  };
-
-  const extractUrlAndFile = (metaLike, contentType, contentUrlMaybe) => {
-    const meta = extractMeta(metaLike);
-    const url  = meta.url || meta.file_url || meta.public_url || meta.download_url || contentUrlMaybe || null;
-    let filename = meta.filename || meta.name || null;
-    const mime = meta.mime || meta.mimetype || meta.content_type || null;
-    let size = meta.size || meta.filesize || null;
-
-    if (!filename && url) {
-      try { const u = new URL(url); filename = decodeURIComponent(u.pathname.split('/').pop() || 'arquivo'); }
-      catch { filename = 'arquivo'; }
-    }
-    return { url, filename, mime, size, type: (contentType || '').toLowerCase() };
-  };
-
-  const looksLikeImage = ({ mime, url, type }) => {
-    if (type === 'image') return true;
-    if (mime && /^image\//i.test(mime)) return true;
-    if (url && /\.(png|jpe?g|gif|webp)$/i.test(url)) return true;
-    return false;
-  };
-
-  // Pequenas rotinas para descobrir dimensão de PNG/JPEG a partir do Buffer (sem dependências)
-  const getPngSize = (buf) => {
-    const sig = '89504e470d0a1a0a';
-    if (buf.length >= 24 && buf.slice(0,8).toString('hex') === sig) {
-      const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20);
-      return { width: w, height: h };
-    }
-    return null;
-  };
-  const getJpegSize = (buf) => {
-    // Procura SOF0/2
-    let i = 2;
-    while (i < buf.length) {
-      if (buf[i] !== 0xFF) { i++; continue; }
-      const marker = buf[i+1];
-      const len = buf.readUInt16BE(i+2);
-      if (marker === 0xC0 || marker === 0xC2) {
-        const h = buf.readUInt16BE(i+5), w = buf.readUInt16BE(i+7);
-        return { width: w, height: h };
+      try { return JSON.parse(s); } catch {
+        if (/^https?:\/\//i.test(s)) return { url: s };
+        return s;
       }
-      i += 2 + len;
-    }
-    return null;
-  };
-  const getImageSize = (buf) => getPngSize(buf) || getJpegSize(buf) || null;
-
-  // fetch com fallback (Node >= 18 já tem global fetch)
-  let doFetch = globalThis.fetch;
-  if (!doFetch) {
-    try { doFetch = (await import('undici')).fetch; } catch { /* sem fetch -> sem imagem inline */ }
-  }
-
-  // Precarrega buffers de imagens quando fizer sentido (para medir altura antes de desenhar a bolha)
-  async function loadImageIfAny(meta, isImage) {
-    if (!isImage || !meta.url || !doFetch) return null;
-    try {
-      const res = await doFetch(meta.url);
-      if (!res.ok) return null;
-      const ab = await res.arrayBuffer();
-      return Buffer.from(ab);
-    } catch {
-      return null;
-    }
-  }
-
-  // ========== Constrói o PDF (em memória) ==========
-  function buildPdf(ticket, messages) {
-    return new Promise(async (resolve, reject) => {
+    };
+    const normalize = (raw, meta, type) => {
+      const c = safeParse(raw);
+      const base =
+        (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
+        (typeof c === 'string' ? { text: c } : {});
+      const m = meta || {};
+      base.url       ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
+      base.filename  ??= m.filename || m.name || null;
+      base.mime_type ??= m.mime || m.mimetype || m.content_type || null;
+      base.caption   ??= m.caption || null;
+      base.size      ??= m.size || m.filesize || null;
+      return base;
+    };
+    const isImageUrl = (url) => /\.(png|jpe?g)$/i.test(url || '');
+    const isImageMime = (mime) => /^image\/(png|jpe?g)$/i.test(String(mime || ''));
+    async function fetchImageBuffer(url, signal) {
       try {
-        const doc = new PDFDocument({ size: 'A4', margin: 36 });
-        const chunks = [];
-        doc.on('data', (c) => chunks.push(c));
-        doc.on('error', reject);
-        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        const rsp = await fetch(url, { signal });
+        if (!rsp.ok) return null;
+        const ct = rsp.headers.get('content-type') || '';
+        if (!/^image\/(png|jpe?g)/i.test(ct)) return null;
+        const ab = await rsp.arrayBuffer();
+        return Buffer.from(ab);
+      } catch {
+        return null;
+      }
+    }
 
-        // Paleta e métricas
-        const palette = {
-          inboundBg:  '#F1F5F9',   // cinza p/ inbound (esquerda)
-          inboundText:'#0f172a',
-          outboundBg: '#2563eb',   // azul p/ outbound (direita)
-          outboundText:'#ffffff',
-          subText:    '#64748b',
-          divider:    '#e5e7eb',
-          dateChipBg: '#e2e8f0',
-          link:       '#2563eb',
-        };
-        const MARGIN = 36;
-        const PAGE_W = doc.page.width, PAGE_H = doc.page.height;
-        const CONTENT_X = MARGIN;
-        const CONTENT_W = PAGE_W - MARGIN * 2;
-        const BUBBLE_MAX_W = Math.round(CONTENT_W * 0.72);
-        const PAD_X = 10, PAD_Y = 8;
-        const GAP_Y = 10;
-        const BUBBLE_R = 10;
-        const IMG_MAX_H = 280;
+    // 5) Render do PDF (layout de chat)
+    const doc = new PDFDocument({ size: 'A4', margin: 36 });
+    const pump = pipeline(doc, out); // encerra quando doc.end()
 
-        const ensurePage = (neededH = 0) => {
-          const bottom = doc.y + neededH + 10;
-          if (bottom > PAGE_H - MARGIN) {
-            doc.addPage();
-            doc.y = MARGIN;
-          }
-        };
+    // Métricas
+    const pageW = doc.page.width;
+    const pageH = doc.page.height;
+    const M = 36;                         // margem
+    const contentW = pageW - M * 2;       // largura útil
+    const maxBubbleW = Math.min(380, contentW * 0.78);
+    const gapY = 10;                      // espaçamento entre mensagens
+    const bubblePadX = 10;
+    const bubblePadY = 8;
 
-        // ===== Cabeçalho central =====
-        const title = `Ticket #${num ?? '—'}`;
-        doc.font('Helvetica-Bold').fontSize(18);
-        const titleW = doc.widthOfString(title);
-        doc.text(title, CONTENT_X + (CONTENT_W - titleW) / 2, doc.y, { width: titleW, align: 'center' });
-        doc.moveDown(0.25);
-        doc.font('Helvetica').fontSize(10).fillColor(palette.subText)
-           .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, {
-             align: 'center',
-             width: CONTENT_W
-           });
-        doc.moveDown(0.8).fillColor('#000');
+    // Cores
+    const colIncomingBg = '#F3F4F6'; // cinza claro
+    const colOutgoingBg = '#2563EB'; // azul
+    const colOutgoingTx = '#FFFFFF';
+    const colMeta = '#6B7280';       // cinza
+    const colSystemBg = '#E5E7EB';   // pílula
 
-        // ===== Info compacta do ticket =====
-        const infoKVs = [
-          ['Cliente', ticket.customer_name || ticket.user_id || '—'],
-          ['Contato', [ticket.customer_phone, ticket.customer_email].filter(Boolean).join(' · ') || '—'],
-          ['Fila', ticket.fila || '—'],
-          ['Atendente', ticket.assigned_to || '—'],
-          ['Status', ticket.status || '—'],
-          ['Última atualização', new Date(ticket.updated_at).toLocaleString('pt-BR')],
-        ];
+    // Header do ticket
+    doc.font('Helvetica-Bold').fontSize(18).fillColor('#111827')
+       .text(`Ticket #${num}`, { align: 'left' });
+    doc.moveDown(0.3);
+    doc.font('Helvetica').fontSize(10).fillColor('#6B7280')
+       .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
+    doc.moveDown(0.4);
 
-        doc.font('Helvetica').fontSize(10);
-        infoKVs.forEach(([k, v], idx) => {
-          doc.font('Helvetica-Bold').fillColor(palette.subText).text(k.toUpperCase(), { width: CONTENT_W });
-          doc.font('Helvetica').fillColor('#000').text(v, { width: CONTENT_W });
-          if (idx === 1) {
-            doc.moveDown(0.2);
-            doc.save(); doc.rect(CONTENT_X, doc.y, CONTENT_W, 1).fill(palette.divider); doc.restore();
-            doc.moveDown(0.4);
-          } else {
-            doc.moveDown(0.4);
-          }
-        });
+    // Bloco de dados do cliente (compacto, duas colunas)
+    const leftColX = M;
+    const rightColX = M + contentW / 2;
+    const lineH = 14;
 
-        // ===== Título "Conversa" =====
-        doc.moveDown(0.6);
-        doc.font('Helvetica-Bold').fontSize(12).text('Conversa', { width: CONTENT_W });
-        doc.moveDown(0.3);
+    function labelValue(label, value, x, y) {
+      doc.fillColor('#6B7280').font('Helvetica-Bold').fontSize(9).text(label, x, y);
+      doc.fillColor('#111827').font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
+      return y + 10 + lineH;
+    }
+    let y = doc.y;
+    const yStartInfo = y;
+    y = labelValue('Cliente', ticket.customer_name || ticket.user_id, leftColX, y);
+    y = labelValue('Contato', ticket.customer_phone || ticket.customer_email || '—', leftColX, y);
 
-        if (!messages.length) {
-          doc.font('Helvetica').fontSize(10).fillColor(palette.subText)
-             .text('Não há histórico de mensagens para este ticket.', { width: CONTENT_W });
-          doc.end();
-          return;
+    let y2 = yStartInfo;
+    y2 = labelValue('Fila', ticket.fila, rightColX, y2);
+    y2 = labelValue('Atendente', ticket.assigned_to, rightColX, y2);
+    const yMaxInfo = Math.max(y, y2);
+    doc.moveTo(M, yMaxInfo + 8).lineTo(M + contentW, yMaxInfo + 8).strokeColor('#E5E7EB').lineWidth(1).stroke();
+    doc.y = yMaxInfo + 16;
+
+    // Título "Conversa"
+    doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Conversa');
+    doc.moveDown(0.4);
+
+    // Caso não exista conversa
+    if (!rows.length) {
+      doc.fillColor('#6B7280').fontSize(11).text('Não há histórico de mensagens neste ticket.', {
+        align: 'center',
+        width: contentW
+      });
+      doc.end();
+      return pump;
+    }
+
+    // Utilitário: nova página quando faltar espaço
+    function ensureSpace(need) {
+      if (doc.y + need <= pageH - M) return;
+      doc.addPage();
+      // cabeçalho leve da seção
+      doc.fillColor('#6B7280').font('Helvetica').fontSize(10)
+         .text(`Ticket #${num} — continuação`, M, M);
+      doc.moveDown(0.5);
+    }
+
+    // Separador de data
+    let lastDay = '';
+    function drawDaySeparator(date) {
+      const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      const pillPadX = 8, pillPadY = 3;
+      const w = doc.widthOfString(label) + pillPadX * 2;
+      const x = M + (contentW - w) / 2;
+      const h = doc.currentLineHeight() + pillPadY * 2;
+      ensureSpace(h + 8);
+      doc.save()
+        .roundRect(x, doc.y, w, h, 6).fill(colSystemBg)
+        .fillColor('#374151').fontSize(9).text(label, x + pillPadX, doc.y + pillPadY, { width: w - pillPadX * 2, align: 'center' })
+        .restore();
+      doc.moveDown(0.6);
+    }
+
+    // Bolha
+    async function drawBubble({ who, when, isIncoming, isOutgoing, isSystem, bodyText, fileLinks, imageUrl, imageBuf }) {
+      const meta = `${who} — ${when}`;
+      const textColor = isOutgoing ? colOutgoingTx : '#111827';
+      const metaColor = isOutgoing ? '#DDE7FF' : colMeta;
+      const bg = isOutgoing ? colOutgoingBg : colIncomingBg;
+
+      // Central para system
+      if (isSystem) {
+        const padX = 10, padY = 6;
+        const w = Math.min(300, contentW * 0.6);
+        const h = doc.heightOfString(bodyText || meta, { width: w - padX * 2 }) + padY * 2;
+        ensureSpace(h + 8);
+        const x = M + (contentW - w) / 2;
+        doc.save()
+          .roundRect(x, doc.y, w, h, 8).fill(colSystemBg)
+          .fillColor('#374151').font('Helvetica').fontSize(10)
+          .text(bodyText || meta, x + padX, doc.y + padY, { width: w - padX * 2 })
+          .restore();
+        doc.moveDown(0.5);
+        return;
+      }
+
+      // Conteúdo para medir
+      const innerW = maxBubbleW - bubblePadX * 2;
+      const textH = bodyText ? doc.heightOfString(bodyText, { width: innerW }) : 0;
+
+      let imgH = 0, imgW = 0;
+      if (imageBuf) {
+        // escala mantendo aspecto
+        try {
+          // PDFKit não expõe dimensões antes de desenhar; tentamos por width alvo
+          imgW = innerW;
+          // altura aproximada; desenharemos com width=innerW
+          imgH = Math.max(120, 0); // placeholder; altura real virá do draw (mas reservamos espaço mínimo)
+        } catch {}
+      }
+
+      const linkH = fileLinks.length
+        ? fileLinks.reduce((acc, l) => acc + doc.heightOfString(l.label, { width: innerW }) + 4, 0)
+        : 0;
+
+      const metaH = doc.heightOfString(meta, { width: innerW });
+      let totalH = bubblePadY + metaH + (bodyText ? 6 + textH : 0) + (imageBuf ? 8 + 180 : 0) + (fileLinks.length ? 6 + linkH : 0) + bubblePadY;
+
+      ensureSpace(totalH + gapY);
+
+      const bubbleX = isOutgoing ? (M + contentW - maxBubbleW) : M;
+      const bubbleY = doc.y;
+
+      // container
+      doc.save();
+      doc.roundRect(bubbleX, bubbleY, maxBubbleW, totalH, 10).fill(bg);
+
+      // meta
+      doc.fillColor(metaColor).font('Helvetica').fontSize(9)
+         .text(meta, bubbleX + bubblePadX, bubbleY + bubblePadY, { width: innerW });
+
+      let curY = bubbleY + bubblePadY + metaH;
+
+      // texto
+      if (bodyText) {
+        curY += 6;
+        doc.fillColor(textColor).font('Helvetica').fontSize(11)
+           .text(bodyText, bubbleX + bubblePadX, curY, { width: innerW });
+        curY = doc.y; // move após text
+      }
+
+      // imagem (se houver)
+      if (imageBuf) {
+        curY += 8;
+        // largura fixa = innerW; altura proporcional será calculada pelo PDFKit
+        // para evitar overflow da página, verifica espaço restante
+        const space = (bubbleY + totalH) - curY - bubblePadY;
+        // desenha
+        doc.image(imageBuf, bubbleX + bubblePadX, curY, { width: innerW });
+        // não sabemos altura exata; assume 180px como orçamento já reservado
+        curY += 180;
+      }
+
+      // links (anexos não-imagem)
+      if (fileLinks.length) {
+        curY += 6;
+        doc.font('Helvetica').fontSize(10).fillColor(isOutgoing ? '#E0E7FF' : '#1D4ED8');
+        for (const l of fileLinks) {
+          doc.text(l.label, bubbleX + bubblePadX, curY, {
+            width: innerW,
+            link: l.url,
+            underline: true
+          });
+          curY = doc.y + 4;
         }
+      }
 
-        // ===== Separador por dia =====
-        const drawDayChip = (dateStr) => {
-          const label = new Date(dateStr).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-          const w = doc.widthOfString(label, { font: 'Helvetica-Bold', size: 9 }) + 16;
-          const h = 16;
-          const x = CONTENT_X + (CONTENT_W - w) / 2;
-          ensurePage(h + 12);
-          doc.save();
-          doc.fillColor(palette.dateChipBg).roundedRect(x, doc.y, w, h, 8).fill();
-          doc.fillColor('#111827').font('Helvetica-Bold').fontSize(9)
-             .text(label, x, doc.y + 3, { width: w, align: 'center' });
-          doc.restore();
-          doc.moveDown(1);
-        };
+      doc.restore();
+      doc.y = bubbleY + totalH + gapY;
+    }
 
-        // ===== Bolha =====
-        const drawBubble = ({ who, when, text, meta, isOutbound, imgBuf, imgSize }) => {
-          // Alinhamento
-          const maxW   = BUBBLE_MAX_W;
-          const innerW = maxW - PAD_X * 2;
-          const x      = isOutbound
-            ? CONTENT_X + CONTENT_W - maxW  // direita (outbound)
-            : CONTENT_X;                    // esquerda (inbound)
+    // 6) Loop das mensagens (com separador por dia)
+    for (const m of rows) {
+      const ts = new Date(m.timestamp);
+      const dayKey = ts.toISOString().slice(0, 10);
+      if (dayKey !== lastDay) {
+        drawDaySeparator(ts);
+        lastDay = dayKey;
+      }
 
-          // Medidas de conteúdo
-          doc.font('Helvetica').fontSize(8);
-          const headH = doc.heightOfString(`${who} — ${when}`, { width: innerW });
+      const dir = String(m.direction || '').toLowerCase();
+      const type = String(m.type || '').toLowerCase();
+      const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
+      const c = normalize(m.content, meta, type);
 
-          let textH = 0;
-          if (text) {
-            doc.font('Helvetica').fontSize(11);
-            textH = doc.heightOfString(text, { width: innerW, align: 'left' });
-          }
+      const isOutgoing = dir === 'outgoing';
+      const isIncoming = dir === 'incoming';
+      const isSystem   = dir === 'system';
 
-          let imageH = 0;
-          let drawImage = false;
-          let imageDrawW = 0, imageDrawH = 0;
-          if (imgBuf && imgSize && imgSize.width && imgSize.height) {
-            // ajusta à largura interna e limita a altura
-            imageDrawW = Math.min(innerW, imgSize.width);
-            const ratio = imageDrawW / imgSize.width;
-            imageDrawH = Math.round(imgSize.height * ratio);
-            if (imageDrawH > IMG_MAX_H) {
-              const scale = IMG_MAX_H / imageDrawH;
-              imageDrawH = Math.round(imageDrawH * scale);
-              imageDrawW = Math.round(imageDrawW * scale);
-            }
-            imageH = imageDrawH + 4; // +4 de respiro
-            drawImage = true;
-          }
+      const who =
+        isOutgoing ? (m.assigned_to || ticket.assigned_to || 'Atendente') :
+        isSystem   ? 'Sistema' :
+        (ticket.customer_name || ticket.user_id || 'Cliente');
 
-          // Se houver URL de anexo (para não-imagem), exibir "Baixar"
-          let attachH = 0;
-          const hasDownload = !!(meta && meta.url && !drawImage);
-          if (hasDownload) {
-            doc.font('Helvetica').fontSize(10);
-            const line1 = meta.filename ? `📎 ${meta.filename}` : '📎 Anexo';
-            attachH = doc.heightOfString(line1, { width: innerW })
-                    + doc.heightOfString('Baixar', { width: innerW });
-          }
+      const when = ts.toLocaleString('pt-BR');
 
-          const bubbleH = PAD_Y*2 + headH + (text ? (textH + 6) : 0) + imageH + (hasDownload ? (attachH + 6) : 0);
+      const text =
+        typeof c === 'string' ? c :
+        (c?.text || c?.body || c?.caption || null);
 
-          ensurePage(bubbleH);
+      const url = c?.url || null;
+      const mime = c?.mime_type || null;
 
-          // Fundo
-          doc.save();
-          doc.fillColor(isOutbound ? palette.outboundBg : palette.inboundBg)
-             .roundedRect(x, doc.y, maxW, bubbleH, BUBBLE_R).fill();
+      // Decide se é imagem incorporável
+      const wantsImage = url && (isImageUrl(url) || isImageMime(mime));
+      let imageBuf = null;
+      if (wantsImage) {
+        imageBuf = await fetchImageBuffer(url);
+      }
 
-          // Cabeçalho
-          doc.fillColor(isOutbound ? '#bfdbfe' : palette.subText)
-             .font('Helvetica-Bold').fontSize(8)
-             .text(`${who} — ${when}`, x + PAD_X, doc.y + PAD_Y, { width: innerW });
+      // Se não for imagem, vira link clicável (filename visível)
+      const fileLinks = [];
+      if (url && !imageBuf) {
+        const filename = c?.filename ||
+          (() => { try { return decodeURIComponent(new URL(url).pathname.split('/').pop() || 'arquivo'); } catch { return 'arquivo'; } })();
+        fileLinks.push({ label: filename, url });
+      }
 
-          // Texto
-          let cursorY = doc.y + PAD_Y + headH + 4;
-          if (text) {
-            doc.font('Helvetica').fontSize(11)
-               .fillColor(isOutbound ? palette.outboundText : palette.inboundText)
-               .text(text, x + PAD_X, cursorY, { width: innerW });
-            cursorY = doc.y + 6;
-          }
+      await drawBubble({
+        who, when, isIncoming, isOutgoing, isSystem,
+        bodyText: text,
+        fileLinks,
+        imageUrl: imageBuf ? url : null,
+        imageBuf
+      });
+    }
 
-          // Imagem
-          if (drawImage) {
-            try {
-              doc.image(imgBuf, x + PAD_X, cursorY, { width: imageDrawW, height: imageDrawH });
-              cursorY += (imageDrawH + 6);
-            } catch {
-              // se falhar, cai para link de download
-              if (meta && meta.url) {
-                doc.font('Helvetica').fontSize(10)
-                   .fillColor(isOutbound ? '#dbeafe' : '#111827')
-                   .text(meta.filename ? `📎 ${meta.filename}` : '📎 Anexo', x + PAD_X, cursorY, { width: innerW });
-                doc.fillColor(palette.link)
-                   .text('Baixar', x + PAD_X, doc.y, { width: innerW, link: meta.url, underline: true });
-                cursorY = doc.y + 6;
-              }
-            }
-          }
+    doc.end();
+    return pump;
+  });
 
-          // Download (para não-imagem)
-          if (hasDownload) {
-            doc.font('Helvetica').fontSize(10)
-               .fillColor(isOutbound ? '#dbeafe' : '#111827')
-               .text(meta.filename ? `📎 ${meta.filename}` : '📎 Anexo', x + PAD_X, cursorY, { width: innerW });
-            doc.fillColor(palette.link)
-               .text('Baixar', x + PAD_X, doc.y, { width: innerW, link: meta.url, underline: true });
-          }
+  // ...
+}
 
-          doc.restore();
-          doc.y = (doc.y + bubbleH + GAP_Y);
-        };
+export default ticketsRoutes;
 
-        // ===== Loop: agrupa por dia e desenha =====
-        let lastDayKey = '';
-        for (const m of messages) {
-          const dir = String(m.direction || '').toLowerCase();
-          const isOutbound = (dir === 'outgoing' || dir === 'system'); // direita
-          const who = isOutbound ? (m.assigned_to || 'Atendente')
-                                 : (ticket.customer_name || 'Cliente');
-          const when = new Date(m.timestamp).toLocaleString('pt-BR');
-
-          // separador por dia
-          const dayKey = new Date(m.timestamp).toISOString().slice(0, 10);
-          if (dayKey !== lastDayKey) {
-            drawDayChip(dayKey);
-            lastDayKey = dayKey;
-          }
-
-          const txt  = parseText(m.content);
-          const meta = extractMeta(m.metadata);
-          const merged = extractUrlAndFile(meta, m.type, meta?.url);
-
-          // se for imagem, tenta baixar buffer para embutir
-          let imgBuf = null, imgSize = null;
-          if (looksLikeImage(merged)) {
-            imgBuf = await loadImageIfAny(merged, true);
-            if (imgBuf) imgSize = getImageSize(imgBuf);
-          }
-
-          drawBubble({ who, when, text: txt, meta: merged, isOutbound, imgBuf, imgSize });
-        }
-
-        doc.end();
-      } catch (e) { reject(e); }
-    });
-  }
-
-  const pdfBuffer = await buildPdf(ticket, msgs);
-
-  return reply
-    .type('application/pdf')
-    .header('Cache-Control', 'no-store')
-    .header('Content-Disposition', `attachment; filename="${filename}"`)
-    .header('Content-Length', String(pdfBuffer.length))
-    .send(pdfBuffer);
-});
 
 
 fastify.get('/history/:id', async (req, reply) => {
