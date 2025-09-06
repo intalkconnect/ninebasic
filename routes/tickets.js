@@ -25,50 +25,79 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-fastify.get('/history/:id/pdf', async (req, reply) => {
+// routes/tickets.js (ESM)
+
+import amqplib from 'amqplib';
+import { PassThrough } from 'node:stream';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const PDFDocument = require('pdfkit'); // CJS via ESM OK
+
+const AMQP_URL = process.env.AMQP_URL || 'amqp://guest:guest@rabbitmq:5672/';
+const INCOMING_QUEUE = process.env.INCOMING_QUEUE || 'hmg.incoming';
+
+let amqpConn, amqpChIncoming;
+async function ensureAMQPIncoming() {
+  if (amqpChIncoming) return amqpChIncoming;
+  amqpConn = await amqplib.connect(AMQP_URL, { heartbeat: 15 });
+  amqpConn.on('close', () => { amqpConn = null; amqpChIncoming = null; });
+  amqpChIncoming = await amqpConn.createChannel();
+  await amqpChIncoming.assertQueue(INCOMING_QUEUE, { durable: true });
+  return amqpChIncoming;
+}
+
+async function ticketsRoutes(fastify, options) {
+  function isValidUserId(user_id) {
+    return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
+  }
+
+  // -----------------------------
+  // GET /tickets/history/:id/pdf
+  // -----------------------------
+  fastify.get('/history/:id/pdf', async (req, reply) => {
+    const out = new PassThrough();
     try {
       const { id } = req.params || {};
 
-      // 1) ticket + cliente
-      const tRes = await req.db.query(
-        `
+      // 1) Ticket
+      const tRes = await req.db.query(`
         SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
                t.status, t.created_at, t.updated_at,
-               c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
+               c.name AS customer_name, c.email AS customer_email, c.phone AS customer_phone
           FROM tickets t
           LEFT JOIN clientes c ON c.user_id = t.user_id
          WHERE t.id::text = $1
-        `,
-        [String(id)]
-      );
-      if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
+      `, [String(id)]);
+      if (!tRes.rowCount) {
+        return reply.code(404).send({ error: 'Ticket não encontrado' });
+      }
       const ticket = tRes.rows[0];
 
-      // 2) mensagens (ordem cronológica)
-      const mRes = await req.db.query(
-        `
+      // 2) Mensagens
+      const mRes = await req.db.query(`
         SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
                m.metadata, m.assigned_to
           FROM messages m
          WHERE m.ticket_number = $1
          ORDER BY m."timestamp" ASC, m.id ASC
          LIMIT 2000
-        `,
-        [String(ticket.ticket_number || '')]
-      );
+      `, [String(ticket.ticket_number || '')]);
       const rows = mRes.rows || [];
 
-      // 3) headers + stream (enviar uma única vez)
+      // 3) Headers + stream (uma vez só)
       const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
-      const filename = `ticket-${num}.pdf`;
       reply
         .type('application/pdf')
-        .header('Content-Disposition', `attachment; filename="${filename}"`);
+        .header('Content-Disposition', `attachment; filename="ticket-${num}.pdf"`)
+        .send(out);
 
-      const out = new PassThrough();
-      reply.send(out); // ✅ inicia o streaming
+      // 4) PDF
+      const doc = new PDFDocument({ size: 'A4', margin: 40 });
+      doc.on('error', (e) => out.destroy(e));
+      doc.pipe(out);
 
-      // 4) helpers
+      // helpers
       const safeParse = (raw) => {
         if (raw == null) return null;
         if (typeof raw === 'object') return raw;
@@ -91,7 +120,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         return base;
       };
 
-      // desenha um retângulo arredondado (compatível c/ versões antigas do pdfkit)
+      // rounded-rect compatível com pdfkit antigo
       function fillRoundedRect(doc, x, y, w, h, r, color) {
         doc.save();
         doc.fillColor(color);
@@ -108,13 +137,8 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         doc.restore();
       }
 
-      // 5) PDF
-      const doc = new PDFDocument({ size: 'A4', margin: 40 });
-      doc.on('error', (e) => out.destroy(e));
-      doc.pipe(out);
-
-      // layout base (soft)
-      const M = 40; // margem
+      // layout
+      const M = 40;
       const pageW = doc.page.width;
       const pageH = doc.page.height;
       const contentW = pageW - M * 2;
@@ -124,29 +148,26 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       const bubblePadY = 8;
       const maxBubbleW = Math.min(420, contentW * 0.78);
 
-      // paleta neutra e suave
-      const colText       = '#1F2937'; // slate-800
-      const colMeta       = '#8A8F98'; // cinza brando
-      const colSep        = '#E5E7EB'; // linha
+      // paleta suave
+      const colText       = '#1F2937';
+      const colMeta       = '#8A8F98';
+      const colSep        = '#E5E7EB';
       const colDayPill    = '#EEF2F7';
-      const colIncomingBg = '#F6F7F9'; // bolha clara (cliente)
-      const colOutgoingBg = '#ECEFF3'; // bolha clara (agente)
+      const colIncomingBg = '#F6F7F9';
+      const colOutgoingBg = '#ECEFF3';
 
-      // cabeçalho do ticket (fora de bolha)
+      // header ticket
       doc.fillColor(colText).font('Helvetica-Bold').fontSize(18)
-         .text(`Ticket #${num}`, M, undefined, { width: contentW, align: 'left' });
+         .text(`Ticket #${num}`, M, undefined, { width: contentW });
       doc.moveDown(0.2);
       doc.fillColor(colMeta).font('Helvetica').fontSize(10)
-         .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, {
-           width: contentW, align: 'left'
-         });
+         .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, { width: contentW });
       doc.moveDown(0.6);
 
-      // bloco infos (duas colunas)
+      // infos (duas colunas)
       const leftX  = M;
       const rightX = M + contentW / 2;
-      const lh     = 14;
-
+      const lh = 14;
       function labelValue(label, value, x, y) {
         doc.fillColor(colMeta).font('Helvetica-Bold').fontSize(9).text(label, x, y);
         doc.fillColor(colText).font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
@@ -164,26 +185,23 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       doc.y = yMax + 16;
 
       // título conversa
-      doc.fillColor(colText).font('Helvetica-Bold').fontSize(12).text('Conversa', { width: contentW });
+      doc.fillColor(colText).font('Helvetica-Bold').fontSize(12).text('Conversa');
       doc.moveDown(0.3);
 
       if (!rows.length) {
         doc.fillColor(colMeta).font('Helvetica').fontSize(11)
            .text('Não há histórico de mensagens neste ticket.', { width: contentW, align: 'center' });
-        doc.end();
-        return;
+        return; // finally garantirá doc.end()
       }
 
       function ensureSpace(need) {
         if (doc.y + need <= pageH - M) return;
         doc.addPage();
-        // cabeçalho mínimo da continuação (texto pequeno, sem “bolha”)
         doc.fillColor(colMeta).font('Helvetica').fontSize(10)
            .text(`Ticket #${num} — continuação`, M, M);
         doc.moveDown(0.5);
       }
 
-      // separador por dia (pílula central suave)
       let lastDay = '';
       function daySeparator(date) {
         const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -192,45 +210,51 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         const h = doc.currentLineHeight() + padY * 2;
         const x = M + (contentW - w) / 2;
         ensureSpace(h + 8);
-        // “pílula” arredondada
         fillRoundedRect(doc, x, doc.y, w, h, 6, colDayPill);
         doc.fillColor('#4B5563').font('Helvetica').fontSize(9)
            .text(label, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
         doc.moveDown(0.6);
       }
 
-      // desenha bolha (incoming à esquerda, outgoing à direita)
+      // ⚠️ CORREÇÃO: calcular labels de links antes de medir
+      function buildLinkLabels(links) {
+        return (links || []).map(l =>
+          l?.filename ? `${l.filename} — Clique aqui para abrir a mídia`
+                      : 'Clique aqui para abrir a mídia'
+        );
+      }
+
       function drawBubble({ who, when, side, body, links }) {
         const isRight = side === 'right';
         const bg = isRight ? colOutgoingBg : colIncomingBg;
         const metaLine = `${who} — ${when}`;
         const innerW = maxBubbleW - bubblePadX * 2;
 
-        // medir alturas
-        const metaH = doc.heightOfString(metaLine, { width: innerW, align: 'left' });
-        const bodyH = body ? doc.heightOfString(body, { width: innerW, align: 'left' }) : 0;
-        const linksH = (links && links.length)
-          ? links.reduce((acc, l) => acc + doc.heightOfString(l.label, { width: innerW }) + 4, 0)
+        const linkLabels = buildLinkLabels(links);
+
+        const metaH  = doc.heightOfString(metaLine, { width: innerW });
+        const bodyH  = body ? doc.heightOfString(body, { width: innerW }) : 0;
+        const linksH = linkLabels.length
+          ? linkLabels.reduce((acc, txt) => acc + doc.heightOfString(txt, { width: innerW }) + 4, 0)
           : 0;
 
         const totalH = bubblePadY + metaH + (body ? 6 + bodyH : 0)
-                     + (links && links.length ? 8 + linksH : 0) + bubblePadY;
+                     + (linkLabels.length ? 8 + linksH : 0) + bubblePadY;
 
         ensureSpace(totalH + gapY);
 
         const bx = isRight ? (M + contentW - maxBubbleW) : M;
         const by = doc.y;
 
-        // “card” arredondado suave, sem borda
+        // card
         fillRoundedRect(doc, bx, by, maxBubbleW, totalH, 10, bg);
 
-        // meta (nome + horário)
+        // meta
         doc.fillColor(colMeta).font('Helvetica').fontSize(9)
            .text(metaLine, bx + bubblePadX, by + bubblePadY, { width: innerW });
 
         let cy = by + bubblePadY + metaH;
 
-        // corpo
         if (body) {
           cy += 6;
           doc.fillColor(colText).font('Helvetica').fontSize(11)
@@ -238,16 +262,13 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
           cy = doc.y;
         }
 
-        // links (mídias/anexos) — “Clique aqui para abrir a mídia”
-        if (links && links.length) {
+        if (linkLabels.length) {
           cy += 8;
           doc.fillColor('#1D4ED8').font('Helvetica').fontSize(10);
-          for (const l of links) {
-            const label = l.filename ? `${l.filename} — Clique aqui para abrir a mídia`
-                                     : 'Clique aqui para abrir a mídia';
-            doc.text(label, bx + bubblePadX, cy, {
+          for (let i = 0; i < linkLabels.length; i++) {
+            doc.text(linkLabels[i], bx + bubblePadX, cy, {
               width: innerW,
-              link: l.url,
+              link: links[i].url,
               underline: true
             });
             cy = doc.y + 4;
@@ -257,63 +278,61 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         doc.y = by + totalH + gapY;
       }
 
-      // loop das mensagens
-      for (const m of rows) {
-        const ts = new Date(m.timestamp);
-        const dayKey = ts.toISOString().slice(0, 10);
-        if (dayKey !== lastDay) { daySeparator(ts); lastDay = dayKey; }
+      // 6) loop mensagens — finally garante fechamento do PDF
+      try {
+        for (const m of rows) {
+          const ts = new Date(m.timestamp);
+          const dayKey = ts.toISOString().slice(0, 10);
+          if (dayKey !== lastDay) { daySeparator(ts); lastDay = dayKey; }
 
-        const dir  = String(m.direction || '').toLowerCase(); // incoming | outgoing | system
-        const type = String(m.type || '').toLowerCase();
-        const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
-        const c = normalize(m.content, meta, type);
+          const dir  = String(m.direction || '').toLowerCase(); // incoming | outgoing | system
+          const type = String(m.type || '').toLowerCase();
+          const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
+          const c = normalize(m.content, meta, type);
 
-        // eventos de sistema: pílula central (sem bolha)
-        if (dir === 'system') {
-          const text = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '[evento]'));
-          const padX = 10, padY = 6;
-          const w = Math.min(320, contentW * 0.6);
-          const txtH = doc.heightOfString(text, { width: w - padX * 2 });
-          const h = padY * 2 + txtH;
-          ensureSpace(h + gapY);
-          const x = M + (contentW - w) / 2;
-          fillRoundedRect(doc, x, doc.y, w, h, 8, colDayPill);
-          doc.fillColor('#4B5563').font('Helvetica').fontSize(10)
-             .text(text, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
-          doc.moveDown(0.5);
-          continue;
+          if (dir === 'system') {
+            const text = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '[evento]'));
+            const padX = 10, padY = 6;
+            const w = Math.min(320, contentW * 0.6);
+            const txtH = doc.heightOfString(text, { width: w - padX * 2 });
+            const h = padY * 2 + txtH;
+            ensureSpace(h + gapY);
+            const x = M + (contentW - w) / 2;
+            fillRoundedRect(doc, x, doc.y, w, h, 8, colDayPill);
+            doc.fillColor('#4B5563').font('Helvetica').fontSize(10)
+               .text(text, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
+            doc.moveDown(0.5);
+            continue;
+          }
+
+          const who = dir === 'outgoing'
+            ? (m.assigned_to || ticket.assigned_to || 'Atendente')
+            : (ticket.customer_name || ticket.user_id || 'Cliente');
+          const when = ts.toLocaleString('pt-BR');
+
+          const body =
+            typeof c === 'string' ? c :
+            (c?.text || c?.body || c?.caption || null);
+
+          const url = c?.url || null;
+          const links = url ? [{ url, filename: c?.filename || null }] : [];
+
+          drawBubble({
+            who,
+            when,
+            side: dir === 'outgoing' ? 'right' : 'left',
+            body,
+            links
+          });
         }
-
-        // remetente/atendente
-        const who = dir === 'outgoing'
-          ? (m.assigned_to || ticket.assigned_to || 'Atendente')
-          : (ticket.customer_name || ticket.user_id || 'Cliente');
-        const when = ts.toLocaleString('pt-BR');
-
-        // texto
-        const body =
-          typeof c === 'string' ? c :
-          (c?.text || c?.body || c?.caption || null);
-
-        // mídias como links
-        const url = c?.url || null;
-        const links = url ? [{
-          url,
-          filename: c?.filename || null
-        }] : [];
-
-        drawBubble({
-          who,
-          when,
-          side: dir === 'outgoing' ? 'right' : 'left',
-          body,
-          links
-        });
+      } finally {
+        doc.end(); // ✅ sempre finaliza o PDF
       }
 
-      doc.end();
     } catch (err) {
       req.log.error({ err }, 'Erro ao gerar PDF');
+      // stream já foi enviado; só encerramos em caso de erro hard
+      try { out.destroy(err); } catch {}
       if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
     }
   });
