@@ -25,7 +25,7 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-  fastify.get('/history/:id/pdf', async (req, reply) => {
+ fastify.get('/history/:id/pdf', async (req, reply) => {
     let doc;
     try {
       const { id } = req.params || {};
@@ -53,7 +53,7 @@ async function ticketsRoutes(fastify, options) {
       `, [String(ticket.ticket_number || '')]);
       const rows = mRes.rows || [];
 
-      // 2.1) Resolver nomes de atendentes (users.email -> name + lastname)
+      // 2.1) Nome do atendente via users.email
       const agentEmailsSet = new Set();
       if (ticket.assigned_to) agentEmailsSet.add(String(ticket.assigned_to).toLowerCase());
       for (const r of rows) if (r.assigned_to) agentEmailsSet.add(String(r.assigned_to).toLowerCase());
@@ -75,7 +75,7 @@ async function ticketsRoutes(fastify, options) {
         return agentNameByEmail.get(key) || email;
       };
 
-      // 3) Hijack + headers (evita "write after end")
+      // 3) Hijack + headers para stream estável
       const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
       reply.hijack();
       reply.raw.writeHead(200, {
@@ -111,50 +111,43 @@ async function ticketsRoutes(fastify, options) {
         return base;
       };
 
-      // INSERIR PONTOS DE QUEBRA EM PALAVRAS MUITO LONGAS (evita overflow)
-      function softWrapLongTokens(str, max = 28) {
-        if (!str) return str;
-        return String(str)
-          .split(/(\s+)/) // preserva espaços
-          .map(tok => (tok.trim().length > max ? tok.replace(new RegExp(`(.{1,${max}})`, 'g'), '$1\u200B') : tok))
-          .join('');
-      }
+      // soft wrap de tokens longos
+      const softWrap = (str, max = 28) => String(str || '')
+        .split(/(\s+)/)
+        .map(t => (t.trim().length > max ? t.replace(new RegExp(`(.{1,${max}})`, 'g'), '$1\u200B') : t))
+        .join('');
 
-      // Retângulo arredondado compatível
-      function fillRoundedRect(doc, x, y, w, h, r, color) {
+      // pílula de dia
+      function pillDay(label, x, y, padX = 8, padY = 3, radius = 6, bg = '#EEF2F7') {
+        const w = doc.widthOfString(label) + padX * 2;
+        const h = doc.currentLineHeight() + padY * 2;
         doc.save();
-        doc.fillColor(color);
-        doc.moveTo(x + r, y);
-        doc.lineTo(x + w - r, y);
-        doc.quadraticCurveTo(x + w, y, x + w, y + r);
-        doc.lineTo(x + w, y + h - r);
-        doc.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-        doc.lineTo(x + r, y + h);
-        doc.quadraticCurveTo(x, y + h, x, y + h - r);
-        doc.lineTo(x, y + r);
-        doc.quadraticCurveTo(x, y, x + r, y);
+        doc.fillColor(bg);
+        doc.moveTo(x + radius, y);
+        doc.lineTo(x + w - radius, y);
+        doc.quadraticCurveTo(x + w, y, x + w, y + radius);
+        doc.lineTo(x + w, y + h - radius);
+        doc.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+        doc.lineTo(x + radius, y + h);
+        doc.quadraticCurveTo(x, y + h, x, y + h - radius);
+        doc.lineTo(x, y + radius);
+        doc.quadraticCurveTo(x, y, x + radius, y);
         doc.fill();
         doc.restore();
       }
 
       // ---------- Layout/Cores ----------
       const M = 40;
-      const pageW = doc.page.width;
-      const pageH = doc.page.height;
+      const pageW = doc.page.width, pageH = doc.page.height;
       const contentW = pageW - M * 2;
 
-      const gapY = 10;
-      const bubblePadX = 10;
-      const bubblePadY = 8;
-      const maxBubbleW = Math.min(340, contentW * 0.66); // menor para ficar mais compacto
+      const META_FS = 9, BODY_FS = 11, LINK_FS = 10, LINE_GAP = 2;
 
-      const colText       = '#1F2937';
-      const colMeta       = '#8A8F98';
-      const colSep        = '#E5E7EB';
-      const colDayPill    = '#EEF2F7';
-      const colIncomingBg = '#F6F7F9';
-      const colOutgoingBg = '#ECEFF3';
-      const colLink       = '#4B5563';
+      const colText    = '#1F2937';
+      const colMeta    = '#8A8F98';
+      const colSep     = '#E5E7EB';
+      const colLink    = '#4B5563';
+      const colDayText = '#4B5563';
 
       // Header
       const headerAgent = resolveAgent(ticket.assigned_to);
@@ -166,14 +159,12 @@ async function ticketsRoutes(fastify, options) {
       doc.moveDown(0.6);
 
       // Dados (duas colunas)
-      const leftX  = M;
-      const rightX = M + contentW / 2;
-      const lh = 14;
-      function labelValue(label, value, x, y) {
+      const leftX  = M, rightX = M + contentW / 2, lh = 14;
+      const labelValue = (label, value, x, y) => {
         doc.fillColor(colMeta).font('Helvetica-Bold').fontSize(9).text(label, x, y);
         doc.fillColor(colText).font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
         return y + 10 + lh;
-      }
+      };
       let y1 = doc.y, y2 = doc.y;
       y1 = labelValue('Cliente',   ticket.customer_name || ticket.user_id, leftX,  y1);
       y1 = labelValue('Contato',   ticket.customer_phone || ticket.customer_email || '—', leftX,  y1);
@@ -192,104 +183,65 @@ async function ticketsRoutes(fastify, options) {
       if (!rows.length) {
         doc.fillColor(colMeta).font('Helvetica').fontSize(11)
            .text('Não há histórico de mensagens neste ticket.', { width: contentW, align: 'center' });
-        doc.end();
-        return;
+        doc.end(); return;
       }
 
-      function ensureSpace(need) {
-        if (doc.y + need <= pageH - M) return;
-        doc.addPage();
-        doc.fillColor(colMeta).font('Helvetica').fontSize(10)
-           .text(`Ticket #${num} — continuação`, M, M);
-        doc.moveDown(0.5);
-      }
-
-      // Separador por dia
+      // Separador por data
       let lastDay = '';
-      function daySeparator(date) {
+      function drawDaySeparator(date) {
         const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-        const padX = 8, padY = 3;
-        const w = doc.widthOfString(label) + padX * 2;
-        const h = doc.currentLineHeight() + padY * 2;
+        doc.font('Helvetica').fontSize(9);
+        const w = doc.widthOfString(label) + 16;
         const x = M + (contentW - w) / 2;
-        ensureSpace(h + 8);
-        fillRoundedRect(doc, x, doc.y, w, h, 6, colDayPill);
-        doc.fillColor('#4B5563').font('Helvetica').fontSize(9)
-           .text(label, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
+        const y = doc.y;
+        pillDay(label, x, y);
+        doc.fillColor(colDayText).text(label, x + 8, y + 3, { width: w - 16, align: 'center' });
         doc.moveDown(0.6);
       }
 
-      // Link labels
-      const buildLinkLabels = (links) =>
-        (links || []).map(l => {
-          const base = l?.filename ? `${l.filename} — Clique aqui para abrir a mídia`
-                                   : 'Clique aqui para abrir a mídia';
-          return softWrapLongTokens(base, 28);
-        });
+      // Mensagem “simples” (sem bubble)
+      function drawMessage({ dir, who, when, body, links }) {
+        // Diferenciação: recuo para “enviada” e rótulo na meta
+        const isOutgoing = dir === 'outgoing';
+        const indent = isOutgoing ? 80 : 0; // enviado vai mais à direita
+        const x = M + indent;
+        const w = contentW - indent;
 
-      // Bolha
-      function drawBubble({ who, when, side, body, links }) {
-        // normaliza texto e quebra tokens longos
-        const txt = softWrapLongTokens((body || '').toString().trim(), 28);
-        const hasLinks = (links && links.length > 0);
-        if (!txt && !hasLinks) return;
+        const badge = isOutgoing ? '▶ Enviada' : '◀ Recebida';
+        const metaLine = `${who} — ${when}  •  ${badge}`;
 
-        const isRight = side === 'right';
-        const bg = isRight ? colOutgoingBg : colIncomingBg;
-        const metaLine = softWrapLongTokens(`${who} — ${when}`, 36);
-        const innerW = maxBubbleW - bubblePadX * 2;
-
-        const linkLabels = buildLinkLabels(links);
-
-        const metaH  = doc.heightOfString(metaLine, { width: innerW });
-        const bodyH  = txt ? doc.heightOfString(txt, { width: innerW }) : 0;
-        const linksH = linkLabels.length
-          ? linkLabels.reduce((acc, a) => acc + doc.heightOfString(a, { width: innerW }) + 4, 0)
-          : 0;
-
-        const totalH = bubblePadY + metaH + (txt ? 6 + bodyH : 0)
-                     + (linkLabels.length ? 8 + linksH : 0) + bubblePadY;
-
-        ensureSpace(totalH + gapY);
-
-        const bx = isRight ? (M + contentW - maxBubbleW) : M;
-        const by = doc.y;
-
-        fillRoundedRect(doc, bx, by, maxBubbleW, totalH, 10, bg);
-
-        doc.fillColor(colMeta).font('Helvetica').fontSize(9)
-           .text(metaLine, bx + bubblePadX, by + bubblePadY, { width: innerW });
-
-        let cy = by + bubblePadY + metaH;
-
-        if (txt) {
-          cy += 6;
-          doc.fillColor(colText).font('Helvetica').fontSize(11)
-             .text(txt, bx + bubblePadX, cy, { width: innerW });
-          cy = doc.y;
+        // meta
+        doc.fillColor(colMeta).font('Helvetica').fontSize(META_FS)
+           .text(metaLine, x, doc.y, { width: w, lineGap: LINE_GAP });
+        // corpo
+        if (body && String(body).trim()) {
+          doc.moveDown(0.15);
+          doc.fillColor(colText).font('Helvetica').fontSize(BODY_FS)
+             .text(softWrap(body, 28), x, doc.y, { width: w, lineGap: LINE_GAP });
         }
 
-        if (linkLabels.length) {
-          cy += 8;
-          doc.fillColor(colLink).font('Helvetica').fontSize(10);
-          for (let i = 0; i < linkLabels.length; i++) {
-            doc.text(linkLabels[i], bx + bubblePadX, cy, {
-              width: innerW,
-              link: links[i].url,
-              underline: true
-            });
-            cy = doc.y + 4;
+        // links (mídias/anexos)
+        if (links && links.length) {
+          doc.moveDown(0.25);
+          doc.fillColor(colLink).font('Helvetica').fontSize(LINK_FS);
+          for (const l of links) {
+            const label = l.filename
+              ? `${l.filename} — Clique aqui para abrir a mídia`
+              : 'Clique aqui para abrir a mídia';
+            doc.text(softWrap(label, 36), x, doc.y, { width: w, lineGap: LINE_GAP, link: l.url, underline: true });
+            doc.moveDown(0.1);
           }
         }
 
-        doc.y = by + totalH + gapY;
+        // espaço entre mensagens
+        doc.moveDown(0.8);
       }
 
-      // 5) Loop
+      // 5) Loop das mensagens
       for (const m of rows) {
         const ts = new Date(m.timestamp);
         const dayKey = ts.toISOString().slice(0, 10);
-        if (dayKey !== lastDay) { daySeparator(ts); lastDay = dayKey; }
+        if (dayKey !== lastDay) { drawDaySeparator(ts); lastDay = dayKey; }
 
         const dir  = String(m.direction || '').toLowerCase(); // incoming | outgoing | system
         const type = String(m.type || '').toLowerCase();
@@ -297,32 +249,26 @@ async function ticketsRoutes(fastify, options) {
         const c = normalize(m.content, meta, type);
 
         const rawText = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '')) || '';
-        const trimmed = rawText.toString().trim();
+        const text = rawText.toString().trim();
 
+        // sistema
         if (dir === 'system') {
-          // “Ticket #000041” -> apenas texto central (sem pílula)
           const ticketStartRegex = new RegExp(`^\\s*ticket\\s*#?${num}\\s*$`, 'i');
-          if (ticketStartRegex.test(trimmed)) {
-            const t = softWrapLongTokens(trimmed, 36);
-            ensureSpace(doc.currentLineHeight() + 6);
+          if (ticketStartRegex.test(text)) {
             doc.fillColor(colMeta).font('Helvetica').fontSize(10)
-               .text(t, M, doc.y, { width: contentW, align: 'center' });
-            doc.moveDown(0.4);
-            continue;
+               .text(text, M, doc.y, { width: contentW, align: 'center' });
+            doc.moveDown(0.5);
+          } else {
+            // outros eventos em pílula central
+            doc.font('Helvetica').fontSize(10);
+            const label = softWrap(text || '[evento]', 36);
+            const w = Math.min(320, contentW * 0.6);
+            const x = M + (contentW - w) / 2;
+            const y = doc.y;
+            pillDay(label, x, y, 10, 6, 8, '#EEF2F7');
+            doc.fillColor(colDayText).text(label, x + 10, y + 6, { width: w - 20, align: 'center', lineGap: LINE_GAP });
+            doc.moveDown(0.6);
           }
-
-          // Demais eventos: pílula
-          const text = softWrapLongTokens(trimmed || '[evento]', 36);
-          const padX = 10, padY = 6;
-          const w = Math.min(320, contentW * 0.6);
-          const txtH = doc.heightOfString(text, { width: w - padX * 2 });
-          const h = padY * 2 + txtH;
-          ensureSpace(h + gapY);
-          const x = M + (contentW - w) / 2;
-          fillRoundedRect(doc, x, doc.y, w, h, 8, colDayPill);
-          doc.fillColor('#4B5563').font('Helvetica').fontSize(10)
-             .text(text, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
-          doc.moveDown(0.5);
           continue;
         }
 
@@ -334,13 +280,7 @@ async function ticketsRoutes(fastify, options) {
         const url = c?.url || null;
         const links = url ? [{ url, filename: c?.filename || null }] : [];
 
-        drawBubble({
-          who,
-          when,
-          side: dir === 'outgoing' ? 'right' : 'left',
-          body: trimmed,
-          links
-        });
+        drawMessage({ dir, who, when, body: text, links });
       }
 
       doc.end();
