@@ -36,13 +36,18 @@ fastify.get('/history/:id', async (req, reply) => {
 
   const idStr = String(id);
   const limit = Math.min(Math.max(parseInt(messages_limit || '100', 10) || 100, 1), 500);
-  const withMessages = String(include || '')
+
+  // include=messages,attachments
+  const includes = String(include || '')
     .split(',')
     .map(s => s.trim().toLowerCase())
-    .includes('messages');
+    .filter(Boolean);
+
+  const withMessages    = includes.includes('messages');
+  const withAttachments = includes.includes('attachments');
 
   try {
-    // 1) Ticket por ID (UUID). (Sem closed_at no seu schema)
+    // 1) Ticket + dados do cliente
     const tRes = await req.db.query(
       `
       SELECT
@@ -53,8 +58,14 @@ fastify.get('/history/:id', async (req, reply) => {
         t.assigned_to,
         t.status,
         t.created_at,
-        t.updated_at
+        t.updated_at,
+        -- dados do cliente (podem ser NULL)
+        c.name            AS customer_name,
+        c.email           AS customer_email,
+        c.phone           AS customer_phone,
+        c.channel         AS customer_channel
       FROM tickets t
+      LEFT JOIN clientes c ON c.user_id = t.user_id
       WHERE t.id::text = $1
       `,
       [idStr]
@@ -65,9 +76,49 @@ fastify.get('/history/:id', async (req, reply) => {
     }
 
     const ticket = tRes.rows[0];
+    ticket.tags = ticket.tags || []; // reservado para futuro
 
-    if (withMessages && ticket.ticket_number) {
-      // 2) Mensagens do ticket por ticket_number (ordem cronológica)
+    // Helpers
+    const safeParse = (raw) => {
+      if (raw == null) return null;
+      if (typeof raw === 'object') return raw;
+      const s = String(raw);
+      try { return JSON.parse(s); } catch {
+        // se a content for uma URL direta
+        if (/^https?:\/\//i.test(s)) return { url: s };
+        return s; // texto puro
+      }
+    };
+
+    const mergeContent = (rawContent, meta, type) => {
+      const c = safeParse(rawContent);
+      const out =
+        (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
+        (typeof c === 'string' ? { text: c } : {});
+      const m = meta || {};
+      out.url        ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
+      out.filename   ??= m.filename || m.name || null;
+      out.mime_type  ??= m.mime || m.mimetype || m.content_type || null;
+      out.caption    ??= m.caption || null;
+      out.voice      ??= m.voice || (String(type).toLowerCase() === 'audio' ? true : undefined);
+      out.size       ??= m.size || m.filesize || null;
+      out.width      ??= m.width || null;
+      out.height     ??= m.height || null;
+      out.duration   ??= m.duration || m.audio_duration || null;
+      return out;
+    };
+
+    const deriveStatus = (row) => {
+      if (row.read_at) return 'read';
+      if (row.delivered_at) return 'delivered';
+      if (String(row.direction).toLowerCase() === 'outgoing') return 'sent';
+      return 'received';
+    };
+
+    // 2) Precisaremos carregar mensagens se pediram messages ou attachments
+    if ((withMessages || withAttachments) && ticket.ticket_number) {
+      // se pediram APENAS attachments, ainda assim buscamos mensagens,
+      // mas os campos já cobrem os dois casos
       const mRes = await req.db.query(
         `
         SELECT
@@ -83,6 +134,7 @@ fastify.get('/history/:id', async (req, reply) => {
           m.assigned_to,
           m.delivered_at,
           m.read_at,
+          m.reply_to,
           m.metadata
         FROM messages m
         WHERE m.ticket_number = $1
@@ -92,79 +144,84 @@ fastify.get('/history/:id', async (req, reply) => {
         [String(ticket.ticket_number), limit]
       );
 
-      // helpers de normalização (compatível com ChatWindow)
-      const safeParse = (raw) => {
-        if (raw == null) return null;
-        if (typeof raw === 'object') return raw;
-        const s = String(raw);
-        try {
-          const v = JSON.parse(s);
-          return v;
-        } catch {
-          // se a content for uma URL direta
-          if (/^https?:\/\//i.test(s)) return { url: s };
-          return s; // texto puro
-        }
-      };
+      const rows = mRes.rows || [];
 
-      const mergeContent = (rawContent, meta, type) => {
-        const c = safeParse(rawContent);
-        const out =
-          (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
-          (typeof c === 'string' ? { text: c } : {});
-        const m = meta || {};
-        out.url        ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
-        out.filename   ??= m.filename || m.name || null;
-        out.mime_type  ??= m.mime || m.mimetype || m.content_type || null;
-        out.caption    ??= m.caption || null;
-        out.voice      ??= m.voice || (String(type).toLowerCase() === 'audio' ? true : undefined);
-        out.size       ??= m.size || m.filesize || null;
-        out.width      ??= m.width || null;
-        out.height     ??= m.height || null;
-        out.duration   ??= m.duration || m.audio_duration || null;
-        return out;
-      };
+      // 3) Mapeia mensagens (somente se pediram messages)
+      if (withMessages) {
+        ticket.messages = rows.map((m) => {
+          const dir = String(m.direction || '').toLowerCase();
+          const type = String(m.type || '').toLowerCase();
+          const content = mergeContent(m.content, m.metadata, type);
 
-      const deriveStatus = (row) => {
-        if (row.read_at) return 'read';
-        if (row.delivered_at) return 'delivered';
-        if (String(row.direction).toLowerCase() === 'outgoing') return 'sent';
-        return 'received';
-      };
+          return {
+            id: m.id,
+            direction: dir,
+            type,                          // preserva o tipo original (text, image, document, ...)
+            content,                       // objeto/string normalizado
+            text:
+              typeof content === 'string' ? content :
+              (content.text || content.body || content.caption || null),
+            timestamp: m.timestamp,        // compatível com ChatWindow
+            created_at: m.timestamp,
+            channel: m.channel,
+            message_id: m.message_id,
+            ticket_number: m.ticket_number,
+            from_agent: dir === 'outgoing' || dir === 'system',
+            sender_name: dir === 'outgoing'
+              ? (m.assigned_to || ticket.assigned_to || 'Atendente')
+              : (dir === 'system' ? 'Sistema' : null), // NÃO mostrar “Cliente”
+            delivered_at: m.delivered_at,
+            read_at: m.read_at,
+            status: deriveStatus(m),       // 'read' | 'delivered' | 'sent' | 'received'
+            metadata: m.metadata || null,
+            reply_to: m.reply_to || m.metadata?.context?.message_id || null,
+            context: m.metadata?.context || null
+          };
+        });
+      }
 
-      // 3) Mapeia para o formato do front
-      ticket.messages = (mRes.rows || []).map((m) => {
-        const dir = String(m.direction || '').toLowerCase();
-        const type = String(m.type || '').toLowerCase(); // 'document' | 'image' | 'audio' | 'interactive' | 'text' | ...
-        const content = mergeContent(m.content, m.metadata, type);
+      // 4) Deriva anexos a partir das mensagens (sempre que pedirem attachments)
+      if (withAttachments) {
+        const attachments = rows.map((m) => {
+          const type = String(m.type || '').toLowerCase();
+          const c = mergeContent(m.content, m.metadata, type); // garante url/mimetype/filename/size...
+          const url = c?.url;
 
-        return {
-          id: m.id,
-          direction: dir,
-          type,                          // preserva o tipo original
-          content,                       // objeto/string normalizado
-          text:
-            typeof content === 'string' ? content :
-            (content.text || content.body || content.caption || null),
-          timestamp: m.timestamp,        // compatível com ChatWindow
-          created_at: m.timestamp,       // mantido por compatibilidade
-          channel: m.channel,
-          message_id: m.message_id,
-          ticket_number: m.ticket_number,
-          from_agent: dir === 'outgoing' || dir === 'system',
-          sender_name: dir === 'outgoing'
-            ? (m.assigned_to || ticket.assigned_to || 'Atendente')
-            : dir === 'system'
-            ? 'Sistema'
-            : null,                      // NÃO mostrar “Cliente”
-          delivered_at: m.delivered_at,
-          read_at: m.read_at,
-          status: deriveStatus(m),       // 'read' | 'delivered' | 'sent' | 'received'
-          metadata: m.metadata || null,
-          reply_to: m.reply_to || m.metadata?.context?.message_id || null,
-          context: m.metadata?.context || null
-        };
-      });
+          // tipos que usualmente geram arquivo
+          const isAttachType = ['document', 'image', 'audio', 'video', 'sticker', 'file'].includes(type);
+          if (!isAttachType && !url) return null;
+
+          if (!url) return null; // sem URL não há o que baixar
+
+          let filename = c.filename || null;
+          if (!filename) {
+            try {
+              const u = new URL(url);
+              filename = decodeURIComponent(u.pathname.split('/').pop() || 'arquivo');
+            } catch { filename = 'arquivo'; }
+          }
+
+          return {
+            id: m.id,
+            type,
+            url,
+            filename,
+            mime_type: c.mime_type || null,
+            size: c.size || null,
+            timestamp: m.timestamp,
+            direction: m.direction,
+            sender_name: (String(m.direction).toLowerCase() === 'outgoing')
+              ? (m.assigned_to || ticket.assigned_to || 'Atendente')
+              : null
+          };
+        }).filter(Boolean);
+
+        ticket.attachments = attachments;
+      }
+    } else {
+      // não pediram nada = mantém mensagens/attachments ausentes
+      if (withMessages)    ticket.messages = [];
+      if (withAttachments) ticket.attachments = [];
     }
 
     return reply.send(ticket);
