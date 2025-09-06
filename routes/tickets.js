@@ -19,7 +19,7 @@ async function ticketsRoutes(fastify, options) {
   }
 
 // GET /tickets/history/:id/pdf  -> attachment PDF do ticket
-fastify.get('/tickets/history/:id/pdf', async (req, reply) => {
+fastify.get('/history/:id/pdf', async (req, reply) => {
   const { id } = req.params || {};
 
   // Reusa a query do /history/:id para puxar tudo que precisamos
