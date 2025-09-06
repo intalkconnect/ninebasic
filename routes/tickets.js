@@ -25,33 +25,6 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-// routes/tickets.js (ESM)
-
-import amqplib from 'amqplib';
-import { PassThrough } from 'node:stream';
-import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
-const PDFDocument = require('pdfkit'); // CJS via ESM OK
-
-const AMQP_URL = process.env.AMQP_URL || 'amqp://guest:guest@rabbitmq:5672/';
-const INCOMING_QUEUE = process.env.INCOMING_QUEUE || 'hmg.incoming';
-
-let amqpConn, amqpChIncoming;
-async function ensureAMQPIncoming() {
-  if (amqpChIncoming) return amqpChIncoming;
-  amqpConn = await amqplib.connect(AMQP_URL, { heartbeat: 15 });
-  amqpConn.on('close', () => { amqpConn = null; amqpChIncoming = null; });
-  amqpChIncoming = await amqpConn.createChannel();
-  await amqpChIncoming.assertQueue(INCOMING_QUEUE, { durable: true });
-  return amqpChIncoming;
-}
-
-async function ticketsRoutes(fastify, options) {
-  function isValidUserId(user_id) {
-    return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
-  }
-
   // -----------------------------
   // GET /tickets/history/:id/pdf
   // -----------------------------
