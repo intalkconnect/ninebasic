@@ -26,9 +26,7 @@ async function ticketsRoutes(fastify, options) {
   }
 
 // routes/tickets.js (trecho) — GET /tickets/history/:id/pdf
-
-
- fastify.get('/history/:id/pdf', async (req, reply) => {
+fastify.get('/history/:id/pdf', async (req, reply) => {
     try {
       const { id } = req.params || {};
 
@@ -115,7 +113,6 @@ async function ticketsRoutes(fastify, options) {
         } catch { return null; }
       }
 
-      // Remove prefixos tipo "*Nome:* " no início (mensagens encaminhadas/quote)
       const cleanupForwardPrefix = (s) => {
         if (!s) return s;
         return String(s).replace(/^\*[^:*]{1,60}:\*\s*/i, '');
@@ -181,7 +178,6 @@ async function ticketsRoutes(fastify, options) {
       function ensureSpace(need) {
         if (doc.y + need <= pageH - M) return;
         doc.addPage();
-        // cabeçalho leve da continuação
         doc.fillColor('#6B7280').font('Helvetica').fontSize(10)
            .text(`Ticket #${num} — continuação`, M, M);
         doc.moveDown(0.5);
@@ -203,9 +199,8 @@ async function ticketsRoutes(fastify, options) {
         doc.moveDown(0.6);
       }
 
-      async function drawBubble({ who, when, side, text, imageBuf, links }) {
+      async function drawBubble({ who, when, side, text, imageBuf, imageUrl, links }) {
         if (side === 'center') {
-          // pílula central (mensagem de sistema)
           const pill = text || `${who} — ${when}`;
           const w = Math.min(360, contentW * 0.7);
           const padX = 12, padY = 8;
@@ -233,14 +228,14 @@ async function ticketsRoutes(fastify, options) {
         const body = cleanupForwardPrefix(text);
         const metaH  = doc.heightOfString(meta, { width: innerW });
         const textH  = body ? doc.heightOfString(body, { width: innerW }) : 0;
-        const linksH = links.length
-          ? links.reduce((acc, l) => acc + doc.heightOfString(l.label, { width: innerW }) + 4, 0)
-          : 0;
 
-        // reserva 200px para imagem
+        // reserva 200px para imagem se houver
         const imgBudget = imageBuf ? 200 : 0;
-        const totalH = bubblePadY + metaH + (body ? 6 + textH : 0) + (imageBuf ? 8 + imgBudget : 0) + (links.length ? 6 + linksH : 0) + bubblePadY;
 
+        // cada link ocupará ~ uma linha
+        const linksH = (links?.length || 0) * (doc.currentLineHeight() + 4);
+
+        const totalH = bubblePadY + metaH + (body ? 6 + textH : 0) + (imageBuf ? 8 + imgBudget : 0) + (linksH ? 6 + linksH : 0) + bubblePadY;
         ensureSpace(totalH + gapY);
 
         const bx = isRight ? (M + contentW - maxBubbleW) : M;
@@ -262,19 +257,30 @@ async function ticketsRoutes(fastify, options) {
           cy = doc.y;
         }
 
-        // imagem (se houver)
+        // imagem (se houver) + "clique aqui"
         if (imageBuf) {
           cy += 8;
           doc.image(imageBuf, bx + bubblePadX, cy, { width: innerW });
           cy += imgBudget;
+
+          if (imageUrl) {
+            cy += 6;
+            doc.fillColor(txtCol).font('Helvetica').fontSize(10)
+               .text('📎 imagem — ', bx + bubblePadX, cy, { continued: true, width: innerW });
+            doc.fillColor(linkCol).font('Helvetica').fontSize(10)
+               .text('clique aqui', { link: imageUrl, underline: true });
+            cy = doc.y;
+          }
         }
 
-        // links (anexos não-imagem)
-        if (links.length) {
+        // links (anexos não-imagem): sempre “clique aqui”
+        if (links && links.length) {
           cy += 6;
-          doc.font('Helvetica').fontSize(10).fillColor(linkCol);
           for (const l of links) {
-            doc.text(l.label, bx + bubblePadX, cy, { width: innerW, link: l.url, underline: true });
+            doc.fillColor(txtCol).font('Helvetica').fontSize(10)
+               .text('📎 mídia — ', bx + bubblePadX, cy, { continued: true, width: innerW });
+            doc.fillColor(linkCol).font('Helvetica').fontSize(10)
+               .text('clique aqui', { link: l.url, underline: true });
             cy = doc.y + 4;
           }
         }
@@ -308,20 +314,16 @@ async function ticketsRoutes(fastify, options) {
         const mime = c?.mime_type || null;
 
         let imageBuf = null;
+        let imageUrl = null;
         if (url && (isImageUrl(url) || isImageMime(mime))) {
           imageBuf = await fetchImageBuffer(url);
+          imageUrl = url;
         }
 
         const fileLinks = [];
         if (url && !imageBuf) {
-          let name = c?.filename;
-          if (!name) {
-            try { name = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'arquivo'); }
-            catch { name = 'arquivo'; }
-          }
-          // opcional: tamanho, se houver
-          const sizeStr = c?.size ? ` (${Math.round(Number(c.size)/1024)} KB)` : '';
-          fileLinks.push({ label: `${name}${sizeStr}`, url });
+          // Apenas um link curto “clique aqui” (sem filename)
+          fileLinks.push({ url });
         }
 
         const side =
@@ -333,6 +335,7 @@ async function ticketsRoutes(fastify, options) {
           who, when, side,
           text,
           imageBuf,
+          imageUrl,
           links: fileLinks
         });
       }
@@ -343,6 +346,7 @@ async function ticketsRoutes(fastify, options) {
       if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
     }
   });
+  
 fastify.get('/history/:id', async (req, reply) => {
   const { id } = req.params || {};
   const { include, messages_limit } = req.query || {};
