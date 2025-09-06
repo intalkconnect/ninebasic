@@ -25,332 +25,357 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-  fastify.get('/history/:id/pdf', async (req, reply) => {
-    let doc;
-    try {
-      const { id } = req.params || {};
+ fastify.get('/history/:id/pdf', async (req, reply) => {
+  let doc;
+  try {
+    const { id } = req.params || {};
 
-      // 1) Ticket + cliente
-      const tRes = await req.db.query(`
-        SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
-               t.status, t.created_at, t.updated_at,
-               c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
-          FROM tickets t
-          LEFT JOIN clientes c ON c.user_id = t.user_id
-         WHERE t.id::text = $1
-      `, [String(id)]);
-      if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
-      const ticket = tRes.rows[0];
+    // 1) Ticket + cliente
+    const tRes = await req.db.query(`
+      SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
+             t.status, t.created_at, t.updated_at,
+             c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
+        FROM tickets t
+        LEFT JOIN clientes c ON c.user_id = t.user_id
+       WHERE t.id::text = $1
+    `, [String(id)]);
+    if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
+    const ticket = tRes.rows[0];
 
-      // 2) Mensagens
-      const mRes = await req.db.query(`
-        SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
-               m.metadata, m.assigned_to
-          FROM messages m
-         WHERE m.ticket_number = $1
-         ORDER BY m."timestamp" ASC, m.id ASC
-         LIMIT 2000
-      `, [String(ticket.ticket_number || '')]);
-      const rows = mRes.rows || [];
+    // 2) Mensagens
+    const mRes = await req.db.query(`
+      SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
+             m.metadata, m.assigned_to
+        FROM messages m
+       WHERE m.ticket_number = $1
+       ORDER BY m."timestamp" ASC, m.id ASC
+       LIMIT 2000
+    `, [String(ticket.ticket_number || '')]);
+    const rows = mRes.rows || [];
 
-      // 2.1) Resolver nomes de atendentes (users.email -> name + lastname)
-      const agentEmailsSet = new Set();
-      if (ticket.assigned_to) agentEmailsSet.add(String(ticket.assigned_to).toLowerCase());
-      for (const r of rows) if (r.assigned_to) agentEmailsSet.add(String(r.assigned_to).toLowerCase());
-      const agentEmails = [...agentEmailsSet];
-      const agentNameByEmail = new Map();
-      if (agentEmails.length) {
-        const uRes = await req.db.query(
-          `SELECT LOWER(email) AS email,
-                  COALESCE(NULLIF(TRIM(name || ' ' || lastname), ''), name, lastname, email) AS full_name
-             FROM users
-            WHERE LOWER(email) = ANY($1)`,
-          [agentEmails]
-        );
-        for (const u of (uRes.rows || [])) agentNameByEmail.set(u.email, u.full_name || u.email);
+    // 2.1) Resolver nomes de atendentes (users.email -> name + lastname)
+    const agentEmailsSet = new Set();
+    if (ticket.assigned_to) agentEmailsSet.add(String(ticket.assigned_to).toLowerCase());
+    for (const r of rows) if (r.assigned_to) agentEmailsSet.add(String(r.assigned_to).toLowerCase());
+    const agentEmails = [...agentEmailsSet];
+    const agentNameByEmail = new Map();
+    if (agentEmails.length) {
+      const uRes = await req.db.query(
+        `SELECT LOWER(email) AS email,
+                COALESCE(NULLIF(TRIM(name || ' ' || lastname), ''), name, lastname, email) AS full_name
+           FROM users
+          WHERE LOWER(email) = ANY($1)`,
+        [agentEmails]
+      );
+      for (const u of (uRes.rows || [])) agentNameByEmail.set(u.email, u.full_name || u.email);
+    }
+    const resolveAgent = (email) => {
+      if (!email) return 'Atendente';
+      const key = String(email).toLowerCase();
+      return agentNameByEmail.get(key) || email;
+    };
+
+    // 3) Hijack + headers (evita "write after end")
+    const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="ticket-${num}.pdf"`
+    });
+
+    // 4) PDF
+    doc = new PDFDocument({ size: 'A4', margin: 40 });
+    doc.pipe(reply.raw);
+    doc.on('error', (e) => { try { reply.raw.destroy(e); } catch {} });
+
+    // ---------- Helpers ----------
+    const safeParse = (raw) => {
+      if (raw == null) return null;
+      if (typeof raw === 'object') return raw;
+      const s = String(raw);
+      try { return JSON.parse(s); } catch {
+        if (/^https?:\/\//i.test(s)) return { url: s };
+        return s;
       }
-      const resolveAgent = (email) => {
-        if (!email) return 'Atendente';
-        const key = String(email).toLowerCase();
-        return agentNameByEmail.get(key) || email;
-      };
+    };
+    const normalize = (raw, meta, type) => {
+      const c = safeParse(raw);
+      const base = (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
+                   (typeof c === 'string' ? { text: c } : {});
+      const m = meta || {};
+      base.url       ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
+      base.filename  ??= m.filename || m.name || null;
+      base.mime_type ??= m.mime || m.mimetype || m.content_type || null;
+      base.caption   ??= m.caption || null;
+      base.size      ??= m.size || m.filesize || null;
+      return base;
+    };
 
-      // 3) Hijack + headers (evita "write after end")
-      const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
-      reply.hijack();
-      reply.raw.writeHead(200, {
-        'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="ticket-${num}.pdf"`
+    // INSERIR PONTOS DE QUEBRA EM PALAVRAS MUITO LONGAS (evita overflow)
+    function softWrapLongTokens(str, max = 28) {
+      if (!str) return str;
+      return String(str)
+        .split(/(\s+)/) // preserva espaços
+        .map(tok => (tok.trim().length > max ? tok.replace(new RegExp(`(.{1,${max}})`, 'g'), '$1\u200B') : tok))
+        .join('');
+    }
+
+    // Retângulo arredondado compatível
+    function fillRoundedRect(doc, x, y, w, h, r, color) {
+      doc.save();
+      doc.fillColor(color);
+      doc.moveTo(x + r, y);
+      doc.lineTo(x + w - r, y);
+      doc.quadraticCurveTo(x + w, y, x + w, y + r);
+      doc.lineTo(x + w, y + h - r);
+      doc.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      doc.lineTo(x + r, y + h);
+      doc.quadraticCurveTo(x, y + h, x, y + h - r);
+      doc.lineTo(x, y + r);
+      doc.quadraticCurveTo(x, y, x + r, y);
+      doc.fill();
+      doc.restore();
+    }
+
+    // ---------- Layout/Cores ----------
+    const M = 40;
+    const pageW = doc.page.width;
+    const pageH = doc.page.height;
+    const contentW = pageW - M * 2;
+
+    const gapY = 10;
+    const bubblePadX = 12;
+    const bubblePadY = 8;
+    const maxBubbleW = Math.min(340, contentW * 0.66);
+
+    const colText       = '#1F2937';
+    const colMeta       = '#8A8F98';
+    const colSep        = '#E5E7EB';
+    const colDayPill    = '#EEF2F7';
+    const colIncomingBg = '#F6F7F9';
+    const colOutgoingBg = '#ECEFF3';
+    const colLink       = '#4B5563';
+
+    // Header
+    const headerAgent = resolveAgent(ticket.assigned_to);
+    doc.fillColor(colText).font('Helvetica-Bold').fontSize(18)
+       .text(`Ticket #${num}`, M, undefined, { width: contentW });
+    doc.moveDown(0.2);
+    doc.fillColor(colMeta).font('Helvetica').fontSize(10)
+       .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, { width: contentW });
+    doc.moveDown(0.6);
+
+    // Dados (duas colunas)
+    const leftX  = M;
+    const rightX = M + contentW / 2;
+    const lh = 14;
+    function labelValue(label, value, x, y) {
+      doc.fillColor(colMeta).font('Helvetica-Bold').fontSize(9).text(label, x, y);
+      doc.fillColor(colText).font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
+      return y + 10 + lh;
+    }
+    let y1 = doc.y, y2 = doc.y;
+    y1 = labelValue('Cliente',   ticket.customer_name || ticket.user_id, leftX,  y1);
+    y1 = labelValue('Contato',   ticket.customer_phone || ticket.customer_email || '—', leftX,  y1);
+    y2 = labelValue('Fila',      ticket.fila,          rightX, y2);
+    y2 = labelValue('Atendente', headerAgent,          rightX, y2);
+
+    const yMax = Math.max(y1, y2);
+    doc.strokeColor(colSep).lineWidth(1)
+       .moveTo(M, yMax + 8).lineTo(M + contentW, yMax + 8).stroke();
+    doc.y = yMax + 16;
+
+    // Título conversa
+    doc.fillColor(colText).font('Helvetica-Bold').fontSize(12).text('Conversa');
+    doc.moveDown(0.3);
+
+    if (!rows.length) {
+      doc.fillColor(colMeta).font('Helvetica').fontSize(11)
+         .text('Não há histórico de mensagens neste ticket.', { width: contentW, align: 'center' });
+      doc.end();
+      return;
+    }
+
+    function ensureSpace(need) {
+      if (doc.y + need <= pageH - M) return;
+      doc.addPage();
+      doc.fillColor(colMeta).font('Helvetica').fontSize(10)
+         .text(`Ticket #${num} — continuação`, M, M);
+      doc.moveDown(0.5);
+    }
+
+    // Separador por dia
+    let lastDay = '';
+    function daySeparator(date) {
+      const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      const padX = 8, padY = 3;
+      const w = doc.widthOfString(label) + padX * 2;
+      const h = doc.currentLineHeight() + padY * 2;
+      const x = M + (contentW - w) / 2;
+      ensureSpace(h + 8);
+      fillRoundedRect(doc, x, doc.y, w, h, 6, colDayPill);
+      doc.fillColor('#4B5563').font('Helvetica').fontSize(9)
+         .text(label, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
+      doc.moveDown(0.6);
+    }
+
+    // Link labels
+    const buildLinkLabels = (links) =>
+      (links || []).map(l => {
+        const base = l?.filename ? `${l.filename} — Clique aqui para abrir a mídia`
+                                 : 'Clique aqui para abrir a mídia';
+        return softWrapLongTokens(base, 28);
       });
 
-      // 4) PDF
-      doc = new PDFDocument({ size: 'A4', margin: 40 });
-      doc.pipe(reply.raw);
-      doc.on('error', (e) => { try { reply.raw.destroy(e); } catch {} });
+    // Função para calcular altura do texto com quebras
+    function calculateTextHeight(text, options) {
+      const { width, fontSize = 11, font = 'Helvetica' } = options;
+      doc.save();
+      doc.font(font).fontSize(fontSize);
+      const height = doc.heightOfString(text, { width, align: 'left' });
+      doc.restore();
+      return height;
+    }
 
-      // ---------- Helpers ----------
-      const safeParse = (raw) => {
-        if (raw == null) return null;
-        if (typeof raw === 'object') return raw;
-        const s = String(raw);
-        try { return JSON.parse(s); } catch {
-          if (/^https?:\/\//i.test(s)) return { url: s };
-          return s;
-        }
-      };
-      const normalize = (raw, meta, type) => {
-        const c = safeParse(raw);
-        const base = (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
-                     (typeof c === 'string' ? { text: c } : {});
-        const m = meta || {};
-        base.url       ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
-        base.filename  ??= m.filename || m.name || null;
-        base.mime_type ??= m.mime || m.mimetype || m.content_type || null;
-        base.caption   ??= m.caption || null;
-        base.size      ??= m.size || m.filesize || null;
-        return base;
-      };
+    // Bolha
+    function drawBubble({ who, when, side, body, links }) {
+      // normaliza texto e quebra tokens longos
+      const txt = softWrapLongTokens((body || '').toString().trim(), 28);
+      const hasLinks = (links && links.length > 0);
+      if (!txt && !hasLinks) return;
 
-      // INSERIR PONTOS DE QUEBRA EM PALAVRAS MUITO LONGAS (evita overflow)
-      function softWrapLongTokens(str, max = 28) {
-        if (!str) return str;
-        return String(str)
-          .split(/(\s+)/) // preserva espaços
-          .map(tok => (tok.trim().length > max ? tok.replace(new RegExp(`(.{1,${max}})`, 'g'), '$1\u200B') : tok))
-          .join('');
-      }
+      const isRight = side === 'right';
+      const bg = isRight ? colOutgoingBg : colIncomingBg;
+      const metaLine = softWrapLongTokens(`${who} — ${when}`, 36);
+      const innerW = maxBubbleW - bubblePadX * 2;
 
-      // Retângulo arredondado compatível
-      function fillRoundedRect(doc, x, y, w, h, r, color) {
+      const linkLabels = buildLinkLabels(links);
+
+      // Calcular alturas com as mesmas configurações de fonte
+      const metaH  = calculateTextHeight(metaLine, { width: innerW, fontSize: 9, font: 'Helvetica' });
+      const bodyH  = txt ? calculateTextHeight(txt, { width: innerW, fontSize: 11, font: 'Helvetica' }) : 0;
+      
+      let linksH = 0;
+      if (linkLabels.length) {
         doc.save();
-        doc.fillColor(color);
-        doc.moveTo(x + r, y);
-        doc.lineTo(x + w - r, y);
-        doc.quadraticCurveTo(x + w, y, x + w, y + r);
-        doc.lineTo(x + w, y + h - r);
-        doc.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-        doc.lineTo(x + r, y + h);
-        doc.quadraticCurveTo(x, y + h, x, y + h - r);
-        doc.lineTo(x, y + r);
-        doc.quadraticCurveTo(x, y, x + r, y);
-        doc.fill();
+        doc.font('Helvetica').fontSize(10);
+        linkLabels.forEach(label => {
+          linksH += doc.heightOfString(label, { width: innerW }) + 4;
+        });
         doc.restore();
       }
 
-      // ---------- Layout/Cores ----------
-      const M = 40;
-      const pageW = doc.page.width;
-      const pageH = doc.page.height;
-      const contentW = pageW - M * 2;
+      const totalH = bubblePadY + metaH + (txt ? 6 + bodyH : 0)
+                   + (linkLabels.length ? 8 + linksH : 0) + bubblePadY;
 
-      const gapY = 10;
-      const bubblePadX = 10;
-      const bubblePadY = 8;
-      const maxBubbleW = Math.min(340, contentW * 0.66); // menor para ficar mais compacto
+      ensureSpace(totalH + gapY);
 
-      const colText       = '#1F2937';
-      const colMeta       = '#8A8F98';
-      const colSep        = '#E5E7EB';
-      const colDayPill    = '#EEF2F7';
-      const colIncomingBg = '#F6F7F9';
-      const colOutgoingBg = '#ECEFF3';
-      const colLink       = '#4B5563';
+      const bx = isRight ? (M + contentW - maxBubbleW) : M;
+      const by = doc.y;
 
-      // Header
-      const headerAgent = resolveAgent(ticket.assigned_to);
-      doc.fillColor(colText).font('Helvetica-Bold').fontSize(18)
-         .text(`Ticket #${num}`, M, undefined, { width: contentW });
-      doc.moveDown(0.2);
-      doc.fillColor(colMeta).font('Helvetica').fontSize(10)
-         .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, { width: contentW });
-      doc.moveDown(0.6);
+      fillRoundedRect(doc, bx, by, maxBubbleW, totalH, 10, bg);
 
-      // Dados (duas colunas)
-      const leftX  = M;
-      const rightX = M + contentW / 2;
-      const lh = 14;
-      function labelValue(label, value, x, y) {
-        doc.fillColor(colMeta).font('Helvetica-Bold').fontSize(9).text(label, x, y);
-        doc.fillColor(colText).font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
-        return y + 10 + lh;
-      }
-      let y1 = doc.y, y2 = doc.y;
-      y1 = labelValue('Cliente',   ticket.customer_name || ticket.user_id, leftX,  y1);
-      y1 = labelValue('Contato',   ticket.customer_phone || ticket.customer_email || '—', leftX,  y1);
-      y2 = labelValue('Fila',      ticket.fila,          rightX, y2);
-      y2 = labelValue('Atendente', headerAgent,          rightX, y2);
+      doc.fillColor(colMeta).font('Helvetica').fontSize(9)
+         .text(metaLine, bx + bubblePadX, by + bubblePadY, { 
+           width: innerW,
+           align: 'left'
+         });
 
-      const yMax = Math.max(y1, y2);
-      doc.strokeColor(colSep).lineWidth(1)
-         .moveTo(M, yMax + 8).lineTo(M + contentW, yMax + 8).stroke();
-      doc.y = yMax + 16;
+      let cy = by + bubblePadY + metaH;
 
-      // Título conversa
-      doc.fillColor(colText).font('Helvetica-Bold').fontSize(12).text('Conversa');
-      doc.moveDown(0.3);
-
-      if (!rows.length) {
-        doc.fillColor(colMeta).font('Helvetica').fontSize(11)
-           .text('Não há histórico de mensagens neste ticket.', { width: contentW, align: 'center' });
-        doc.end();
-        return;
+      if (txt) {
+        cy += 6;
+        doc.fillColor(colText).font('Helvetica').fontSize(11)
+           .text(txt, bx + bubblePadX, cy, { 
+             width: innerW,
+             align: 'left'
+           });
+        cy = doc.y;
       }
 
-      function ensureSpace(need) {
-        if (doc.y + need <= pageH - M) return;
-        doc.addPage();
-        doc.fillColor(colMeta).font('Helvetica').fontSize(10)
-           .text(`Ticket #${num} — continuação`, M, M);
-        doc.moveDown(0.5);
-      }
-
-      // Separador por dia
-      let lastDay = '';
-      function daySeparator(date) {
-        const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-        const padX = 8, padY = 3;
-        const w = doc.widthOfString(label) + padX * 2;
-        const h = doc.currentLineHeight() + padY * 2;
-        const x = M + (contentW - w) / 2;
-        ensureSpace(h + 8);
-        fillRoundedRect(doc, x, doc.y, w, h, 6, colDayPill);
-        doc.fillColor('#4B5563').font('Helvetica').fontSize(9)
-           .text(label, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
-        doc.moveDown(0.6);
-      }
-
-      // Link labels
-      const buildLinkLabels = (links) =>
-        (links || []).map(l => {
-          const base = l?.filename ? `${l.filename} — Clique aqui para abrir a mídia`
-                                   : 'Clique aqui para abrir a mídia';
-          return softWrapLongTokens(base, 28);
-        });
-
-      // Bolha
-      function drawBubble({ who, when, side, body, links }) {
-        // normaliza texto e quebra tokens longos
-        const txt = softWrapLongTokens((body || '').toString().trim(), 28);
-        const hasLinks = (links && links.length > 0);
-        if (!txt && !hasLinks) return;
-
-        const isRight = side === 'right';
-        const bg = isRight ? colOutgoingBg : colIncomingBg;
-        const metaLine = softWrapLongTokens(`${who} — ${when}`, 36);
-        const innerW = maxBubbleW - bubblePadX * 2;
-
-        const linkLabels = buildLinkLabels(links);
-
-        const metaH  = doc.heightOfString(metaLine, { width: innerW });
-        const bodyH  = txt ? doc.heightOfString(txt, { width: innerW }) : 0;
-        const linksH = linkLabels.length
-          ? linkLabels.reduce((acc, a) => acc + doc.heightOfString(a, { width: innerW }) + 4, 0)
-          : 0;
-
-        const totalH = bubblePadY + metaH + (txt ? 6 + bodyH : 0)
-                     + (linkLabels.length ? 8 + linksH : 0) + bubblePadY;
-
-        ensureSpace(totalH + gapY);
-
-        const bx = isRight ? (M + contentW - maxBubbleW) : M;
-        const by = doc.y;
-
-        fillRoundedRect(doc, bx, by, maxBubbleW, totalH, 10, bg);
-
-        doc.fillColor(colMeta).font('Helvetica').fontSize(9)
-           .text(metaLine, bx + bubblePadX, by + bubblePadY, { width: innerW });
-
-        let cy = by + bubblePadY + metaH;
-
-        if (txt) {
-          cy += 6;
-          doc.fillColor(colText).font('Helvetica').fontSize(11)
-             .text(txt, bx + bubblePadX, cy, { width: innerW });
-          cy = doc.y;
+      if (linkLabels.length) {
+        cy += 8;
+        doc.fillColor(colLink).font('Helvetica').fontSize(10);
+        for (let i = 0; i < linkLabels.length; i++) {
+          doc.text(linkLabels[i], bx + bubblePadX, cy, {
+            width: innerW,
+            link: links[i].url,
+            underline: true,
+            align: 'left'
+          });
+          cy = doc.y + 4;
         }
-
-        if (linkLabels.length) {
-          cy += 8;
-          doc.fillColor(colLink).font('Helvetica').fontSize(10);
-          for (let i = 0; i < linkLabels.length; i++) {
-            doc.text(linkLabels[i], bx + bubblePadX, cy, {
-              width: innerW,
-              link: links[i].url,
-              underline: true
-            });
-            cy = doc.y + 4;
-          }
-        }
-
-        doc.y = by + totalH + gapY;
       }
 
-      // 5) Loop
-      for (const m of rows) {
-        const ts = new Date(m.timestamp);
-        const dayKey = ts.toISOString().slice(0, 10);
-        if (dayKey !== lastDay) { daySeparator(ts); lastDay = dayKey; }
+      doc.y = by + totalH + gapY;
+    }
 
-        const dir  = String(m.direction || '').toLowerCase(); // incoming | outgoing | system
-        const type = String(m.type || '').toLowerCase();
-        const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
-        const c = normalize(m.content, meta, type);
+    // 5) Loop
+    for (const m of rows) {
+      const ts = new Date(m.timestamp);
+      const dayKey = ts.toISOString().slice(0, 10);
+      if (dayKey !== lastDay) { daySeparator(ts); lastDay = dayKey; }
 
-        const rawText = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '')) || '';
-        const trimmed = rawText.toString().trim();
+      const dir  = String(m.direction || '').toLowerCase(); // incoming | outgoing | system
+      const type = String(m.type || '').toLowerCase();
+      const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
+      const c = normalize(m.content, meta, type);
 
-        if (dir === 'system') {
-          // “Ticket #000041” -> apenas texto central (sem pílula)
-          const ticketStartRegex = new RegExp(`^\\s*ticket\\s*#?${num}\\s*$`, 'i');
-          if (ticketStartRegex.test(trimmed)) {
-            const t = softWrapLongTokens(trimmed, 36);
-            ensureSpace(doc.currentLineHeight() + 6);
-            doc.fillColor(colMeta).font('Helvetica').fontSize(10)
-               .text(t, M, doc.y, { width: contentW, align: 'center' });
-            doc.moveDown(0.4);
-            continue;
-          }
+      const rawText = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '')) || '';
+      const trimmed = rawText.toString().trim();
 
-          // Demais eventos: pílula
-          const text = softWrapLongTokens(trimmed || '[evento]', 36);
-          const padX = 10, padY = 6;
-          const w = Math.min(320, contentW * 0.6);
-          const txtH = doc.heightOfString(text, { width: w - padX * 2 });
-          const h = padY * 2 + txtH;
-          ensureSpace(h + gapY);
-          const x = M + (contentW - w) / 2;
-          fillRoundedRect(doc, x, doc.y, w, h, 8, colDayPill);
-          doc.fillColor('#4B5563').font('Helvetica').fontSize(10)
-             .text(text, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
-          doc.moveDown(0.5);
+      if (dir === 'system') {
+        // “Ticket #000041” -> apenas texto central (sem pílula)
+        const ticketStartRegex = new RegExp(`^\\s*ticket\\s*#?${num}\\s*$`, 'i');
+        if (ticketStartRegex.test(trimmed)) {
+          const t = softWrapLongTokens(trimmed, 36);
+          ensureSpace(doc.currentLineHeight() + 6);
+          doc.fillColor(colMeta).font('Helvetica').fontSize(10)
+             .text(t, M, doc.y, { width: contentW, align: 'center' });
+          doc.moveDown(0.4);
           continue;
         }
 
-        const who = dir === 'outgoing'
-          ? resolveAgent(m.assigned_to || ticket.assigned_to)
-          : (ticket.customer_name || ticket.user_id || 'Cliente');
-
-        const when = ts.toLocaleString('pt-BR');
-        const url = c?.url || null;
-        const links = url ? [{ url, filename: c?.filename || null }] : [];
-
-        drawBubble({
-          who,
-          when,
-          side: dir === 'outgoing' ? 'right' : 'left',
-          body: trimmed,
-          links
-        });
+        // Demais eventos: pílula
+        const text = softWrapLongTokens(trimmed || '[evento]', 36);
+        const padX = 10, padY = 6;
+        const w = Math.min(320, contentW * 0.6);
+        const txtH = calculateTextHeight(text, { width: w - padX * 2, fontSize: 10 });
+        const h = padY * 2 + txtH;
+        ensureSpace(h + gapY);
+        const x = M + (contentW - w) / 2;
+        fillRoundedRect(doc, x, doc.y, w, h, 8, colDayPill);
+        doc.fillColor('#4B5563').font('Helvetica').fontSize(10)
+           .text(text, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
+        doc.moveDown(0.5);
+        continue;
       }
 
-      doc.end();
+      const who = dir === 'outgoing'
+        ? resolveAgent(m.assigned_to || ticket.assigned_to)
+        : (ticket.customer_name || ticket.user_id || 'Cliente');
 
-    } catch (err) {
-      req.log.error({ err }, 'Erro ao gerar PDF');
-      if (doc) { try { doc.end(); } catch {} }
-      else if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
+      const when = ts.toLocaleString('pt-BR');
+      const url = c?.url || null;
+      const links = url ? [{ url, filename: c?.filename || null }] : [];
+
+      drawBubble({
+        who,
+        when,
+        side: dir === 'outgoing' ? 'right' : 'left',
+        body: trimmed,
+        links
+      });
     }
-  });
+
+    doc.end();
+
+  } catch (err) {
+    req.log.error({ err }, 'Erro ao gerar PDF');
+    if (doc) { try { doc.end(); } catch {} }
+    else if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
+  }
+});
   
   // GET /tickets/last/:user_id → retorna o ticket mais recente do usuário
   fastify.get('/last/:user_id', async (req, reply) => {
