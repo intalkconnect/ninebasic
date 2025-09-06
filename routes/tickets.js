@@ -25,11 +25,10 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-  // -----------------------------
-  // GET /tickets/history/:id/pdf
-  // -----------------------------
-  fastify.get('/history/:id/pdf', async (req, reply) => {
+fastify.get('/history/:id/pdf', async (req, reply) => {
     const out = new PassThrough();
+    let doc, ended = false;
+
     try {
       const { id } = req.params || {};
 
@@ -66,8 +65,9 @@ async function ticketsRoutes(fastify, options) {
         .send(out);
 
       // 4) PDF
-      const doc = new PDFDocument({ size: 'A4', margin: 40 });
-      doc.on('error', (e) => out.destroy(e));
+      doc = new PDFDocument({ size: 'A4', margin: 40 });
+      doc.on('error', (e) => { try { out.destroy(e); } catch {} });
+      doc.on('end', () => { ended = true; });
       doc.pipe(out);
 
       // helpers
@@ -129,7 +129,7 @@ async function ticketsRoutes(fastify, options) {
       const colIncomingBg = '#F6F7F9';
       const colOutgoingBg = '#ECEFF3';
 
-      // header ticket
+      // header ticket (fora de bubble)
       doc.fillColor(colText).font('Helvetica-Bold').fontSize(18)
          .text(`Ticket #${num}`, M, undefined, { width: contentW });
       doc.moveDown(0.2);
@@ -161,10 +161,12 @@ async function ticketsRoutes(fastify, options) {
       doc.fillColor(colText).font('Helvetica-Bold').fontSize(12).text('Conversa');
       doc.moveDown(0.3);
 
+      // ⚠️ NÃO retornar sem fechar o PDF
       if (!rows.length) {
         doc.fillColor(colMeta).font('Helvetica').fontSize(11)
            .text('Não há histórico de mensagens neste ticket.', { width: contentW, align: 'center' });
-        return; // finally garantirá doc.end()
+        doc.end(); // <— ESSENCIAL
+        return;
       }
 
       function ensureSpace(need) {
@@ -189,7 +191,6 @@ async function ticketsRoutes(fastify, options) {
         doc.moveDown(0.6);
       }
 
-      // ⚠️ CORREÇÃO: calcular labels de links antes de medir
       function buildLinkLabels(links) {
         return (links || []).map(l =>
           l?.filename ? `${l.filename} — Clique aqui para abrir a mídia`
@@ -251,7 +252,7 @@ async function ticketsRoutes(fastify, options) {
         doc.y = by + totalH + gapY;
       }
 
-      // 6) loop mensagens — finally garante fechamento do PDF
+      // 6) loop mensagens — finally garante fechamento
       try {
         for (const m of rows) {
           const ts = new Date(m.timestamp);
@@ -299,19 +300,15 @@ async function ticketsRoutes(fastify, options) {
           });
         }
       } finally {
-        doc.end(); // ✅ sempre finaliza o PDF
+        if (!ended) doc.end(); // ✅ sempre finaliza o PDF
       }
 
     } catch (err) {
       req.log.error({ err }, 'Erro ao gerar PDF');
-      // stream já foi enviado; só encerramos em caso de erro hard
-      try { out.destroy(err); } catch {}
+      try { if (!out.destroyed) out.destroy(err); } catch {}
       if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
     }
   });
-
-
-
   // GET /tickets/last/:user_id → retorna o ticket mais recente do usuário
   fastify.get('/last/:user_id', async (req, reply) => {
     const { user_id } = req.params;
