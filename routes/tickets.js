@@ -28,11 +28,12 @@ async function ticketsRoutes(fastify, options) {
 // routes/tickets.js (trecho) — GET /tickets/history/:id/pdf
 
 
+// GET /tickets/history/:id/pdf  -> gera e baixa o PDF do ticket (layout de chat)
 fastify.get('/history/:id/pdf', async (req, reply) => {
   try {
     const { id } = req.params || {};
 
-    // 1) Ticket + cliente
+    // 1) Ticket + dados do cliente
     const tRes = await req.db.query(`
       SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
              t.status, t.created_at, t.updated_at,
@@ -44,7 +45,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
     const ticket = tRes.rows[0];
 
-    // 2) Mensagens (ordenadas)
+    // 2) Mensagens (ordem cronológica)
     const mRes = await req.db.query(`
       SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
              m.metadata, m.assigned_to
@@ -55,27 +56,23 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     `, [String(ticket.ticket_number || '')]);
     const rows = mRes.rows || [];
 
-    // 3) Headers + hijack (sem reply.send)
+    // 3) Cabeçalhos HTTP + stream (uma única resposta)
     const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
     const filename = `ticket-${num}.pdf`;
-    reply
-      .header('Content-Type', 'application/pdf')
-      .header('Content-Disposition', `attachment; filename="${filename}"`)
-      .hijack(); // <- assume controle do socket
 
-    const res = reply.raw;
+    reply
+      .type('application/pdf')
+      .header('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const out = new PassThrough();
+    reply.send(out); // ✅ envia só uma vez
 
     // 4) PDF
     const doc = new PDFDocument({ size: 'A4', margin: 36 });
-    doc.on('error', (e) => {
-      req.log.error(e, 'pdfkit error');
-      try { res.destroy(e); } catch {}
-    });
-    res.on('error', (e) => req.log.error(e, 'socket error while streaming pdf'));
+    doc.on('error', (e) => out.destroy(e));
+    doc.pipe(out); // PDF -> PassThrough -> cliente
 
-    doc.pipe(res);
-
-    // ==== Helpers ====
+    // ==== helpers de conteúdo ====
     const safeParse = (raw) => {
       if (raw == null) return null;
       if (typeof raw === 'object') return raw;
@@ -107,13 +104,10 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         if (!/^image\/(png|jpe?g)/i.test(ct)) return null;
         const ab = await rsp.arrayBuffer();
         return Buffer.from(ab);
-      } catch (e) {
-        req.log.warn({ err: e, url }, 'falha ao baixar imagem para PDF');
-        return null;
-      }
+      } catch { return null; }
     }
 
-    // ==== Layout / estilo ====
+    // ==== layout ====
     const M = 36;
     const pageW = doc.page.width;
     const pageH = doc.page.height;
@@ -123,11 +117,11 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     const bubblePadX = 10;
     const bubblePadY = 8;
 
-    const colIncomingBg = '#F3F4F6'; // inbound esquerda
-    const colOutgoingBg = '#2563EB'; // outbound direita
+    const colIncomingBg = '#F3F4F6'; // esquerda (cliente)
+    const colOutgoingBg = '#2563EB'; // direita (agente)
     const colOutgoingTx = '#FFFFFF';
-    const colMeta = '#6B7280';
-    const colSystemBg = '#E5E7EB';
+    const colMeta       = '#6B7280';
+    const colSystemBg   = '#E5E7EB';
 
     // Header
     doc.font('Helvetica-Bold').fontSize(18).fillColor('#111827').text(`Ticket #${num}`);
@@ -136,7 +130,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
        .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
     doc.moveDown(0.4);
 
-    // Info cliente (duas colunas)
+    // Info do cliente (duas colunas)
     const leftColX = M;
     const rightColX = M + contentW / 2;
     const lineH = 14;
@@ -147,32 +141,36 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     }
     let y = doc.y;
     const yStart = y;
-    y = labelValue('Cliente', ticket.customer_name || ticket.user_id, leftColX, y);
-    y = labelValue('Contato', ticket.customer_phone || ticket.customer_email || '—', leftColX, y);
+    y  = labelValue('Cliente',  ticket.customer_name || ticket.user_id, leftColX,  y);
+    y  = labelValue('Contato',  ticket.customer_phone || ticket.customer_email || '—', leftColX,  y);
     let y2 = yStart;
-    y2 = labelValue('Fila', ticket.fila, rightColX, y2);
-    y2 = labelValue('Atendente', ticket.assigned_to, rightColX, y2);
+    y2 = labelValue('Fila',     ticket.fila,          rightColX,       y2);
+    y2 = labelValue('Atendente',ticket.assigned_to,   rightColX,       y2);
     const yMax = Math.max(y, y2);
     doc.moveTo(M, yMax + 8).lineTo(M + contentW, yMax + 8).strokeColor('#E5E7EB').lineWidth(1).stroke();
     doc.y = yMax + 16;
 
-    // "Conversa"
+    // Título "Conversa"
     doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Conversa');
     doc.moveDown(0.4);
 
     if (!rows.length) {
-      doc.fillColor('#6B7280').fontSize(11).text('Não há histórico de mensagens neste ticket.', { align: 'center', width: contentW });
+      doc.fillColor('#6B7280').fontSize(11)
+         .text('Não há histórico de mensagens neste ticket.', { align: 'center', width: contentW });
       doc.end();
-      return;
+      return; // ✅ fim
     }
 
+    // quebra de página
     function ensureSpace(need) {
       if (doc.y + need <= pageH - M) return;
       doc.addPage();
-      doc.fillColor('#6B7280').font('Helvetica').fontSize(10).text(`Ticket #${num} — continuação`, M, M);
+      doc.fillColor('#6B7280').font('Helvetica').fontSize(10)
+         .text(`Ticket #${num} — continuação`, M, M);
       doc.moveDown(0.5);
     }
 
+    // separador por dia
     let lastDay = '';
     function drawDaySeparator(date) {
       const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -181,26 +179,45 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       const x = M + (contentW - w) / 2;
       const h = doc.currentLineHeight() + pillPadY * 2;
       ensureSpace(h + 8);
-      doc.save()
-        .roundRect(x, doc.y, w, h, 6).fill(colSystemBg)
-        .fillColor('#374151').fontSize(9)
-        .text(label, x + pillPadX, doc.y + pillPadY, { width: w - pillPadX * 2, align: 'center' })
-        .restore();
+      doc.save();
+      doc.roundedRect(x, doc.y, w, h, 6).fill(colSystemBg);
+      doc.fillColor('#374151').fontSize(9)
+         .text(label, x + pillPadX, doc.y + pillPadY, { width: w - pillPadX * 2, align: 'center' });
+      doc.restore();
       doc.moveDown(0.6);
     }
 
+    // desenha uma bolha (incoming/outgoing) ou pílula system
     async function drawBubble({ who, when, side, text, imageBuf, links }) {
+      if (side === 'center') {
+        const pill = text || `${who} — ${when}`;
+        const w = Math.min(300, contentW * 0.6);
+        const padX = 10, padY = 6;
+        const h = doc.heightOfString(pill, { width: w - padX * 2 }) + padY * 2;
+        ensureSpace(h + gapY);
+        const x = M + (contentW - w) / 2;
+        doc.save();
+        doc.roundedRect(x, doc.y, w, h, 8).fill(colSystemBg);
+        doc.fillColor('#374151').font('Helvetica').fontSize(10)
+           .text(pill, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
+        doc.restore();
+        doc.moveDown(0.5);
+        return;
+      }
+
       const isRight = side === 'right';
-      const bg = isRight ? colOutgoingBg : colIncomingBg;
-      const txtCol = isRight ? colOutgoingTx : '#111827';
+      const bg      = isRight ? colOutgoingBg : colIncomingBg;
+      const txtCol  = isRight ? colOutgoingTx : '#111827';
       const metaCol = isRight ? '#DDE7FF' : colMeta;
 
       const innerW = maxBubbleW - bubblePadX * 2;
       const meta = `${who} — ${when}`;
 
-      const metaH  = doc.heightOfString(meta, { width: innerW });
+      const metaH  = doc.heightOfString(meta,  { width: innerW });
       const textH  = text ? doc.heightOfString(text, { width: innerW }) : 0;
-      const linksH = links.length ? links.reduce((acc, l) => acc + doc.heightOfString(l.label, { width: innerW }) + 4, 0) : 0;
+      const linksH = links.length
+        ? links.reduce((acc, l) => acc + doc.heightOfString(l.label, { width: innerW }) + 4, 0)
+        : 0;
 
       const totalH = bubblePadY + metaH + (text ? 6 + textH : 0) + (imageBuf ? 8 + 180 : 0) + (links.length ? 6 + linksH : 0) + bubblePadY;
       ensureSpace(totalH + gapY);
@@ -209,7 +226,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       const by = doc.y;
 
       doc.save();
-      doc.roundRect(bx, by, maxBubbleW, totalH, 10).fill(bg);
+      doc.roundedRect(bx, by, maxBubbleW, totalH, 10).fill(bg);
 
       doc.fillColor(metaCol).font('Helvetica').fontSize(9)
          .text(meta, bx + bubblePadX, by + bubblePadY, { width: innerW });
@@ -241,7 +258,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       doc.y = by + totalH + gapY;
     }
 
-    // 6) Loop das mensagens
+    // 5) Loop das mensagens
     for (const m of rows) {
       const ts = new Date(m.timestamp);
       const dayKey = ts.toISOString().slice(0, 10);
@@ -252,38 +269,28 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
       const c    = normalize(m.content, meta, type);
 
-      if (dir === 'system') {
-        const pill = c?.text || c?.body || c?.caption || '[evento]';
-        const w = Math.min(300, contentW * 0.6);
-        const padX = 10, padY = 6;
-        const h = doc.heightOfString(pill, { width: w - padX * 2 }) + padY * 2;
-        ensureSpace(h + gapY);
-        const x = M + (contentW - w) / 2;
-        doc.save()
-          .roundRect(x, doc.y, w, h, 8).fill(colSystemBg)
-          .fillColor('#374151').font('Helvetica').fontSize(10)
-          .text(pill, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' })
-          .restore();
-        doc.moveDown(0.5);
-        continue;
-      }
-
+      // quem/onde
       const who = dir === 'outgoing'
         ? (m.assigned_to || ticket.assigned_to || 'Atendente')
+        : dir === 'system'
+        ? 'Sistema'
         : (ticket.customer_name || ticket.user_id || 'Cliente');
+
       const when = ts.toLocaleString('pt-BR');
 
-      const text = typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || null);
+      const text =
+        typeof c === 'string' ? c :
+        (c?.text || c?.body || c?.caption || null);
+
       const url  = c?.url || null;
       const mime = c?.mime_type || null;
 
-      // imagem inline?
+      // imagem inline (png/jpg) ou links para outros tipos
       let imageBuf = null;
       if (url && (isImageUrl(url) || isImageMime(mime))) {
         imageBuf = await fetchImageBuffer(url);
       }
 
-      // se não é imagem, vira link com filename
       const links = [];
       if (url && !imageBuf) {
         let name = c?.filename;
@@ -295,22 +302,22 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       }
 
       await drawBubble({
-        who, when,
-        side: dir === 'outgoing' ? 'right' : 'left',
+        who,
+        when,
+        side: dir === 'system' ? 'center' : (dir === 'outgoing' ? 'right' : 'left'),
         text,
         imageBuf,
         links
       });
     }
 
-    doc.end(); // fecha o stream
+    doc.end(); // ✅ fecha o PDF e o PassThrough termina a resposta
   } catch (err) {
     req.log.error({ err }, 'Erro ao gerar PDF');
-    // Como hijack já foi feito, se der erro muito cedo, talvez headers não tenham ido.
-    // Se ainda não foram enviados, responde 500:
     if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
   }
 });
+
 
 
 fastify.get('/history/:id', async (req, reply) => {
