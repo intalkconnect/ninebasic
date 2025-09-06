@@ -18,24 +18,22 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
+// GET /tickets/history/:id/pdf  -> gera e BAIXA o PDF do ticket (sem PassThrough)
 fastify.get('/history/:id/pdf', async (req, reply) => {
   try {
     const { id } = req.params || {};
 
-    // ---- ESM interop + stream ----
+    // ESM <-> CJS interop
     const { createRequire } = await import('node:module');
-    const { PassThrough }   = await import('node:stream');
     const require           = createRequire(import.meta.url);
     const PDFDocument       = require('pdfkit');
 
-    // ---- Ticket + cliente ----
+    // Ticket + Cliente
     const tRes = await req.db.query(
       `
       SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
              t.status, t.created_at, t.updated_at,
-             c.name  AS customer_name,
-             c.email AS customer_email,
-             c.phone AS customer_phone
+             c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
         FROM tickets t
         LEFT JOIN clientes c ON c.user_id = t.user_id
        WHERE t.id::text = $1
@@ -45,7 +43,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
     const ticket = tRes.rows[0];
 
-    // ---- Mensagens ----
+    // Mensagens
     const mRes = await req.db.query(
       `
       SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
@@ -59,34 +57,25 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     );
     const msgs = mRes.rows || [];
 
-    // ---- Cabeçalhos de resposta ----
-    const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : null;
-    const safeName = num ? `ticket-${num}.pdf` : `ticket-sem-numero.pdf`;
+    const num       = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : null;
+    const filename  = num ? `ticket-${num}.pdf` : `ticket-sem-numero.pdf`;
 
     reply
       .header('Content-Type', 'application/pdf')
-      .header('Content-Disposition', `attachment; filename="${safeName}"`)
+      .header('Content-Disposition', `attachment; filename="${filename}"`)
       .header('Cache-Control', 'no-store');
 
-    // ---- Stream estável via PassThrough ----
-    const stream = new PassThrough();
-    const doc    = new PDFDocument({ size: 'A4', margin: 36 });
-
-    // Propaga erros de stream
+    // Cria o PDF e já envia o stream para o Fastify (sem PassThrough)
+    const doc = new PDFDocument({ size: 'A4', margin: 36 });
     doc.on('error', (err) => {
       req.log.error({ err }, 'pdfkit error');
-      if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
-      try { stream.destroy(err); } catch {}
-    });
-    stream.on('error', (err) => {
-      req.log.error({ err }, 'stream error');
+      // não dá pra enviar outro body aqui porque a resposta já foi iniciada,
+      // mas logamos para diagnóstico.
     });
 
-    // Conecta as pontas e envia a resposta
-    doc.pipe(stream);
-    reply.send(stream);
+    reply.send(doc); // <<<<< Fastify fará o pipe e o end quando o doc terminar
 
-    // ---- Conteúdo do PDF ----
+    // ------ Conteúdo do PDF ------
     const info = (label, value) => {
       doc.font('Helvetica-Bold').text(label);
       doc.font('Helvetica').text(value || '—');
@@ -101,28 +90,24 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
           return t || JSON.stringify(raw);
         }
         const s = String(raw);
-        try {
-          const o = JSON.parse(s);
-          return o?.text || o?.body || o?.caption || s;
-        } catch {
-          return s;
-        }
+        try { const o = JSON.parse(s); return o?.text || o?.body || o?.caption || s; }
+        catch { return s; }
       } catch { return ''; }
     };
 
-    // Título
+    // Cabeçalho
     doc.fontSize(18).font('Helvetica-Bold').text(`Ticket #${num ?? '—'}`);
     doc.moveDown(0.3);
     doc.fontSize(10).fillColor('#666')
-      .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
+       .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
     doc.moveDown(0.8).fillColor('#000');
 
     // Cliente
     doc.font('Helvetica-Bold').text('Cliente');
     doc.font('Helvetica').fontSize(11)
-      .text(ticket.customer_name || '—')
-      .text(ticket.customer_phone || ticket.user_id || '—')
-      .text(ticket.customer_email || '—');
+       .text(ticket.customer_name || '—')
+       .text(ticket.customer_phone || ticket.user_id || '—')
+       .text(ticket.customer_email || '—');
     doc.moveDown(0.6);
 
     // Infos
@@ -151,21 +136,17 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         doc.font('Helvetica-Bold').text(`${who} — ${when}`);
         doc.font('Helvetica').text(text || '[mensagem não textual]');
 
-        // URL de anexo (se houver)
         try {
           const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata) : (m.metadata || {});
           const url  = meta.url || meta.file_url || meta.public_url || meta.download_url || null;
-          if (url) {
-            doc.fillColor('#2563eb').text(url, { link: url, underline: true }).fillColor('#000');
-          }
+          if (url) doc.fillColor('#2563eb').text(url, { link: url, underline: true }).fillColor('#000');
         } catch {}
 
         if (idx < msgs.length - 1) doc.moveDown(0.6);
       });
     }
 
-    // Finaliza o PDF (isso fecha o stream)
-    doc.end();
+    doc.end(); // finaliza o PDF (o Fastify fecha a resposta no 'end')
   } catch (err) {
     req.log.error({ err }, 'Erro ao gerar PDF');
     if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
