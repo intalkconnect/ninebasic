@@ -18,7 +18,11 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-// GET /tickets/history/:id/pdf  -> download de PDF com layout "chat"
+// GET /tickets/history/:id/pdf -> download de PDF com layout "chat"
+// - outbound (outgoing/system) à direita (azul)
+// - inbound (incoming) à esquerda (cinza)
+// - título centralizado
+// - imagens embutidas; demais anexos com link "Baixar"
 fastify.get('/history/:id/pdf', async (req, reply) => {
   const { createRequire } = await import('node:module');
   const require     = createRequire(import.meta.url);
@@ -26,7 +30,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
 
   const { id } = req.params || {};
 
-  // 1) Ticket + cliente
+  // ========== Ticket + Cliente ==========
   const tRes = await req.db.query(
     `
     SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
@@ -43,7 +47,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
   const num      = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : null;
   const filename = num ? `ticket-${num}.pdf` : `ticket-sem-numero.pdf`;
 
-  // 2) Mensagens
+  // ========== Mensagens ==========
   const mRes = await req.db.query(
     `
     SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
@@ -57,7 +61,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
   );
   const msgs = mRes.rows || [];
 
-  // 3) helpers de conteúdo
+  // ========== Helpers ==========
   const parseText = (raw) => {
     try {
       if (!raw) return '';
@@ -70,23 +74,81 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       catch { return s; }
     } catch { return ''; }
   };
-  const extractUrlAndFile = (metaLike) => {
-    const meta = typeof metaLike === 'string'
-      ? (JSON.parse(metaLike || '{}') || {}) : (metaLike || {});
-    const url = meta.url || meta.file_url || meta.public_url || meta.download_url || null;
+
+  const extractMeta = (metaLike) => {
+    try { return typeof metaLike === 'string' ? JSON.parse(metaLike || '{}') || {} : (metaLike || {}); }
+    catch { return {}; }
+  };
+
+  const extractUrlAndFile = (metaLike, contentType, contentUrlMaybe) => {
+    const meta = extractMeta(metaLike);
+    const url  = meta.url || meta.file_url || meta.public_url || meta.download_url || contentUrlMaybe || null;
     let filename = meta.filename || meta.name || null;
+    const mime = meta.mime || meta.mimetype || meta.content_type || null;
+    let size = meta.size || meta.filesize || null;
+
     if (!filename && url) {
       try { const u = new URL(url); filename = decodeURIComponent(u.pathname.split('/').pop() || 'arquivo'); }
       catch { filename = 'arquivo'; }
     }
-    const mime = meta.mime || meta.mimetype || meta.content_type || null;
-    const size = meta.size || meta.filesize || null;
-    return { url, filename, mime, size };
+    return { url, filename, mime, size, type: (contentType || '').toLowerCase() };
   };
 
-  // 4) Geração do PDF em buffer com layout de chat
-  function buildPdf(t, messages) {
-    return new Promise((resolve, reject) => {
+  const looksLikeImage = ({ mime, url, type }) => {
+    if (type === 'image') return true;
+    if (mime && /^image\//i.test(mime)) return true;
+    if (url && /\.(png|jpe?g|gif|webp)$/i.test(url)) return true;
+    return false;
+  };
+
+  // Pequenas rotinas para descobrir dimensão de PNG/JPEG a partir do Buffer (sem dependências)
+  const getPngSize = (buf) => {
+    const sig = '89504e470d0a1a0a';
+    if (buf.length >= 24 && buf.slice(0,8).toString('hex') === sig) {
+      const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20);
+      return { width: w, height: h };
+    }
+    return null;
+  };
+  const getJpegSize = (buf) => {
+    // Procura SOF0/2
+    let i = 2;
+    while (i < buf.length) {
+      if (buf[i] !== 0xFF) { i++; continue; }
+      const marker = buf[i+1];
+      const len = buf.readUInt16BE(i+2);
+      if (marker === 0xC0 || marker === 0xC2) {
+        const h = buf.readUInt16BE(i+5), w = buf.readUInt16BE(i+7);
+        return { width: w, height: h };
+      }
+      i += 2 + len;
+    }
+    return null;
+  };
+  const getImageSize = (buf) => getPngSize(buf) || getJpegSize(buf) || null;
+
+  // fetch com fallback (Node >= 18 já tem global fetch)
+  let doFetch = globalThis.fetch;
+  if (!doFetch) {
+    try { doFetch = (await import('undici')).fetch; } catch { /* sem fetch -> sem imagem inline */ }
+  }
+
+  // Precarrega buffers de imagens quando fizer sentido (para medir altura antes de desenhar a bolha)
+  async function loadImageIfAny(meta, isImage) {
+    if (!isImage || !meta.url || !doFetch) return null;
+    try {
+      const res = await doFetch(meta.url);
+      if (!res.ok) return null;
+      const ab = await res.arrayBuffer();
+      return Buffer.from(ab);
+    } catch {
+      return null;
+    }
+  }
+
+  // ========== Constrói o PDF (em memória) ==========
+  function buildPdf(ticket, messages) {
+    return new Promise(async (resolve, reject) => {
       try {
         const doc = new PDFDocument({ size: 'A4', margin: 36 });
         const chunks = [];
@@ -96,14 +158,14 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
 
         // Paleta e métricas
         const palette = {
-          agentBg:     '#F1F5F9',  // cinza claro (agente/sistema)
-          agentText:   '#0f172a',
-          custBg:      '#2563eb',  // azul (cliente)
-          custText:    '#ffffff',
-          subText:     '#64748b',
-          divider:     '#e5e7eb',
-          dateChipBg:  '#e2e8f0',
-          link:        '#2563eb',
+          inboundBg:  '#F1F5F9',   // cinza p/ inbound (esquerda)
+          inboundText:'#0f172a',
+          outboundBg: '#2563eb',   // azul p/ outbound (direita)
+          outboundText:'#ffffff',
+          subText:    '#64748b',
+          divider:    '#e5e7eb',
+          dateChipBg: '#e2e8f0',
+          link:       '#2563eb',
         };
         const MARGIN = 36;
         const PAGE_W = doc.page.width, PAGE_H = doc.page.height;
@@ -113,6 +175,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         const PAD_X = 10, PAD_Y = 8;
         const GAP_Y = 10;
         const BUBBLE_R = 10;
+        const IMG_MAX_H = 280;
 
         const ensurePage = (neededH = 0) => {
           const bottom = doc.y + neededH + 10;
@@ -122,69 +185,55 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
           }
         };
 
-        // Cabeçalho do ticket
-        doc.font('Helvetica-Bold').fontSize(18).text(`Ticket #${num ?? '—'}`);
+        // ===== Cabeçalho central =====
+        const title = `Ticket #${num ?? '—'}`;
+        doc.font('Helvetica-Bold').fontSize(18);
+        const titleW = doc.widthOfString(title);
+        doc.text(title, CONTENT_X + (CONTENT_W - titleW) / 2, doc.y, { width: titleW, align: 'center' });
         doc.moveDown(0.25);
         doc.font('Helvetica').fontSize(10).fillColor(palette.subText)
-           .text(`Criado em: ${new Date(t.created_at).toLocaleString('pt-BR')}`);
-        doc.moveDown(0.6).fillColor('#000');
+           .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, {
+             align: 'center',
+             width: CONTENT_W
+           });
+        doc.moveDown(0.8).fillColor('#000');
 
-        // Cartão do cliente (compacto)
-        const info = (label, value) => {
-          doc.font('Helvetica-Bold').fontSize(10).text(label);
-          doc.font('Helvetica').fontSize(11).text(value || '—');
-          doc.moveDown(0.2);
-        };
-        info('Cliente', t.customer_name || t.user_id || '—');
-        doc.font('Helvetica').fontSize(10).fillColor(palette.subText)
-           .text([t.customer_phone, t.customer_email].filter(Boolean).join(' · ') || '—');
-        doc.moveDown(0.4).fillColor('#000');
-        const startX = doc.x, startY = doc.y;
+        // ===== Info compacta do ticket =====
+        const infoKVs = [
+          ['Cliente', ticket.customer_name || ticket.user_id || '—'],
+          ['Contato', [ticket.customer_phone, ticket.customer_email].filter(Boolean).join(' · ') || '—'],
+          ['Fila', ticket.fila || '—'],
+          ['Atendente', ticket.assigned_to || '—'],
+          ['Status', ticket.status || '—'],
+          ['Última atualização', new Date(ticket.updated_at).toLocaleString('pt-BR')],
+        ];
 
-        // Mini grade com Fila, Atendente, Status, Atualizado
-        const colW = Math.floor(CONTENT_W / 2);
-        const drawKV = (k, v) => {
-          doc.font('Helvetica-Bold').fontSize(9).fillColor(palette.subText).text(k.toUpperCase());
-          doc.font('Helvetica').fontSize(11).fillColor('#000').text(v || '—');
-        };
-        const gTop = doc.y;
-        doc.save();
-        doc.rect(CONTENT_X, gTop, CONTENT_W, 1).fill(palette.divider).restore();
-        doc.moveDown(0.5);
+        doc.font('Helvetica').fontSize(10);
+        infoKVs.forEach(([k, v], idx) => {
+          doc.font('Helvetica-Bold').fillColor(palette.subText).text(k.toUpperCase(), { width: CONTENT_W });
+          doc.font('Helvetica').fillColor('#000').text(v, { width: CONTENT_W });
+          if (idx === 1) {
+            doc.moveDown(0.2);
+            doc.save(); doc.rect(CONTENT_X, doc.y, CONTENT_W, 1).fill(palette.divider); doc.restore();
+            doc.moveDown(0.4);
+          } else {
+            doc.moveDown(0.4);
+          }
+        });
 
-        const y1 = doc.y;
-        doc.x = CONTENT_X; doc.y = y1; drawKV('Fila', t.fila);
-        const colHeight1 = doc.y - y1;
-
-        doc.x = CONTENT_X + colW; doc.y = y1; drawKV('Atendente', t.assigned_to);
-        const colHeight2 = doc.y - y1;
-
-        const rowH1 = Math.max(colHeight1, colHeight2);
-        doc.y = y1 + rowH1 + 6;
-
-        const y2 = doc.y;
-        doc.x = CONTENT_X; doc.y = y2; drawKV('Status', t.status);
-        const colHeight3 = doc.y - y2;
-
-        doc.x = CONTENT_X + colW; doc.y = y2;
-        drawKV('Última atualização', new Date(t.updated_at).toLocaleString('pt-BR'));
-        const colHeight4 = doc.y - y2;
-
-        doc.y = y2 + Math.max(colHeight3, colHeight4) + 10;
-
-        // Título "Conversa"
-        doc.moveDown(0.5);
-        doc.font('Helvetica-Bold').fontSize(12).text('Conversa');
+        // ===== Título "Conversa" =====
+        doc.moveDown(0.6);
+        doc.font('Helvetica-Bold').fontSize(12).text('Conversa', { width: CONTENT_W });
         doc.moveDown(0.3);
 
         if (!messages.length) {
           doc.font('Helvetica').fontSize(10).fillColor(palette.subText)
-             .text('Não há histórico de mensagens para este ticket.');
+             .text('Não há histórico de mensagens para este ticket.', { width: CONTENT_W });
           doc.end();
           return;
         }
 
-        // Separador por dia (pílula central)
+        // ===== Separador por dia =====
         const drawDayChip = (dateStr) => {
           const label = new Date(dateStr).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
           const w = doc.widthOfString(label, { font: 'Helvetica-Bold', size: 9 }) + 16;
@@ -199,80 +248,113 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
           doc.moveDown(1);
         };
 
-        // Bolha de mensagem
-        const drawBubble = ({ who, when, text, url, filename, isCustomer }) => {
-          const maxW = BUBBLE_MAX_W;
+        // ===== Bolha =====
+        const drawBubble = ({ who, when, text, meta, isOutbound, imgBuf, imgSize }) => {
+          // Alinhamento
+          const maxW   = BUBBLE_MAX_W;
           const innerW = maxW - PAD_X * 2;
+          const x      = isOutbound
+            ? CONTENT_X + CONTENT_W - maxW  // direita (outbound)
+            : CONTENT_X;                    // esquerda (inbound)
 
-          // Medir altura do texto principal
-          doc.font('Helvetica').fontSize(11);
-          const textH = text
-            ? doc.heightOfString(text, { width: innerW, align: 'left' })
-            : 0;
-
-          // Medir “Baixar …” se houver anexo
-          let attachH = 0;
-          const hasAttach = !!url;
-          if (hasAttach) {
-            doc.font('Helvetica').fontSize(10);
-            const attachLine = filename ? `📎 ${filename}` : '📎 Anexo';
-            attachH = doc.heightOfString(attachLine, { width: innerW })
-                    + doc.heightOfString('Baixar', { width: innerW }); // link na linha seguinte
-          }
-
-          // Medir cabeçalho (quem + hora)
+          // Medidas de conteúdo
           doc.font('Helvetica').fontSize(8);
           const headH = doc.heightOfString(`${who} — ${when}`, { width: innerW });
 
-          const bubbleH = headH + (text ? textH + 6 : 0) + (hasAttach ? attachH + 6 : 0) + PAD_Y * 2;
+          let textH = 0;
+          if (text) {
+            doc.font('Helvetica').fontSize(11);
+            textH = doc.heightOfString(text, { width: innerW, align: 'left' });
+          }
+
+          let imageH = 0;
+          let drawImage = false;
+          let imageDrawW = 0, imageDrawH = 0;
+          if (imgBuf && imgSize && imgSize.width && imgSize.height) {
+            // ajusta à largura interna e limita a altura
+            imageDrawW = Math.min(innerW, imgSize.width);
+            const ratio = imageDrawW / imgSize.width;
+            imageDrawH = Math.round(imgSize.height * ratio);
+            if (imageDrawH > IMG_MAX_H) {
+              const scale = IMG_MAX_H / imageDrawH;
+              imageDrawH = Math.round(imageDrawH * scale);
+              imageDrawW = Math.round(imageDrawW * scale);
+            }
+            imageH = imageDrawH + 4; // +4 de respiro
+            drawImage = true;
+          }
+
+          // Se houver URL de anexo (para não-imagem), exibir "Baixar"
+          let attachH = 0;
+          const hasDownload = !!(meta && meta.url && !drawImage);
+          if (hasDownload) {
+            doc.font('Helvetica').fontSize(10);
+            const line1 = meta.filename ? `📎 ${meta.filename}` : '📎 Anexo';
+            attachH = doc.heightOfString(line1, { width: innerW })
+                    + doc.heightOfString('Baixar', { width: innerW });
+          }
+
+          const bubbleH = PAD_Y*2 + headH + (text ? (textH + 6) : 0) + imageH + (hasDownload ? (attachH + 6) : 0);
 
           ensurePage(bubbleH);
 
-          const x = isCustomer
-            ? CONTENT_X + CONTENT_W - maxW  // direita
-            : CONTENT_X;                    // esquerda
-          const y = doc.y;
-
-          // Caixa
+          // Fundo
           doc.save();
-          doc.fillColor(isCustomer ? palette.custBg : palette.agentBg)
-             .roundedRect(x, y, maxW, bubbleH, BUBBLE_R).fill();
+          doc.fillColor(isOutbound ? palette.outboundBg : palette.inboundBg)
+             .roundedRect(x, doc.y, maxW, bubbleH, BUBBLE_R).fill();
 
           // Cabeçalho
-          doc.fillColor(isCustomer ? '#bfdbfe' : palette.subText)
+          doc.fillColor(isOutbound ? '#bfdbfe' : palette.subText)
              .font('Helvetica-Bold').fontSize(8)
-             .text(`${who} — ${when}`, x + PAD_X, y + PAD_Y, { width: innerW });
+             .text(`${who} — ${when}`, x + PAD_X, doc.y + PAD_Y, { width: innerW });
 
           // Texto
+          let cursorY = doc.y + PAD_Y + headH + 4;
           if (text) {
             doc.font('Helvetica').fontSize(11)
-               .fillColor(isCustomer ? palette.custText : palette.agentText)
-               .text(text, x + PAD_X, doc.y + 4, { width: innerW });
+               .fillColor(isOutbound ? palette.outboundText : palette.inboundText)
+               .text(text, x + PAD_X, cursorY, { width: innerW });
+            cursorY = doc.y + 6;
           }
 
-          // Anexo, se houver
-          if (hasAttach) {
-            doc.moveDown(0.2);
-            doc.font('Helvetica').fontSize(10)
-               .fillColor(isCustomer ? '#dbeafe' : '#111827')
-               .text(filename ? `📎 ${filename}` : '📎 Anexo', x + PAD_X, doc.y, { width: innerW });
+          // Imagem
+          if (drawImage) {
+            try {
+              doc.image(imgBuf, x + PAD_X, cursorY, { width: imageDrawW, height: imageDrawH });
+              cursorY += (imageDrawH + 6);
+            } catch {
+              // se falhar, cai para link de download
+              if (meta && meta.url) {
+                doc.font('Helvetica').fontSize(10)
+                   .fillColor(isOutbound ? '#dbeafe' : '#111827')
+                   .text(meta.filename ? `📎 ${meta.filename}` : '📎 Anexo', x + PAD_X, cursorY, { width: innerW });
+                doc.fillColor(palette.link)
+                   .text('Baixar', x + PAD_X, doc.y, { width: innerW, link: meta.url, underline: true });
+                cursorY = doc.y + 6;
+              }
+            }
+          }
 
+          // Download (para não-imagem)
+          if (hasDownload) {
+            doc.font('Helvetica').fontSize(10)
+               .fillColor(isOutbound ? '#dbeafe' : '#111827')
+               .text(meta.filename ? `📎 ${meta.filename}` : '📎 Anexo', x + PAD_X, cursorY, { width: innerW });
             doc.fillColor(palette.link)
-               .text('Baixar', x + PAD_X, doc.y, { width: innerW, link: url, underline: true });
+               .text('Baixar', x + PAD_X, doc.y, { width: innerW, link: meta.url, underline: true });
           }
 
           doc.restore();
-          doc.y = y + bubbleH + GAP_Y;
+          doc.y = (doc.y + bubbleH + GAP_Y);
         };
 
-        // Loop de mensagens (agrupa por dia)
+        // ===== Loop: agrupa por dia e desenha =====
         let lastDayKey = '';
-        messages.forEach((m, idx) => {
+        for (const m of messages) {
           const dir = String(m.direction || '').toLowerCase();
-          const isCustomer = !(dir === 'outgoing' || dir === 'system'); // incoming = cliente
-          const who = dir === 'outgoing' ? (m.assigned_to || 'Atendente')
-                    : dir === 'system'   ? 'Sistema'
-                    : (t.customer_name || 'Cliente');
+          const isOutbound = (dir === 'outgoing' || dir === 'system'); // direita
+          const who = isOutbound ? (m.assigned_to || 'Atendente')
+                                 : (ticket.customer_name || 'Cliente');
           const when = new Date(m.timestamp).toLocaleString('pt-BR');
 
           // separador por dia
@@ -282,12 +364,19 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
             lastDayKey = dayKey;
           }
 
-          // conteúdo textual e anexo
-          const txt = parseText(m.content);
-          const { url, filename } = extractUrlAndFile(m.metadata);
+          const txt  = parseText(m.content);
+          const meta = extractMeta(m.metadata);
+          const merged = extractUrlAndFile(meta, m.type, meta?.url);
 
-          drawBubble({ who, when, text: txt, url, filename, isCustomer });
-        });
+          // se for imagem, tenta baixar buffer para embutir
+          let imgBuf = null, imgSize = null;
+          if (looksLikeImage(merged)) {
+            imgBuf = await loadImageIfAny(merged, true);
+            if (imgBuf) imgSize = getImageSize(imgBuf);
+          }
+
+          drawBubble({ who, when, text: txt, meta: merged, isOutbound, imgBuf, imgSize });
+        }
 
         doc.end();
       } catch (e) { reject(e); }
