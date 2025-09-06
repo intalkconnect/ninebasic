@@ -25,80 +25,70 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
- fastify.get('/history/:id/pdf', async (req, reply) => {
-    const out = new PassThrough();
+  fastify.get('/history/:id/pdf', async (req, reply) => {
+    let doc;
     try {
       const { id } = req.params || {};
 
       // 1) Ticket + cliente
-      const tRes = await req.db.query(
-        `
+      const tRes = await req.db.query(`
         SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
                t.status, t.created_at, t.updated_at,
                c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
           FROM tickets t
           LEFT JOIN clientes c ON c.user_id = t.user_id
          WHERE t.id::text = $1
-        `,
-        [String(id)]
-      );
+      `, [String(id)]);
       if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
       const ticket = tRes.rows[0];
 
       // 2) Mensagens
-      const mRes = await req.db.query(
-        `
+      const mRes = await req.db.query(`
         SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
                m.metadata, m.assigned_to
           FROM messages m
          WHERE m.ticket_number = $1
          ORDER BY m."timestamp" ASC, m.id ASC
          LIMIT 2000
-        `,
-        [String(ticket.ticket_number || '')]
-      );
+      `, [String(ticket.ticket_number || '')]);
       const rows = mRes.rows || [];
 
-      // 3) Resolver nomes de atendentes (a partir do email)
-      const emails = Array.from(new Set(
-        [ticket.assigned_to, ...rows.map(r => r.assigned_to)].filter(Boolean)
-      )).map(e => String(e).toLowerCase());
-
-      let agentByEmail = new Map();
-      if (emails.length) {
+      // 2.1) Resolver nomes de atendentes (users.email -> name + lastname)
+      const agentEmailsSet = new Set();
+      if (ticket.assigned_to) agentEmailsSet.add(String(ticket.assigned_to).toLowerCase());
+      for (const r of rows) if (r.assigned_to) agentEmailsSet.add(String(r.assigned_to).toLowerCase());
+      const agentEmails = [...agentEmailsSet];
+      const agentNameByEmail = new Map();
+      if (agentEmails.length) {
         const uRes = await req.db.query(
-          `
-          SELECT LOWER(email) AS email,
-                 TRIM(COALESCE(name,'') || ' ' || COALESCE(lastname,'')) AS full_name
-          FROM users
-          WHERE LOWER(email) = ANY($1::text[])
-          `,
-          [emails]
+          `SELECT LOWER(email) AS email,
+                  COALESCE(NULLIF(TRIM(name || ' ' || lastname), ''), name, lastname, email) AS full_name
+             FROM users
+            WHERE LOWER(email) = ANY($1)`,
+          [agentEmails]
         );
-        for (const r of (uRes.rows || [])) {
-          const name = (r.full_name || '').trim();
-          agentByEmail.set(r.email, name || r.email);
-        }
+        for (const u of (uRes.rows || [])) agentNameByEmail.set(u.email, u.full_name || u.email);
       }
-      const getAgentName = (email) => {
+      const resolveAgent = (email) => {
         if (!email) return 'Atendente';
         const key = String(email).toLowerCase();
-        return agentByEmail.get(key) || email || 'Atendente';
+        return agentNameByEmail.get(key) || email;
       };
 
-      // 4) Cabeçalhos + streaming (uma única vez)
+      // 3) Hijack + headers (evita "write after end")
       const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
-      reply
-        .type('application/pdf')
-        .header('Content-Disposition', `attachment; filename="ticket-${num}.pdf"`)
-        .send(out);
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="ticket-${num}.pdf"`
+      });
 
-      // 5) PDF
-      const doc = new PDFDocument({ size: 'A4', margin: 40 });
-      doc.on('error', (e) => out.destroy(e));
-      doc.pipe(out);
+      // 4) PDF
+      doc = new PDFDocument({ size: 'A4', margin: 40 });
+      doc.pipe(reply.raw);
+      doc.on('error', (e) => { try { reply.raw.destroy(e); } catch {} });
 
-      // Helpers
+      // ---------- Helpers ----------
       const safeParse = (raw) => {
         if (raw == null) return null;
         if (typeof raw === 'object') return raw;
@@ -120,16 +110,20 @@ async function ticketsRoutes(fastify, options) {
         base.size      ??= m.size || m.filesize || null;
         return base;
       };
-      // quebra palavras enormes para não “vazar” do layout
-      function softenLongWords(str, max = 28) {
+
+      // INSERIR PONTOS DE QUEBRA EM PALAVRAS MUITO LONGAS (evita overflow)
+      function softWrapLongTokens(str, max = 28) {
         if (!str) return str;
-        return String(str).replace(new RegExp(`\\S{${max},}`, 'g'), (m) => {
-          return m.match(new RegExp(`.{1,${max}}`, 'g')).join('\u200B');
-        });
+        return String(str)
+          .split(/(\s+)/) // preserva espaços
+          .map(tok => (tok.trim().length > max ? tok.replace(new RegExp(`(.{1,${max}})`, 'g'), '$1\u200B') : tok))
+          .join('');
       }
 
-      // Paths arredondados (sem usar roundRect para compat com versões antigas)
-      function roundedPath(x, y, w, h, r) {
+      // Retângulo arredondado compatível
+      function fillRoundedRect(doc, x, y, w, h, r, color) {
+        doc.save();
+        doc.fillColor(color);
         doc.moveTo(x + r, y);
         doc.lineTo(x + w - r, y);
         doc.quadraticCurveTo(x + w, y, x + w, y + r);
@@ -139,57 +133,52 @@ async function ticketsRoutes(fastify, options) {
         doc.quadraticCurveTo(x, y + h, x, y + h - r);
         doc.lineTo(x, y + r);
         doc.quadraticCurveTo(x, y, x + r, y);
-      }
-      function strokeRoundedRect(x, y, w, h, r, strokeColor = '#E5E7EB') {
-        doc.save();
-        doc.strokeColor(strokeColor).lineWidth(1);
-        roundedPath(x, y, w, h, r);
-        doc.stroke();
+        doc.fill();
         doc.restore();
       }
 
-      // Layout
+      // ---------- Layout/Cores ----------
       const M = 40;
       const pageW = doc.page.width;
       const pageH = doc.page.height;
       const contentW = pageW - M * 2;
 
-      const gapY = 12;
-      const padX = 10;
-      const padY = 8;
-      const maxBubbleW = Math.min(360, contentW * 0.74); // menor para não “grudar” nas laterais
+      const gapY = 10;
+      const bubblePadX = 10;
+      const bubblePadY = 8;
+      const maxBubbleW = Math.min(340, contentW * 0.66); // menor para ficar mais compacto
 
-      // paleta bem soft
-      const colText    = '#1F2937'; // slate-800
-      const colMeta    = '#6B7280'; // slate-500
-      const colSep     = '#E5E7EB'; // cinza claro
-      const colPill    = '#EEF2F7'; // “pílula” da data
-      const colBorderL = '#E5E7EB'; // contorno recebida
-      const colBorderR = '#D1D5DB'; // contorno enviada (um tiquinho mais forte)
-      const colLink    = '#374151'; // link discreto
+      const colText       = '#1F2937';
+      const colMeta       = '#8A8F98';
+      const colSep        = '#E5E7EB';
+      const colDayPill    = '#EEF2F7';
+      const colIncomingBg = '#F6F7F9';
+      const colOutgoingBg = '#ECEFF3';
+      const colLink       = '#4B5563';
 
-      // Cabeçalho
+      // Header
+      const headerAgent = resolveAgent(ticket.assigned_to);
       doc.fillColor(colText).font('Helvetica-Bold').fontSize(18)
-         .text(`Ticket #${num}`, M, undefined, { width: contentW, align: 'left' });
+         .text(`Ticket #${num}`, M, undefined, { width: contentW });
       doc.moveDown(0.2);
       doc.fillColor(colMeta).font('Helvetica').fontSize(10)
          .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, { width: contentW });
       doc.moveDown(0.6);
 
-      // Infos (duas colunas)
+      // Dados (duas colunas)
       const leftX  = M;
       const rightX = M + contentW / 2;
-      const rowH   = 14;
-      function field(label, value, x, y) {
+      const lh = 14;
+      function labelValue(label, value, x, y) {
         doc.fillColor(colMeta).font('Helvetica-Bold').fontSize(9).text(label, x, y);
         doc.fillColor(colText).font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
-        return y + 10 + rowH;
+        return y + 10 + lh;
       }
       let y1 = doc.y, y2 = doc.y;
-      y1 = field('Cliente',  ticket.customer_name || ticket.user_id, leftX,  y1);
-      y1 = field('Contato',  ticket.customer_phone || ticket.customer_email || '—', leftX,  y1);
-      y2 = field('Fila',     ticket.fila,          rightX, y2);
-      y2 = field('Atendente', getAgentName(ticket.assigned_to), rightX, y2);
+      y1 = labelValue('Cliente',   ticket.customer_name || ticket.user_id, leftX,  y1);
+      y1 = labelValue('Contato',   ticket.customer_phone || ticket.customer_email || '—', leftX,  y1);
+      y2 = labelValue('Fila',      ticket.fila,          rightX, y2);
+      y2 = labelValue('Atendente', headerAgent,          rightX, y2);
 
       const yMax = Math.max(y1, y2);
       doc.strokeColor(colSep).lineWidth(1)
@@ -215,78 +204,79 @@ async function ticketsRoutes(fastify, options) {
         doc.moveDown(0.5);
       }
 
-      // Separador de dia
+      // Separador por dia
       let lastDay = '';
       function daySeparator(date) {
         const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-        const pillPadX = 8, pillPadY = 3;
-        const w = doc.widthOfString(label) + pillPadX * 2;
-        const h = doc.currentLineHeight() + pillPadY * 2;
+        const padX = 8, padY = 3;
+        const w = doc.widthOfString(label) + padX * 2;
+        const h = doc.currentLineHeight() + padY * 2;
         const x = M + (contentW - w) / 2;
         ensureSpace(h + 8);
-        // “pílula” central
-        doc.save();
-        doc.fillColor(colPill);
-        roundedPath(x, doc.y, w, h, 6);
-        doc.fill();
-        doc.restore();
-        doc.fillColor('#374151').font('Helvetica').fontSize(9)
-           .text(label, x + pillPadX, doc.y + pillPadY, { width: w - pillPadX * 2, align: 'center' });
+        fillRoundedRect(doc, x, doc.y, w, h, 6, colDayPill);
+        doc.fillColor('#4B5563').font('Helvetica').fontSize(9)
+           .text(label, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
         doc.moveDown(0.6);
       }
 
-      // Bubble SEM fundo (só contorno) — esquerda = recebida, direita = enviada
+      // Link labels
+      const buildLinkLabels = (links) =>
+        (links || []).map(l => {
+          const base = l?.filename ? `${l.filename} — Clique aqui para abrir a mídia`
+                                   : 'Clique aqui para abrir a mídia';
+          return softWrapLongTokens(base, 28);
+        });
+
+      // Bolha
       function drawBubble({ who, when, side, body, links }) {
+        // normaliza texto e quebra tokens longos
+        const txt = softWrapLongTokens((body || '').toString().trim(), 28);
+        const hasLinks = (links && links.length > 0);
+        if (!txt && !hasLinks) return;
+
         const isRight = side === 'right';
-        const borderCol = isRight ? colBorderR : colBorderL;
-        const metaLine = `${who} — ${when} - ${isRight ? 'Enviada' : 'Recebida'}`;
-        const innerW = maxBubbleW - padX * 2;
+        const bg = isRight ? colOutgoingBg : colIncomingBg;
+        const metaLine = softWrapLongTokens(`${who} — ${when}`, 36);
+        const innerW = maxBubbleW - bubblePadX * 2;
 
-        // medir
-        const bodyPrepared = body ? softenLongWords(body) : '';
+        const linkLabels = buildLinkLabels(links);
+
         const metaH  = doc.heightOfString(metaLine, { width: innerW });
-        const bodyH  = bodyPrepared ? doc.heightOfString(bodyPrepared, { width: innerW }) : 0;
-
-        const linkLabels = (links || []).map(l =>
-          l?.filename ? `${l.filename} — Clique aqui para abrir a mídia` : 'Clique aqui para abrir a mídia'
-        );
+        const bodyH  = txt ? doc.heightOfString(txt, { width: innerW }) : 0;
         const linksH = linkLabels.length
-          ? linkLabels.reduce((acc, t) => acc + doc.heightOfString(t, { width: innerW }) + 4, 0)
+          ? linkLabels.reduce((acc, a) => acc + doc.heightOfString(a, { width: innerW }) + 4, 0)
           : 0;
 
-        const totalH = padY + metaH + (bodyPrepared ? 6 + bodyH : 0)
-                     + (linkLabels.length ? 8 + linksH : 0) + padY;
+        const totalH = bubblePadY + metaH + (txt ? 6 + bodyH : 0)
+                     + (linkLabels.length ? 8 + linksH : 0) + bubblePadY;
 
         ensureSpace(totalH + gapY);
 
         const bx = isRight ? (M + contentW - maxBubbleW) : M;
         const by = doc.y;
 
-        // contorno arredondado
-        strokeRoundedRect(bx, by, maxBubbleW, totalH, 10, borderCol);
+        fillRoundedRect(doc, bx, by, maxBubbleW, totalH, 10, bg);
 
-        // meta
         doc.fillColor(colMeta).font('Helvetica').fontSize(9)
-           .text(metaLine, bx + padX, by + padY, { width: innerW });
-        let cy = by + padY + metaH;
+           .text(metaLine, bx + bubblePadX, by + bubblePadY, { width: innerW });
 
-        // corpo
-        if (bodyPrepared) {
+        let cy = by + bubblePadY + metaH;
+
+        if (txt) {
           cy += 6;
           doc.fillColor(colText).font('Helvetica').fontSize(11)
-             .text(bodyPrepared, bx + padX, cy, { width: innerW });
+             .text(txt, bx + bubblePadX, cy, { width: innerW });
           cy = doc.y;
         }
 
-        // links
         if (linkLabels.length) {
           cy += 8;
           doc.fillColor(colLink).font('Helvetica').fontSize(10);
           for (let i = 0; i < linkLabels.length; i++) {
-            doc.text(linkLabels[i], bx + padX, cy, {
+            doc.text(linkLabels[i], bx + bubblePadX, cy, {
               width: innerW,
               link: links[i].url,
-              underline: true,
+              underline: true
             });
             cy = doc.y + 4;
           }
@@ -295,7 +285,7 @@ async function ticketsRoutes(fastify, options) {
         doc.y = by + totalH + gapY;
       }
 
-      // 6) Loop das mensagens
+      // 5) Loop
       for (const m of rows) {
         const ts = new Date(m.timestamp);
         const dayKey = ts.toISOString().slice(0, 10);
@@ -306,35 +296,41 @@ async function ticketsRoutes(fastify, options) {
         const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
         const c = normalize(m.content, meta, type);
 
-        // eventos de sistema: mostramos como pílula exceto “Ticket #...”
+        const rawText = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '')) || '';
+        const trimmed = rawText.toString().trim();
+
         if (dir === 'system') {
-          const t = typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '');
-          if (t && !/^ticket\s*#\S+/i.test(t)) {
-            const padX2 = 10, padY2 = 6;
-            const w = Math.min(320, contentW * 0.6);
-            const txt = softenLongWords(t, 40);
-            const h = doc.heightOfString(txt, { width: w - padX2 * 2 }) + padY2 * 2;
-            ensureSpace(h + gapY);
-            const x = M + (contentW - w) / 2;
-            doc.save(); doc.fillColor(colPill); roundedPath(x, doc.y, w, h, 8); doc.fill(); doc.restore();
-            doc.fillColor('#374151').font('Helvetica').fontSize(10)
-               .text(txt, x + padX2, doc.y + padY2, { width: w - padX2 * 2, align: 'center' });
-            doc.moveDown(0.5);
+          // “Ticket #000041” -> apenas texto central (sem pílula)
+          const ticketStartRegex = new RegExp(`^\\s*ticket\\s*#?${num}\\s*$`, 'i');
+          if (ticketStartRegex.test(trimmed)) {
+            const t = softWrapLongTokens(trimmed, 36);
+            ensureSpace(doc.currentLineHeight() + 6);
+            doc.fillColor(colMeta).font('Helvetica').fontSize(10)
+               .text(t, M, doc.y, { width: contentW, align: 'center' });
+            doc.moveDown(0.4);
+            continue;
           }
+
+          // Demais eventos: pílula
+          const text = softWrapLongTokens(trimmed || '[evento]', 36);
+          const padX = 10, padY = 6;
+          const w = Math.min(320, contentW * 0.6);
+          const txtH = doc.heightOfString(text, { width: w - padX * 2 });
+          const h = padY * 2 + txtH;
+          ensureSpace(h + gapY);
+          const x = M + (contentW - w) / 2;
+          fillRoundedRect(doc, x, doc.y, w, h, 8, colDayPill);
+          doc.fillColor('#4B5563').font('Helvetica').fontSize(10)
+             .text(text, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
+          doc.moveDown(0.5);
           continue;
         }
 
-        // remetente
-        const who = (dir === 'outgoing')
-          ? getAgentName(m.assigned_to || ticket.assigned_to)
+        const who = dir === 'outgoing'
+          ? resolveAgent(m.assigned_to || ticket.assigned_to)
           : (ticket.customer_name || ticket.user_id || 'Cliente');
+
         const when = ts.toLocaleString('pt-BR');
-
-        const body =
-          typeof c === 'string' ? c :
-          (c?.text || c?.body || c?.caption || null);
-
-        // só links para mídias/anexos
         const url = c?.url || null;
         const links = url ? [{ url, filename: c?.filename || null }] : [];
 
@@ -342,16 +338,17 @@ async function ticketsRoutes(fastify, options) {
           who,
           when,
           side: dir === 'outgoing' ? 'right' : 'left',
-          body,
+          body: trimmed,
           links
         });
       }
 
-      doc.end(); // ✅ fecha o PDF
+      doc.end();
+
     } catch (err) {
       req.log.error({ err }, 'Erro ao gerar PDF');
-      try { out.destroy(err); } catch {}
-      if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
+      if (doc) { try { doc.end(); } catch {} }
+      else if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
     }
   });
   
