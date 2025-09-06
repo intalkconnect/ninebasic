@@ -25,7 +25,7 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
- fastify.get('/history/:id/pdf', async (req, reply) => {
+  fastify.get('/history/:id/pdf', async (req, reply) => {
     let doc;
     try {
       const { id } = req.params || {};
@@ -53,14 +53,40 @@ async function ticketsRoutes(fastify, options) {
       `, [String(ticket.ticket_number || '')]);
       const rows = mRes.rows || [];
 
-      // 3) Começa streaming de forma *hijacked* (evita write-after-end)
+      // 2.1) Resolver nomes de atendentes (users.email -> name + lastname)
+      const agentEmailsSet = new Set();
+      if (ticket.assigned_to) agentEmailsSet.add(String(ticket.assigned_to).toLowerCase());
+      for (const r of rows) {
+        if (r.assigned_to) agentEmailsSet.add(String(r.assigned_to).toLowerCase());
+      }
+      const agentEmails = [...agentEmailsSet];
+      const agentNameByEmail = new Map();
+      if (agentEmails.length) {
+        const uRes = await req.db.query(
+          `SELECT LOWER(email) AS email, COALESCE(NULLIF(TRIM(name || ' ' || lastname), ''), name, lastname, email) AS full_name
+             FROM users
+            WHERE LOWER(email) = ANY($1)`,
+          [agentEmails]
+        );
+        for (const u of (uRes.rows || [])) {
+          agentNameByEmail.set(u.email, u.full_name || u.email);
+        }
+      }
+      const resolveAgent = (email) => {
+        if (!email) return 'Atendente';
+        const key = String(email).toLowerCase();
+        return agentNameByEmail.get(key) || email;
+      };
+
+      // 3) Hijack + headers
       const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
-      reply.hijack(); // Fastify não mais controla a resposta
+      reply.hijack();
       reply.raw.writeHead(200, {
         'Content-Type': 'application/pdf',
         'Content-Disposition': `attachment; filename="ticket-${num}.pdf"`
       });
 
+      // 4) PDF streaming
       doc = new PDFDocument({ size: 'A4', margin: 40 });
       doc.pipe(reply.raw);
       doc.on('error', (e) => {
@@ -108,32 +134,33 @@ async function ticketsRoutes(fastify, options) {
         doc.restore();
       }
 
-      // ---------- Layout e Cores ----------
+      // ---------- Layout / Cores ----------
       const M = 40;
       const pageW = doc.page.width;
       const pageH = doc.page.height;
       const contentW = pageW - M * 2;
 
-      const gapY = 12;
+      const gapY = 10;
       const bubblePadX = 10;
       const bubblePadY = 8;
-      const maxBubbleW = Math.min(420, contentW * 0.78);
+      // bolhas menores
+      const maxBubbleW = Math.min(360, contentW * 0.68);
 
-      // paleta neutra “soft” (sem azul vibrante)
-      const colText       = '#1F2937'; // slate-800
-      const colMeta       = '#8A8F98'; // cinza brando
-      const colSep        = '#E5E7EB'; // linha separadora
-      const colDayPill    = '#EEF2F7'; // separador de dia
-      const colIncomingBg = '#F6F7F9'; // bolha incoming (cliente)
-      const colOutgoingBg = '#ECEFF3'; // bolha outgoing (agente)
-      const colLink       = '#4B5563'; // link discreto (sem azul forte)
+      const colText       = '#1F2937';
+      const colMeta       = '#8A8F98';
+      const colSep        = '#E5E7EB';
+      const colDayPill    = '#EEF2F7';
+      const colIncomingBg = '#F6F7F9';
+      const colOutgoingBg = '#ECEFF3';
+      const colLink       = '#4B5563';
 
       // Header do ticket (fora de bubble)
+      const headerAgent = resolveAgent(ticket.assigned_to);
       doc.fillColor(colText).font('Helvetica-Bold').fontSize(18)
-         .text(`Ticket #${num}`, M, undefined, { width: contentW, align: 'left' });
+         .text(`Ticket #${num}`, M, undefined, { width: contentW });
       doc.moveDown(0.2);
       doc.fillColor(colMeta).font('Helvetica').fontSize(10)
-         .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, { width: contentW, align: 'left' });
+         .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, { width: contentW });
       doc.moveDown(0.6);
 
       // Bloco de dados (duas colunas)
@@ -149,7 +176,7 @@ async function ticketsRoutes(fastify, options) {
       y1 = labelValue('Cliente',   ticket.customer_name || ticket.user_id, leftX,  y1);
       y1 = labelValue('Contato',   ticket.customer_phone || ticket.customer_email || '—', leftX,  y1);
       y2 = labelValue('Fila',      ticket.fila,          rightX, y2);
-      y2 = labelValue('Atendente', ticket.assigned_to,   rightX, y2);
+      y2 = labelValue('Atendente', headerAgent,          rightX, y2);
 
       const yMax = Math.max(y1, y2);
       doc.strokeColor(colSep).lineWidth(1)
@@ -175,7 +202,7 @@ async function ticketsRoutes(fastify, options) {
         doc.moveDown(0.5);
       }
 
-      // Separador por dia
+      // Separador por dia (pílula suave)
       let lastDay = '';
       function daySeparator(date) {
         const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -190,7 +217,7 @@ async function ticketsRoutes(fastify, options) {
         doc.moveDown(0.6);
       }
 
-      // Links de mídia como “Clique aqui...”
+      // Links de mídia “Clique aqui...”
       const buildLinkLabels = (links) =>
         (links || []).map(l =>
           l?.filename ? `${l.filename} — Clique aqui para abrir a mídia`
@@ -199,6 +226,11 @@ async function ticketsRoutes(fastify, options) {
 
       // Bolha (incoming esquerda / outgoing direita)
       function drawBubble({ who, when, side, body, links }) {
+        // ignore bolha vazia
+        const txt = (body || '').toString().trim();
+        const hasLinks = (links && links.length > 0);
+        if (!txt && !hasLinks) return;
+
         const isRight = side === 'right';
         const bg = isRight ? colOutgoingBg : colIncomingBg;
         const metaLine = `${who} — ${when}`;
@@ -206,14 +238,13 @@ async function ticketsRoutes(fastify, options) {
 
         const linkLabels = buildLinkLabels(links);
 
-        // medir alturas antes de desenhar
         const metaH  = doc.heightOfString(metaLine, { width: innerW });
-        const bodyH  = body ? doc.heightOfString(body, { width: innerW }) : 0;
+        const bodyH  = txt ? doc.heightOfString(txt, { width: innerW }) : 0;
         const linksH = linkLabels.length
-          ? linkLabels.reduce((acc, txt) => acc + doc.heightOfString(txt, { width: innerW }) + 4, 0)
+          ? linkLabels.reduce((acc, a) => acc + doc.heightOfString(a, { width: innerW }) + 4, 0)
           : 0;
 
-        const totalH = bubblePadY + metaH + (body ? 6 + bodyH : 0)
+        const totalH = bubblePadY + metaH + (txt ? 6 + bodyH : 0)
                      + (linkLabels.length ? 8 + linksH : 0) + bubblePadY;
 
         ensureSpace(totalH + gapY);
@@ -221,24 +252,20 @@ async function ticketsRoutes(fastify, options) {
         const bx = isRight ? (M + contentW - maxBubbleW) : M;
         const by = doc.y;
 
-        // “card” arredondado
         fillRoundedRect(doc, bx, by, maxBubbleW, totalH, 10, bg);
 
-        // meta
         doc.fillColor(colMeta).font('Helvetica').fontSize(9)
            .text(metaLine, bx + bubblePadX, by + bubblePadY, { width: innerW });
 
         let cy = by + bubblePadY + metaH;
 
-        // corpo
-        if (body) {
+        if (txt) {
           cy += 6;
           doc.fillColor(colText).font('Helvetica').fontSize(11)
-             .text(body, bx + bubblePadX, cy, { width: innerW });
+             .text(txt, bx + bubblePadX, cy, { width: innerW });
           cy = doc.y;
         }
 
-        // links (mídias/anexos) — tom discreto e sublinhado
         if (linkLabels.length) {
           cy += 8;
           doc.fillColor(colLink).font('Helvetica').fontSize(10);
@@ -255,7 +282,7 @@ async function ticketsRoutes(fastify, options) {
         doc.y = by + totalH + gapY;
       }
 
-      // 4) Loop das mensagens
+      // 5) Loop mensagens
       for (const m of rows) {
         const ts = new Date(m.timestamp);
         const dayKey = ts.toISOString().slice(0, 10);
@@ -266,9 +293,23 @@ async function ticketsRoutes(fastify, options) {
         const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
         const c = normalize(m.content, meta, type);
 
-        // Eventos de sistema → pílula central, sem bubble
+        // texto bruto (se houver)
+        const rawText = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '')) || '';
+        const trimmed = rawText.toString().trim();
+
         if (dir === 'system') {
-          const text = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '[evento]'));
+          // Caso especial: “Ticket #000041” → só texto central (sem bolha, sem pílula)
+          const ticketStartRegex = new RegExp(`^\\s*ticket\\s*#?${num}\\s*$`, 'i');
+          if (ticketStartRegex.test(trimmed)) {
+            ensureSpace(doc.currentLineHeight() + 6);
+            doc.fillColor(colMeta).font('Helvetica').fontSize(10)
+               .text(trimmed, M, doc.y, { width: contentW, align: 'center' });
+            doc.moveDown(0.4);
+            continue;
+          }
+
+          // Demais eventos de sistema → pílula central suave
+          const text = trimmed || '[evento]';
           const padX = 10, padY = 6;
           const w = Math.min(320, contentW * 0.6);
           const txtH = doc.heightOfString(text, { width: w - padX * 2 });
@@ -282,17 +323,12 @@ async function ticketsRoutes(fastify, options) {
           continue;
         }
 
-        // Quem fala
         const who = dir === 'outgoing'
-          ? (m.assigned_to || ticket.assigned_to || 'Atendente')
+          ? resolveAgent(m.assigned_to || ticket.assigned_to)
           : (ticket.customer_name || ticket.user_id || 'Cliente');
+
         const when = ts.toLocaleString('pt-BR');
 
-        const body =
-          typeof c === 'string' ? c :
-          (c?.text || c?.body || c?.caption || null);
-
-        // Converter mídia para link
         const url = c?.url || null;
         const links = url ? [{ url, filename: c?.filename || null }] : [];
 
@@ -300,12 +336,11 @@ async function ticketsRoutes(fastify, options) {
           who,
           when,
           side: dir === 'outgoing' ? 'right' : 'left',
-          body,
+          body: trimmed,
           links
         });
       }
 
-      // encerra o PDF (encerra também a resposta hijacked)
       doc.end();
 
     } catch (err) {
@@ -313,7 +348,6 @@ async function ticketsRoutes(fastify, options) {
       if (doc) {
         try { doc.end(); } catch {}
       } else {
-        // se falhou antes do hijack/head, ainda podemos responder JSON
         if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
       }
     }
