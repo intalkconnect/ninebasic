@@ -42,7 +42,7 @@ async function ticketsRoutes(fastify, options) {
       if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
       const ticket = tRes.rows[0];
 
-      // 2) Mensagens (ordenadas)
+      // 2) Mensagens
       const mRes = await req.db.query(`
         SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
                m.metadata, m.assigned_to
@@ -56,21 +56,18 @@ async function ticketsRoutes(fastify, options) {
       // 2.1) Resolver nomes de atendentes (users.email -> name + lastname)
       const agentEmailsSet = new Set();
       if (ticket.assigned_to) agentEmailsSet.add(String(ticket.assigned_to).toLowerCase());
-      for (const r of rows) {
-        if (r.assigned_to) agentEmailsSet.add(String(r.assigned_to).toLowerCase());
-      }
+      for (const r of rows) if (r.assigned_to) agentEmailsSet.add(String(r.assigned_to).toLowerCase());
       const agentEmails = [...agentEmailsSet];
       const agentNameByEmail = new Map();
       if (agentEmails.length) {
         const uRes = await req.db.query(
-          `SELECT LOWER(email) AS email, COALESCE(NULLIF(TRIM(name || ' ' || lastname), ''), name, lastname, email) AS full_name
+          `SELECT LOWER(email) AS email,
+                  COALESCE(NULLIF(TRIM(name || ' ' || lastname), ''), name, lastname, email) AS full_name
              FROM users
             WHERE LOWER(email) = ANY($1)`,
           [agentEmails]
         );
-        for (const u of (uRes.rows || [])) {
-          agentNameByEmail.set(u.email, u.full_name || u.email);
-        }
+        for (const u of (uRes.rows || [])) agentNameByEmail.set(u.email, u.full_name || u.email);
       }
       const resolveAgent = (email) => {
         if (!email) return 'Atendente';
@@ -78,7 +75,7 @@ async function ticketsRoutes(fastify, options) {
         return agentNameByEmail.get(key) || email;
       };
 
-      // 3) Hijack + headers
+      // 3) Hijack + headers (evita "write after end")
       const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
       reply.hijack();
       reply.raw.writeHead(200, {
@@ -86,13 +83,10 @@ async function ticketsRoutes(fastify, options) {
         'Content-Disposition': `attachment; filename="ticket-${num}.pdf"`
       });
 
-      // 4) PDF streaming
+      // 4) PDF
       doc = new PDFDocument({ size: 'A4', margin: 40 });
       doc.pipe(reply.raw);
-      doc.on('error', (e) => {
-        req.log.error({ err: e }, 'pdf stream error');
-        try { reply.raw.destroy(e); } catch {}
-      });
+      doc.on('error', (e) => { try { reply.raw.destroy(e); } catch {} });
 
       // ---------- Helpers ----------
       const safeParse = (raw) => {
@@ -117,7 +111,16 @@ async function ticketsRoutes(fastify, options) {
         return base;
       };
 
-      // Retângulo arredondado compatível com PDFKit antigo
+      // INSERIR PONTOS DE QUEBRA EM PALAVRAS MUITO LONGAS (evita overflow)
+      function softWrapLongTokens(str, max = 28) {
+        if (!str) return str;
+        return String(str)
+          .split(/(\s+)/) // preserva espaços
+          .map(tok => (tok.trim().length > max ? tok.replace(new RegExp(`(.{1,${max}})`, 'g'), '$1\u200B') : tok))
+          .join('');
+      }
+
+      // Retângulo arredondado compatível
       function fillRoundedRect(doc, x, y, w, h, r, color) {
         doc.save();
         doc.fillColor(color);
@@ -134,7 +137,7 @@ async function ticketsRoutes(fastify, options) {
         doc.restore();
       }
 
-      // ---------- Layout / Cores ----------
+      // ---------- Layout/Cores ----------
       const M = 40;
       const pageW = doc.page.width;
       const pageH = doc.page.height;
@@ -143,8 +146,7 @@ async function ticketsRoutes(fastify, options) {
       const gapY = 10;
       const bubblePadX = 10;
       const bubblePadY = 8;
-      // bolhas menores
-      const maxBubbleW = Math.min(360, contentW * 0.68);
+      const maxBubbleW = Math.min(340, contentW * 0.66); // menor para ficar mais compacto
 
       const colText       = '#1F2937';
       const colMeta       = '#8A8F98';
@@ -154,7 +156,7 @@ async function ticketsRoutes(fastify, options) {
       const colOutgoingBg = '#ECEFF3';
       const colLink       = '#4B5563';
 
-      // Header do ticket (fora de bubble)
+      // Header
       const headerAgent = resolveAgent(ticket.assigned_to);
       doc.fillColor(colText).font('Helvetica-Bold').fontSize(18)
          .text(`Ticket #${num}`, M, undefined, { width: contentW });
@@ -163,7 +165,7 @@ async function ticketsRoutes(fastify, options) {
          .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, { width: contentW });
       doc.moveDown(0.6);
 
-      // Bloco de dados (duas colunas)
+      // Dados (duas colunas)
       const leftX  = M;
       const rightX = M + contentW / 2;
       const lh = 14;
@@ -183,7 +185,7 @@ async function ticketsRoutes(fastify, options) {
          .moveTo(M, yMax + 8).lineTo(M + contentW, yMax + 8).stroke();
       doc.y = yMax + 16;
 
-      // Título “Conversa”
+      // Título conversa
       doc.fillColor(colText).font('Helvetica-Bold').fontSize(12).text('Conversa');
       doc.moveDown(0.3);
 
@@ -202,7 +204,7 @@ async function ticketsRoutes(fastify, options) {
         doc.moveDown(0.5);
       }
 
-      // Separador por dia (pílula suave)
+      // Separador por dia
       let lastDay = '';
       function daySeparator(date) {
         const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -217,23 +219,24 @@ async function ticketsRoutes(fastify, options) {
         doc.moveDown(0.6);
       }
 
-      // Links de mídia “Clique aqui...”
+      // Link labels
       const buildLinkLabels = (links) =>
-        (links || []).map(l =>
-          l?.filename ? `${l.filename} — Clique aqui para abrir a mídia`
-                      : 'Clique aqui para abrir a mídia'
-        );
+        (links || []).map(l => {
+          const base = l?.filename ? `${l.filename} — Clique aqui para abrir a mídia`
+                                   : 'Clique aqui para abrir a mídia';
+          return softWrapLongTokens(base, 28);
+        });
 
-      // Bolha (incoming esquerda / outgoing direita)
+      // Bolha
       function drawBubble({ who, when, side, body, links }) {
-        // ignore bolha vazia
-        const txt = (body || '').toString().trim();
+        // normaliza texto e quebra tokens longos
+        const txt = softWrapLongTokens((body || '').toString().trim(), 28);
         const hasLinks = (links && links.length > 0);
         if (!txt && !hasLinks) return;
 
         const isRight = side === 'right';
         const bg = isRight ? colOutgoingBg : colIncomingBg;
-        const metaLine = `${who} — ${when}`;
+        const metaLine = softWrapLongTokens(`${who} — ${when}`, 36);
         const innerW = maxBubbleW - bubblePadX * 2;
 
         const linkLabels = buildLinkLabels(links);
@@ -282,7 +285,7 @@ async function ticketsRoutes(fastify, options) {
         doc.y = by + totalH + gapY;
       }
 
-      // 5) Loop mensagens
+      // 5) Loop
       for (const m of rows) {
         const ts = new Date(m.timestamp);
         const dayKey = ts.toISOString().slice(0, 10);
@@ -293,23 +296,23 @@ async function ticketsRoutes(fastify, options) {
         const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
         const c = normalize(m.content, meta, type);
 
-        // texto bruto (se houver)
         const rawText = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '')) || '';
         const trimmed = rawText.toString().trim();
 
         if (dir === 'system') {
-          // Caso especial: “Ticket #000041” → só texto central (sem bolha, sem pílula)
+          // “Ticket #000041” -> apenas texto central (sem pílula)
           const ticketStartRegex = new RegExp(`^\\s*ticket\\s*#?${num}\\s*$`, 'i');
           if (ticketStartRegex.test(trimmed)) {
+            const t = softWrapLongTokens(trimmed, 36);
             ensureSpace(doc.currentLineHeight() + 6);
             doc.fillColor(colMeta).font('Helvetica').fontSize(10)
-               .text(trimmed, M, doc.y, { width: contentW, align: 'center' });
+               .text(t, M, doc.y, { width: contentW, align: 'center' });
             doc.moveDown(0.4);
             continue;
           }
 
-          // Demais eventos de sistema → pílula central suave
-          const text = trimmed || '[evento]';
+          // Demais eventos: pílula
+          const text = softWrapLongTokens(trimmed || '[evento]', 36);
           const padX = 10, padY = 6;
           const w = Math.min(320, contentW * 0.6);
           const txtH = doc.heightOfString(text, { width: w - padX * 2 });
@@ -328,7 +331,6 @@ async function ticketsRoutes(fastify, options) {
           : (ticket.customer_name || ticket.user_id || 'Cliente');
 
         const when = ts.toLocaleString('pt-BR');
-
         const url = c?.url || null;
         const links = url ? [{ url, filename: c?.filename || null }] : [];
 
@@ -345,11 +347,8 @@ async function ticketsRoutes(fastify, options) {
 
     } catch (err) {
       req.log.error({ err }, 'Erro ao gerar PDF');
-      if (doc) {
-        try { doc.end(); } catch {}
-      } else {
-        if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
-      }
+      if (doc) { try { doc.end(); } catch {} }
+      else if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
     }
   });
   
