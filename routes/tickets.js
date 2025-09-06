@@ -25,327 +25,511 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-// routes/tickets.js (trecho) — GET /tickets/history/:id/pdf
+// routes/tickets.js (versão melhorada) — GET /tickets/history/:id/pdf
 fastify.get('/history/:id/pdf', async (req, reply) => {
-    try {
-      const { id } = req.params || {};
+  try {
+    const { id } = req.params || {};
 
-      // 1) Ticket + cliente
-      const tRes = await req.db.query(
-        `
-        SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
-               t.status, t.created_at, t.updated_at,
-               c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
-          FROM tickets t
-          LEFT JOIN clientes c ON c.user_id = t.user_id
-         WHERE t.id::text = $1
-        `,
-        [String(id)]
-      );
-      if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
-      const ticket = tRes.rows[0];
+    // 1) Buscar dados do ticket e mensagens (mesmo código original)
+    const tRes = await req.db.query(
+      `SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
+              t.status, t.created_at, t.updated_at,
+              c.name AS customer_name, c.email AS customer_email, c.phone AS customer_phone
+       FROM tickets t
+       LEFT JOIN clientes c ON c.user_id = t.user_id
+       WHERE t.id::text = $1`,
+      [String(id)]
+    );
+    if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
+    const ticket = tRes.rows[0];
 
-      // 2) Mensagens (ordenadas)
-      const mRes = await req.db.query(
-        `
-        SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
-               m.metadata, m.assigned_to
-          FROM messages m
-         WHERE m.ticket_number = $1
-         ORDER BY m."timestamp" ASC, m.id ASC
-         LIMIT 2000
-        `,
-        [String(ticket.ticket_number || '')]
-      );
-      const rows = mRes.rows || [];
+    const mRes = await req.db.query(
+      `SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
+              m.metadata, m.assigned_to
+       FROM messages m
+       WHERE m.ticket_number = $1
+       ORDER BY m."timestamp" ASC, m.id ASC
+       LIMIT 2000`,
+      [String(ticket.ticket_number || '')]
+    );
+    const rows = mRes.rows || [];
 
-      // 3) Cabeçalhos HTTP + PassThrough (uma única resposta)
-      const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
-      const filename = `ticket-${num}.pdf`;
-      reply
-        .type('application/pdf')
-        .header('Content-Disposition', `attachment; filename="${filename}"`);
+    // 2) Setup da resposta HTTP
+    const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
+    const filename = `ticket-${num}.pdf`;
+    reply
+      .type('application/pdf')
+      .header('Content-Disposition', `attachment; filename="${filename}"`);
 
-      const out = new PassThrough();
-      reply.send(out); // envia o stream (não chamar reply.send novamente)
+    const out = new PassThrough();
+    reply.send(out);
 
-      // 4) PDF
-      const doc = new PDFDocument({ size: 'A4', margin: 36 });
-      doc.on('error', (e) => out.destroy(e));
-      doc.pipe(out); // PDF -> PassThrough -> cliente
-
-      // ==== Helpers ====
-      const safeParse = (raw) => {
-        if (raw == null) return null;
-        if (typeof raw === 'object') return raw;
-        const s = String(raw);
-        try { return JSON.parse(s); } catch {
-          if (/^https?:\/\//i.test(s)) return { url: s };
-          return s;
-        }
-      };
-
-      const normalize = (raw, meta, type) => {
-        const c = safeParse(raw);
-        const base =
-          (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
-          (typeof c === 'string' ? { text: c } : {});
-        const m = meta || {};
-        base.url       ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
-        base.filename  ??= m.filename || m.name || null;
-        base.mime_type ??= m.mime || m.mimetype || m.content_type || null;
-        base.caption   ??= m.caption || null;
-        base.size      ??= m.size || m.filesize || null;
-        return base;
-      };
-
-      const isImageUrl  = (u) => /\.(png|jpe?g)$/i.test(u || '');
-      const isImageMime = (m) => /^image\/(png|jpe?g)$/i.test(String(m || ''));
-
-      async function fetchImageBuffer(url) {
-        try {
-          const rsp = await fetch(url);
-          if (!rsp.ok) return null;
-          const ct = rsp.headers.get('content-type') || '';
-          if (!/^image\/(png|jpe?g)/i.test(ct)) return null;
-          const ab = await rsp.arrayBuffer();
-          return Buffer.from(ab);
-        } catch { return null; }
+    // 3) Configuração do PDF melhorada
+    const doc = new PDFDocument({ 
+      size: 'A4', 
+      margin: 40,
+      info: {
+        Title: `Ticket #${num}`,
+        Subject: 'Histórico de Atendimento',
+        Producer: 'Sistema de Tickets'
       }
+    });
+    doc.on('error', (e) => out.destroy(e));
+    doc.pipe(out);
 
-      const cleanupForwardPrefix = (s) => {
-        if (!s) return s;
-        return String(s).replace(/^\*[^:*]{1,60}:\*\s*/i, '');
-      };
+    // ==== CONSTANTES DE LAYOUT MELHORADAS ====
+    const M = 40; // margem
+    const pageW = doc.page.width;
+    const pageH = doc.page.height;
+    const contentW = pageW - M * 2;
+    const maxBubbleW = Math.min(420, contentW * 0.82);
+    const gapY = 14;
+    const bubblePadX = 16;
+    const bubblePadY = 12;
 
-      // ==== Layout base ====
-      const M = 36;
-      const pageW = doc.page.width;
-      const pageH = doc.page.height;
-      const contentW = pageW - M * 2;
-      const maxBubbleW = Math.min(440, contentW * 0.85);
-      const gapY = 12;
-      const bubblePadX = 12;
-      const bubblePadY = 10;
-
-      const colIncomingBg = '#F3F4F6'; // esquerda (cliente)
-      const colOutgoingBg = '#2563EB'; // direita (agente)
-      const colOutgoingTx = '#FFFFFF';
-      const colMeta       = '#6B7280';
-      const colLinkIn     = '#1D4ED8';
-      const colLinkOut    = '#E0E7FF';
-      const colSystemBg   = '#E5E7EB';
-      const colTitle      = '#111827';
-
-      // Header
-      doc.font('Helvetica-Bold').fontSize(18).fillColor(colTitle).text(`Ticket #${num}`);
-      doc.moveDown(0.3);
-      doc.font('Helvetica').fontSize(10).fillColor('#6B7280')
-         .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
-      doc.moveDown(0.4);
-
-      // Info cliente (duas colunas)
-      const leftColX = M;
-      const rightColX = M + contentW / 2;
-      const lineH = 14;
-      function labelValue(label, value, x, y) {
-        doc.fillColor('#6B7280').font('Helvetica-Bold').fontSize(9).text(label, x, y);
-        doc.fillColor(colTitle).font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
-        return y + 10 + lineH;
+    // CORES REFINADAS
+    const colors = {
+      primary: '#1F2937',
+      secondary: '#6B7280', 
+      accent: '#3B82F6',
+      success: '#10B981',
+      warning: '#F59E0B',
+      error: '#EF4444',
+      // Bolhas de chat
+      incoming: {
+        bg: '#F8FAFC',
+        border: '#E2E8F0',
+        text: '#1F2937',
+        meta: '#64748B'
+      },
+      outgoing: {
+        bg: '#3B82F6',
+        border: '#2563EB', 
+        text: '#FFFFFF',
+        meta: '#DBEAFE'
+      },
+      system: {
+        bg: '#F1F5F9',
+        border: '#CBD5E1',
+        text: '#475569'
       }
-      let y = doc.y;
-      const yStart = y;
-      y  = labelValue('Cliente', ticket.customer_name || ticket.user_id, leftColX, y);
-      y  = labelValue('Contato', ticket.customer_phone || ticket.customer_email || '—', leftColX, y);
-      let y2 = yStart;
-      y2 = labelValue('Fila', ticket.fila, rightColX, y2);
-      y2 = labelValue('Atendente', ticket.assigned_to, rightColX, y2);
-      const yMax = Math.max(y, y2);
-      doc.moveTo(M, yMax + 8).lineTo(M + contentW, yMax + 8).strokeColor('#E5E7EB').lineWidth(1).stroke();
-      doc.y = yMax + 16;
+    };
 
-      // "Conversa"
-      doc.fillColor(colTitle).font('Helvetica-Bold').fontSize(12).text('Conversa');
-      doc.moveDown(0.4);
+    // ==== HELPER FUNCTIONS MELHORADAS ====
+    const safeParse = (raw) => {
+      if (raw == null) return null;
+      if (typeof raw === 'object') return raw;
+      const s = String(raw);
+      try { return JSON.parse(s); } catch {
+        if (/^https?:\/\//i.test(s)) return { url: s };
+        return s;
+      }
+    };
 
-      if (!rows.length) {
-        doc.fillColor('#6B7280').fontSize(11)
-           .text('Não há histórico de mensagens neste ticket.', { align: 'center', width: contentW });
-        doc.end();
+    const normalize = (raw, meta, type) => {
+      const c = safeParse(raw);
+      const base = (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
+                   (typeof c === 'string' ? { text: c } : {});
+      const m = meta || {};
+      base.url ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
+      base.filename ??= m.filename || m.name || null;
+      base.mime_type ??= m.mime || m.mimetype || m.content_type || null;
+      base.caption ??= m.caption || null;
+      base.size ??= m.size || m.filesize || null;
+      return base;
+    };
+
+    const isImageUrl = (u) => /\.(png|jpe?g|webp|gif)$/i.test(u || '');
+    const isImageMime = (m) => /^image\/(png|jpe?g|webp|gif)$/i.test(String(m || ''));
+
+    async function fetchImageBuffer(url) {
+      try {
+        const rsp = await fetch(url);
+        if (!rsp.ok) return null;
+        const ct = rsp.headers.get('content-type') || '';
+        if (!/^image\/(png|jpe?g|webp|gif)/i.test(ct)) return null;
+        const ab = await rsp.arrayBuffer();
+        return Buffer.from(ab);
+      } catch { return null; }
+    }
+
+    const cleanupForwardPrefix = (s) => {
+      if (!s) return s;
+      return String(s).replace(/^\*[^:*]{1,60}:\*\s*/i, '');
+    };
+
+    function ensureSpace(need) {
+      if (doc.y + need <= pageH - M) return;
+      doc.addPage();
+      // Header da página
+      doc.save();
+      doc.fillColor(colors.secondary).fontSize(9).font('Helvetica');
+      doc.text(`Ticket #${num} — Página ${doc.bufferedPageRange().count}`, M, M);
+      doc.moveTo(M, M + 15).lineTo(M + contentW, M + 15)
+         .strokeColor('#E5E7EB').lineWidth(0.5).stroke();
+      doc.restore();
+      doc.y = M + 25;
+    }
+
+    function drawSectionTitle(title, icon = '') {
+      ensureSpace(35);
+      doc.save();
+      const bgHeight = 28;
+      doc.rect(M, doc.y, contentW, bgHeight)
+         .fill(colors.system.bg)
+         .strokeColor(colors.system.border)
+         .lineWidth(1)
+         .stroke();
+      
+      doc.fillColor(colors.primary)
+         .font('Helvetica-Bold')
+         .fontSize(12);
+      doc.text(`${icon} ${title}`, M + 12, doc.y + 8);
+      doc.restore();
+      doc.y += bgHeight + 12;
+    }
+
+    // ==== CABEÇALHO PRINCIPAL MELHORADO ====
+    ensureSpace(120);
+    
+    // Logo/Título principal
+    doc.save();
+    doc.rect(M, doc.y, contentW, 50)
+       .fill(colors.accent)
+       .stroke();
+    
+    doc.fillColor('#FFFFFF')
+       .font('Helvetica-Bold')
+       .fontSize(22);
+    doc.text(`Ticket #${num}`, M + 20, doc.y + 12);
+    
+    doc.fontSize(11)
+       .font('Helvetica');
+    doc.text(`Criado em ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, M + 20, doc.y + 8);
+    doc.restore();
+    doc.y += 60;
+
+    // ==== INFORMAÇÕES DO TICKET (LAYOUT EM GRID) ====
+    drawSectionTitle('Informações do Ticket', '📋');
+    
+    const gridCols = 2;
+    const colWidth = (contentW - 20) / gridCols;
+    const rowHeight = 45;
+    
+    function drawInfoCard(label, value, x, y, width = colWidth) {
+      doc.save();
+      // Card background
+      doc.roundedRect(x, y, width, rowHeight, 6)
+         .fill('#FFFFFF')
+         .strokeColor('#E5E7EB')
+         .lineWidth(1)
+         .stroke();
+      
+      // Label
+      doc.fillColor(colors.secondary)
+         .font('Helvetica-Bold')
+         .fontSize(9)
+         .text(label.toUpperCase(), x + 12, y + 8);
+      
+      // Value
+      doc.fillColor(colors.primary)
+         .font('Helvetica')
+         .fontSize(11)
+         .text(value || '—', x + 12, y + 22, { width: width - 24 });
+      doc.restore();
+    }
+
+    let gridY = doc.y;
+    const infoItems = [
+      ['Cliente', ticket.customer_name || ticket.user_id],
+      ['Status', ticket.status],
+      ['Contato', ticket.customer_phone || ticket.customer_email || '—'],
+      ['Fila', ticket.fila],
+      ['Atendente', ticket.assigned_to || '—'],
+      ['Atualizado', new Date(ticket.updated_at).toLocaleString('pt-BR')]
+    ];
+
+    for (let i = 0; i < infoItems.length; i += 2) {
+      const leftX = M;
+      const rightX = M + colWidth + 10;
+      
+      drawInfoCard(infoItems[i][0], infoItems[i][1], leftX, gridY);
+      if (infoItems[i + 1]) {
+        drawInfoCard(infoItems[i + 1][0], infoItems[i + 1][1], rightX, gridY);
+      }
+      gridY += rowHeight + 8;
+    }
+    
+    doc.y = gridY + 10;
+
+    // ==== SEÇÃO DE CONVERSA MELHORADA ====
+    drawSectionTitle('Histórico da Conversa', '💬');
+
+    if (!rows.length) {
+      doc.save();
+      doc.roundedRect(M, doc.y, contentW, 60, 8)
+         .fill('#FEF3F2')
+         .strokeColor('#FECACA')
+         .stroke();
+      doc.fillColor('#DC2626')
+         .fontSize(12)
+         .font('Helvetica');
+      doc.text('⚠️  Não há mensagens registradas neste ticket.', 
+               M + 20, doc.y + 22, { width: contentW - 40, align: 'center' });
+      doc.restore();
+      doc.end();
+      return;
+    }
+
+    // ==== FUNÇÃO PARA DESENHAR BOLHAS MELHORADAS ====
+    async function drawEnhancedBubble({ who, when, side, text, imageBuf, imageUrl, links, type }) {
+      if (side === 'center') {
+        const pill = text || `${who} — ${when}`;
+        const w = Math.min(400, contentW * 0.8);
+        const padX = 16, padY = 10;
+        const h = doc.heightOfString(pill, { width: w - padX * 2 }) + padY * 2;
+        ensureSpace(h + gapY);
+        
+        const x = M + (contentW - w) / 2;
+        doc.save()
+          .roundedRect(x, doc.y, w, h, 12)
+          .fill(colors.system.bg)
+          .strokeColor(colors.system.border)
+          .lineWidth(1)
+          .stroke();
+        
+        doc.fillColor(colors.system.text)
+           .font('Helvetica')
+           .fontSize(10)
+           .text(pill, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
+        doc.restore();
+        doc.y += h + gapY;
         return;
       }
 
-      function ensureSpace(need) {
-        if (doc.y + need <= pageH - M) return;
-        doc.addPage();
-        doc.fillColor('#6B7280').font('Helvetica').fontSize(10)
-           .text(`Ticket #${num} — continuação`, M, M);
-        doc.moveDown(0.5);
+      const isRight = side === 'right';
+      const theme = isRight ? colors.outgoing : colors.incoming;
+      const innerW = maxBubbleW - bubblePadX * 2;
+
+      // Calcular dimensões
+      const meta = `${who} • ${when}`;
+      const body = cleanupForwardPrefix(text);
+      const metaH = doc.heightOfString(meta, { width: innerW });
+      const textH = body ? doc.heightOfString(body, { width: innerW }) : 0;
+      const imgBudget = imageBuf ? Math.min(200, innerW * 0.8) : 0;
+      const linksH = (links?.length || 0) * 18;
+
+      const totalH = bubblePadY + metaH + (body ? 8 + textH : 0) + 
+                     (imageBuf ? 10 + imgBudget : 0) + (linksH ? 8 + linksH : 0) + bubblePadY;
+      
+      ensureSpace(totalH + gapY);
+
+      const bx = isRight ? (M + contentW - maxBubbleW) : M;
+      const by = doc.y;
+
+      // Desenhar bolha com sombra sutil
+      doc.save();
+      
+      // Sombra
+      const shadowOffset = 2;
+      doc.roundedRect(bx + shadowOffset, by + shadowOffset, maxBubbleW, totalH, 12)
+         .fill('#00000008');
+      
+      // Bolha principal
+      doc.roundedRect(bx, by, maxBubbleW, totalH, 12)
+         .fill(theme.bg)
+         .strokeColor(theme.border)
+         .lineWidth(1)
+         .stroke();
+
+      // Indicador de tipo de mensagem
+      if (type && type !== 'text') {
+        const typeIcons = {
+          image: '🖼️',
+          document: '📎',
+          audio: '🎵',
+          video: '🎥',
+          location: '📍'
+        };
+        const icon = typeIcons[type] || '📄';
+        doc.fillColor(theme.meta)
+           .fontSize(10)
+           .text(icon, bx + bubblePadX - 2, by + bubblePadY - 2);
       }
 
-      let lastDay = '';
-      function drawDaySeparator(date) {
-        const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-        const pillPadX = 8, pillPadY = 3;
-        const w = doc.widthOfString(label) + pillPadX * 2;
-        const x = M + (contentW - w) / 2;
-        const h = doc.currentLineHeight() + pillPadY * 2;
-        ensureSpace(h + 8);
-        doc.save()
-          .roundedRect(x, doc.y, w, h, 6).fill(colSystemBg)
-          .fillColor('#374151').fontSize(9)
-          .text(label, x + pillPadX, doc.y + pillPadY, { width: w - pillPadX * 2, align: 'center' })
-          .restore();
-        doc.moveDown(0.6);
+      // Metadados (quem/quando)
+      doc.fillColor(theme.meta)
+         .font('Helvetica-Bold')
+         .fontSize(9)
+         .text(meta, bx + bubblePadX, by + bubblePadY, { width: innerW });
+      let cy = by + bubblePadY + metaH;
+
+      // Texto da mensagem
+      if (body) {
+        cy += 8;
+        doc.fillColor(theme.text)
+           .font('Helvetica')
+           .fontSize(11)
+           .text(body, bx + bubblePadX, cy, { width: innerW });
+        cy = doc.y;
       }
 
-      async function drawBubble({ who, when, side, text, imageBuf, imageUrl, links }) {
-        if (side === 'center') {
-          const pill = text || `${who} — ${when}`;
-          const w = Math.min(360, contentW * 0.7);
-          const padX = 12, padY = 8;
-          const h = doc.heightOfString(pill, { width: w - padX * 2 }) + padY * 2;
-          ensureSpace(h + gapY);
-          const x = M + (contentW - w) / 2;
-          doc.save()
-            .roundedRect(x, doc.y, w, h, 10).fill(colSystemBg)
-            .fillColor('#374151').font('Helvetica').fontSize(10)
-            .text(pill, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' })
-            .restore();
-          doc.moveDown(0.5);
-          return;
+      // Imagem
+      if (imageBuf) {
+        cy += 10;
+        try {
+          doc.roundedRect(bx + bubblePadX, cy, innerW, imgBudget, 6)
+             .stroke('#E5E7EB');
+          doc.image(imageBuf, bx + bubblePadX + 2, cy + 2, { 
+            width: innerW - 4, 
+            height: imgBudget - 4 
+          });
+        } catch (e) {
+          // Fallback se imagem falhar
+          doc.fillColor(theme.text)
+             .fontSize(10)
+             .text('🖼️ Imagem não pôde ser exibida', bx + bubblePadX, cy);
         }
+        cy += imgBudget;
 
-        const isRight = side === 'right';
-        const bg      = isRight ? colOutgoingBg : colIncomingBg;
-        const txtCol  = isRight ? colOutgoingTx : '#111827';
-        const metaCol = isRight ? '#DDE7FF'    : colMeta;
-        const linkCol = isRight ? colLinkOut   : colLinkIn;
-
-        const innerW = maxBubbleW - bubblePadX * 2;
-        const meta = `${who} — ${when}`;
-
-        const body = cleanupForwardPrefix(text);
-        const metaH  = doc.heightOfString(meta, { width: innerW });
-        const textH  = body ? doc.heightOfString(body, { width: innerW }) : 0;
-
-        // reserva 200px para imagem se houver
-        const imgBudget = imageBuf ? 200 : 0;
-
-        // cada link ocupará ~ uma linha
-        const linksH = (links?.length || 0) * (doc.currentLineHeight() + 4);
-
-        const totalH = bubblePadY + metaH + (body ? 6 + textH : 0) + (imageBuf ? 8 + imgBudget : 0) + (linksH ? 6 + linksH : 0) + bubblePadY;
-        ensureSpace(totalH + gapY);
-
-        const bx = isRight ? (M + contentW - maxBubbleW) : M;
-        const by = doc.y;
-
-        doc.save();
-        doc.roundedRect(bx, by, maxBubbleW, totalH, 12).fill(bg);
-
-        // meta
-        doc.fillColor(metaCol).font('Helvetica').fontSize(9)
-           .text(meta, bx + bubblePadX, by + bubblePadY, { width: innerW });
-        let cy = by + bubblePadY + metaH;
-
-        // texto
-        if (body) {
+        if (imageUrl) {
           cy += 6;
-          doc.fillColor(txtCol).font('Helvetica').fontSize(11)
-             .text(body, bx + bubblePadX, cy, { width: innerW });
+          doc.fillColor(theme.text)
+             .fontSize(9)
+             .text('🔗 ', bx + bubblePadX, cy, { continued: true });
+          doc.fillColor(isRight ? '#BFDBFE' : colors.accent)
+             .text('Ver imagem original', { link: imageUrl, underline: true });
           cy = doc.y;
         }
-
-        // imagem (se houver) + "clique aqui"
-        if (imageBuf) {
-          cy += 8;
-          doc.image(imageBuf, bx + bubblePadX, cy, { width: innerW });
-          cy += imgBudget;
-
-          if (imageUrl) {
-            cy += 6;
-            doc.fillColor(txtCol).font('Helvetica').fontSize(10)
-               .text('📎 imagem — ', bx + bubblePadX, cy, { continued: true, width: innerW });
-            doc.fillColor(linkCol).font('Helvetica').fontSize(10)
-               .text('clique aqui', { link: imageUrl, underline: true });
-            cy = doc.y;
-          }
-        }
-
-        // links (anexos não-imagem): sempre “clique aqui”
-        if (links && links.length) {
-          cy += 6;
-          for (const l of links) {
-            doc.fillColor(txtCol).font('Helvetica').fontSize(10)
-               .text('📎 mídia — ', bx + bubblePadX, cy, { continued: true, width: innerW });
-            doc.fillColor(linkCol).font('Helvetica').fontSize(10)
-               .text('clique aqui', { link: l.url, underline: true });
-            cy = doc.y + 4;
-          }
-        }
-
-        doc.restore();
-        doc.y = by + totalH + gapY;
       }
 
-      // 6) Loop das mensagens (com separador por dia)
-      for (const m of rows) {
-        const ts = new Date(m.timestamp);
-        const dayKey = ts.toISOString().slice(0, 10);
-        if (dayKey !== lastDay) { drawDaySeparator(ts); lastDay = dayKey; }
-
-        const dir = String(m.direction || '').toLowerCase();
-        const type = String(m.type || '').toLowerCase();
-        const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
-        const c = normalize(m.content, meta, type);
-
-        const who =
-          dir === 'outgoing' ? (m.assigned_to || ticket.assigned_to || 'Atendente') :
-          dir === 'system'   ? 'Sistema' :
-          (ticket.customer_name || ticket.user_id || 'Cliente');
-
-        const when = ts.toLocaleString('pt-BR');
-        const text =
-          typeof c === 'string' ? c :
-          (c?.text || c?.body || c?.caption || null);
-
-        const url = c?.url || null;
-        const mime = c?.mime_type || null;
-
-        let imageBuf = null;
-        let imageUrl = null;
-        if (url && (isImageUrl(url) || isImageMime(mime))) {
-          imageBuf = await fetchImageBuffer(url);
-          imageUrl = url;
+      // Links/anexos
+      if (links && links.length) {
+        cy += 8;
+        for (const l of links) {
+          doc.fillColor(theme.text)
+             .fontSize(10)
+             .text('📎 Anexo - ', bx + bubblePadX, cy, { continued: true });
+          doc.fillColor(isRight ? '#BFDBFE' : colors.accent)
+             .text('Download', { link: l.url, underline: true });
+          cy += 18;
         }
-
-        const fileLinks = [];
-        if (url && !imageBuf) {
-          // Apenas um link curto “clique aqui” (sem filename)
-          fileLinks.push({ url });
-        }
-
-        const side =
-          dir === 'outgoing' ? 'right' :
-          dir === 'incoming' ? 'left'  :
-          'center';
-
-        await drawBubble({
-          who, when, side,
-          text,
-          imageBuf,
-          imageUrl,
-          links: fileLinks
-        });
       }
 
-      doc.end(); // finaliza o PDF (o PassThrough fecha junto)
-    } catch (err) {
-      req.log.error({ err }, 'Erro ao gerar PDF');
-      if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
+      doc.restore();
+      doc.y = by + totalH + gapY;
     }
-  });
+
+    // ==== PROCESSAR MENSAGENS COM SEPARADORES DE DATA ====
+    let lastDay = '';
+    
+    function drawDateSeparator(date) {
+      const today = new Date();
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+      
+      let label;
+      const dateStr = date.toDateString();
+      if (dateStr === today.toDateString()) {
+        label = '🗓️ Hoje';
+      } else if (dateStr === yesterday.toDateString()) {
+        label = '🗓️ Ontem';
+      } else {
+        label = `🗓️ ${date.toLocaleDateString('pt-BR', { 
+          weekday: 'long', 
+          day: '2-digit', 
+          month: 'long', 
+          year: 'numeric' 
+        })}`;
+      }
+      
+      const w = Math.min(300, contentW * 0.6);
+      const h = 24;
+      ensureSpace(h + 16);
+      
+      const x = M + (contentW - w) / 2;
+      doc.save()
+        .roundedRect(x, doc.y, w, h, 12)
+        .fill('#EEF2FF')
+        .strokeColor('#C7D2FE')
+        .lineWidth(1)
+        .stroke();
+      
+      doc.fillColor('#4338CA')
+         .font('Helvetica-Bold')
+         .fontSize(10)
+         .text(label, x + 12, doc.y + 7, { width: w - 24, align: 'center' });
+      doc.restore();
+      doc.y += h + 16;
+    }
+
+    // Processar cada mensagem
+    for (const m of rows) {
+      const ts = new Date(m.timestamp);
+      const dayKey = ts.toISOString().slice(0, 10);
+      
+      if (dayKey !== lastDay) {
+        drawDateSeparator(ts);
+        lastDay = dayKey;
+      }
+
+      const dir = String(m.direction || '').toLowerCase();
+      const type = String(m.type || '').toLowerCase();
+      const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
+      const c = normalize(m.content, meta, type);
+
+      const who = dir === 'outgoing' ? (m.assigned_to || ticket.assigned_to || 'Atendente') :
+                  dir === 'system' ? 'Sistema' :
+                  (ticket.customer_name || ticket.user_id || 'Cliente');
+
+      const when = ts.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      const text = typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || null);
+
+      const url = c?.url || null;
+      const mime = c?.mime_type || null;
+
+      let imageBuf = null;
+      let imageUrl = null;
+      if (url && (isImageUrl(url) || isImageMime(mime))) {
+        imageBuf = await fetchImageBuffer(url);
+        imageUrl = url;
+      }
+
+      const fileLinks = [];
+      if (url && !imageBuf) {
+        fileLinks.push({ url });
+      }
+
+      const side = dir === 'outgoing' ? 'right' : dir === 'incoming' ? 'left' : 'center';
+
+      await drawEnhancedBubble({
+        who, when, side, text, type,
+        imageBuf, imageUrl,
+        links: fileLinks
+      });
+    }
+
+    // ==== RODAPÉ FINAL ====
+    ensureSpace(60);
+    doc.y += 20;
+    
+    doc.save();
+    doc.moveTo(M, doc.y).lineTo(M + contentW, doc.y)
+       .strokeColor('#E5E7EB').lineWidth(1).stroke();
+    
+    doc.fillColor(colors.secondary)
+       .fontSize(9)
+       .font('Helvetica');
+    doc.text(`Relatório gerado em ${new Date().toLocaleString('pt-BR')}`, M, doc.y + 10);
+    doc.text(`Total: ${rows.length} mensagem(ns)`, M + contentW - 120, doc.y);
+    doc.restore();
+
+    doc.end();
+  } catch (err) {
+    req.log.error({ err }, 'Erro ao gerar PDF');
+    if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
+  }
+});
   
 fastify.get('/history/:id', async (req, reply) => {
   const { id } = req.params || {};
