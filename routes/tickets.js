@@ -18,141 +18,140 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-// GET /tickets/history/:id/pdf  -> gera e BAIXA o PDF do ticket (sem PassThrough)
+// GET /tickets/history/:id/pdf  -> gera e BAIXA o PDF do ticket
 fastify.get('/history/:id/pdf', async (req, reply) => {
-  try {
-    const { id } = req.params || {};
+  const { id } = req.params || {};
 
-    // ESM <-> CJS interop
-    const { createRequire } = await import('node:module');
-    const require           = createRequire(import.meta.url);
-    const PDFDocument       = require('pdfkit');
+  // ESM <-> CJS
+  const { createRequire } = await import('node:module');
+  const require = createRequire(import.meta.url);
+  const PDFDocument = require('pdfkit');
+  const { PassThrough } = await import('node:stream');
 
-    // Ticket + Cliente
-    const tRes = await req.db.query(
-      `
-      SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
-             t.status, t.created_at, t.updated_at,
-             c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
-        FROM tickets t
-        LEFT JOIN clientes c ON c.user_id = t.user_id
-       WHERE t.id::text = $1
-      `,
-      [String(id)]
-    );
-    if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
-    const ticket = tRes.rows[0];
+  // ----- Ticket + Cliente -----
+  const tRes = await req.db.query(
+    `
+    SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
+           t.status, t.created_at, t.updated_at,
+           c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
+      FROM tickets t
+      LEFT JOIN clientes c ON c.user_id = t.user_id
+     WHERE t.id::text = $1
+    `,
+    [String(id)]
+  );
+  if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
 
-    // Mensagens
-    const mRes = await req.db.query(
-      `
-      SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
-             m.metadata, m.assigned_to
-        FROM messages m
-       WHERE m.ticket_number = $1
-       ORDER BY m."timestamp" ASC, m.id ASC
-       LIMIT 1000
-      `,
-      [String(ticket.ticket_number || '')]
-    );
-    const msgs = mRes.rows || [];
+  const ticket   = tRes.rows[0];
+  const num      = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : null;
+  const filename = num ? `ticket-${num}.pdf` : `ticket-sem-numero.pdf`;
 
-    const num       = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : null;
-    const filename  = num ? `ticket-${num}.pdf` : `ticket-sem-numero.pdf`;
+  // ----- Mensagens -----
+  const mRes = await req.db.query(
+    `
+    SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
+           m.metadata, m.assigned_to
+      FROM messages m
+     WHERE m.ticket_number = $1
+     ORDER BY m."timestamp" ASC, m.id ASC
+     LIMIT 1000
+    `,
+    [String(ticket.ticket_number || '')]
+  );
+  const msgs = mRes.rows || [];
 
-    reply
-      .header('Content-Type', 'application/pdf')
-      .header('Content-Disposition', `attachment; filename="${filename}"`)
-      .header('Cache-Control', 'no-store');
+  // ----- Cabeçalhos -----
+  reply
+    .header('Content-Type', 'application/pdf')
+    .header('Content-Disposition', `attachment; filename="${filename}"`)
+    .header('Cache-Control', 'no-store');
 
-    // Cria o PDF e já envia o stream para o Fastify (sem PassThrough)
-    const doc = new PDFDocument({ size: 'A4', margin: 36 });
-    doc.on('error', (err) => {
-      req.log.error({ err }, 'pdfkit error');
-      // não dá pra enviar outro body aqui porque a resposta já foi iniciada,
-      // mas logamos para diagnóstico.
-    });
+  // ----- Canal de saída ESTÁVEL -----
+  const out = new PassThrough();
+  out.on('error', (err) => req.log.error({ err }, 'passThrough error'));
 
-    reply.send(doc); // <<<<< Fastify fará o pipe e o end quando o doc terminar
+  // Entrega o stream ao Fastify AGORA. Ele vai fechar sozinho quando 'out' terminar
+  reply.send(out);
 
-    // ------ Conteúdo do PDF ------
-    const info = (label, value) => {
-      doc.font('Helvetica-Bold').text(label);
-      doc.font('Helvetica').text(value || '—');
-      doc.moveDown(0.3);
-    };
+  // Cria o PDF e canaliza para o PassThrough
+  const doc = new PDFDocument({ size: 'A4', margin: 36 });
+  doc.on('error', (err) => req.log.error({ err }, 'pdfkit error'));
+  doc.pipe(out);
 
-    const parseText = (raw) => {
-      try {
-        if (!raw) return '';
-        if (typeof raw === 'object') {
-          const t = raw.text || raw.body || raw.caption;
-          return t || JSON.stringify(raw);
-        }
-        const s = String(raw);
-        try { const o = JSON.parse(s); return o?.text || o?.body || o?.caption || s; }
-        catch { return s; }
-      } catch { return ''; }
-    };
-
-    // Cabeçalho
-    doc.fontSize(18).font('Helvetica-Bold').text(`Ticket #${num ?? '—'}`);
+  // ---------- Conteúdo do PDF ----------
+  const info = (label, value) => {
+    doc.font('Helvetica-Bold').text(label);
+    doc.font('Helvetica').text(value || '—');
     doc.moveDown(0.3);
-    doc.fontSize(10).fillColor('#666')
-       .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
-    doc.moveDown(0.8).fillColor('#000');
+  };
 
-    // Cliente
-    doc.font('Helvetica-Bold').text('Cliente');
-    doc.font('Helvetica').fontSize(11)
-       .text(ticket.customer_name || '—')
-       .text(ticket.customer_phone || ticket.user_id || '—')
-       .text(ticket.customer_email || '—');
-    doc.moveDown(0.6);
+  const parseText = (raw) => {
+    try {
+      if (!raw) return '';
+      if (typeof raw === 'object') {
+        const t = raw.text || raw.body || raw.caption;
+        return t || JSON.stringify(raw);
+      }
+      const s = String(raw);
+      try { const o = JSON.parse(s); return o?.text || o?.body || o?.caption || s; }
+      catch { return s; }
+    } catch { return ''; }
+  };
 
-    // Infos
-    info('Fila', ticket.fila);
-    info('Atendente', ticket.assigned_to);
-    info('Status', ticket.status);
-    info('Última atualização', new Date(ticket.updated_at).toLocaleString('pt-BR'));
-    doc.moveDown(0.5);
+  // Cabeçalho
+  doc.fontSize(18).font('Helvetica-Bold').text(`Ticket #${num ?? '—'}`);
+  doc.moveDown(0.3);
+  doc.fontSize(10).fillColor('#666')
+     .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
+  doc.moveDown(0.8).fillColor('#000');
 
-    // Conversa
-    doc.font('Helvetica-Bold').fontSize(12).text('Conversa');
-    doc.moveDown(0.4);
-    doc.font('Helvetica').fontSize(10);
+  // Cliente
+  doc.font('Helvetica-Bold').text('Cliente');
+  doc.font('Helvetica').fontSize(11)
+     .text(ticket.customer_name || '—')
+     .text(ticket.customer_phone || ticket.user_id || '—')
+     .text(ticket.customer_email || '—');
+  doc.moveDown(0.6);
 
-    if (!msgs.length) {
-      doc.text('Não há histórico de mensagens para este ticket.');
-    } else {
-      msgs.forEach((m, idx) => {
-        const dir = String(m.direction || '').toLowerCase();
-        const who = dir === 'outgoing' ? (m.assigned_to || 'Atendente')
-                  : dir === 'system'   ? 'Sistema'
-                  : 'Cliente';
-        const when = new Date(m.timestamp).toLocaleString('pt-BR');
-        const text = parseText(m.content);
+  // Infos
+  info('Fila', ticket.fila);
+  info('Atendente', ticket.assigned_to);
+  info('Status', ticket.status);
+  info('Última atualização', new Date(ticket.updated_at).toLocaleString('pt-BR'));
+  doc.moveDown(0.5);
 
-        doc.font('Helvetica-Bold').text(`${who} — ${when}`);
-        doc.font('Helvetica').text(text || '[mensagem não textual]');
+  // Conversa
+  doc.font('Helvetica-Bold').fontSize(12).text('Conversa');
+  doc.moveDown(0.4);
+  doc.font('Helvetica').fontSize(10);
 
-        try {
-          const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata) : (m.metadata || {});
-          const url  = meta.url || meta.file_url || meta.public_url || meta.download_url || null;
-          if (url) doc.fillColor('#2563eb').text(url, { link: url, underline: true }).fillColor('#000');
-        } catch {}
+  if (!msgs.length) {
+    doc.text('Não há histórico de mensagens para este ticket.');
+  } else {
+    msgs.forEach((m, idx) => {
+      const dir = String(m.direction || '').toLowerCase();
+      const who = dir === 'outgoing' ? (m.assigned_to || 'Atendente')
+                : dir === 'system'   ? 'Sistema'
+                : 'Cliente';
+      const when = new Date(m.timestamp).toLocaleString('pt-BR');
+      const text = parseText(m.content);
 
-        if (idx < msgs.length - 1) doc.moveDown(0.6);
-      });
-    }
+      doc.font('Helvetica-Bold').text(`${who} — ${when}`);
+      doc.font('Helvetica').text(text || '[mensagem não textual]');
 
-    doc.end(); // finaliza o PDF (o Fastify fecha a resposta no 'end')
-  } catch (err) {
-    req.log.error({ err }, 'Erro ao gerar PDF');
-    if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
+      try {
+        const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata) : (m.metadata || {});
+        const url  = meta.url || meta.file_url || meta.public_url || meta.download_url || null;
+        if (url) doc.fillColor('#2563eb').text(url, { link: url, underline: true }).fillColor('#000');
+      } catch {}
+
+      if (idx < msgs.length - 1) doc.moveDown(0.6);
+    });
   }
-});
 
+  // Finaliza PDF -> encerra PassThrough -> Fastify encerra a resposta
+  doc.end();
+});
 
 fastify.get('/history/:id', async (req, reply) => {
   const { id } = req.params || {};
