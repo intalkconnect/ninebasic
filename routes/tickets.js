@@ -55,20 +55,19 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     `, [String(ticket.ticket_number || '')]);
     const rows = mRes.rows || [];
 
-    // 3) Cabeçalhos HTTP + PassThrough (uma única resposta)
+    // 3) Cabeçalhos + stream
     const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
     const filename = `ticket-${num}.pdf`;
-    reply
-      .type('application/pdf')
-      .header('Content-Disposition', `attachment; filename="${filename}"`);
+    reply.type('application/pdf')
+         .header('Content-Disposition', `attachment; filename="${filename}"`);
 
     const out = new PassThrough();
-    reply.send(out); // ✅ envia o stream só uma vez
+    reply.send(out); // envia o stream uma única vez
 
     // 4) PDF
     const doc = new PDFDocument({ size: 'A4', margin: 36 });
     doc.on('error', (e) => out.destroy(e));
-    doc.pipe(out); // ✅ PDF -> PassThrough -> cliente
+    doc.pipe(out);
 
     // ==== Helpers ====
     const safeParse = (raw) => {
@@ -105,18 +104,16 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       } catch { return null; }
     }
 
-    // ==== Layout base (o que você já tinha) ====
+    // ==== Layout ====
     const M = 36;
     const pageW = doc.page.width;
     const pageH = doc.page.height;
     const contentW = pageW - M * 2;
     const maxBubbleW = Math.min(380, contentW * 0.78);
-    const gapY = 10;
-    const bubblePadX = 10;
-    const bubblePadY = 8;
+    const gapY = 10, bubblePadX = 10, bubblePadY = 8;
 
-    const colIncomingBg = '#F3F4F6';
-    const colOutgoingBg = '#2563EB';
+    const colIncomingBg = '#F3F4F6'; // esquerda (inbound)
+    const colOutgoingBg = '#2563EB'; // direita  (outbound)
     const colOutgoingTx = '#FFFFFF';
     const colMeta = '#6B7280';
     const colSystemBg = '#E5E7EB';
@@ -129,33 +126,29 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     doc.moveDown(0.4);
 
     // Info cliente (duas colunas)
-    const leftColX = M;
-    const rightColX = M + contentW / 2;
-    const lineH = 14;
+    const leftColX = M, rightColX = M + contentW / 2, lineH = 14;
     function labelValue(label, value, x, y) {
       doc.fillColor('#6B7280').font('Helvetica-Bold').fontSize(9).text(label, x, y);
       doc.fillColor('#111827').font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
       return y + 10 + lineH;
     }
-    let y = doc.y;
-    const yStart = y;
-    y = labelValue('Cliente', ticket.customer_name || ticket.user_id, leftColX, y);
-    y = labelValue('Contato', ticket.customer_phone || ticket.customer_email || '—', leftColX, y);
-    let y2 = yStart;
-    y2 = labelValue('Fila', ticket.fila, rightColX, y2);
-    y2 = labelValue('Atendente', ticket.assigned_to, rightColX, y2);
+    let y = doc.y, y2 = doc.y;
+    y  = labelValue('Cliente',  ticket.customer_name || ticket.user_id, leftColX,  y);
+    y  = labelValue('Contato',  ticket.customer_phone || ticket.customer_email || '—', leftColX,  y);
+    y2 = labelValue('Fila',     ticket.fila,          rightColX, y2);
+    y2 = labelValue('Atendente',ticket.assigned_to,   rightColX, y2);
     const yMax = Math.max(y, y2);
     doc.moveTo(M, yMax + 8).lineTo(M + contentW, yMax + 8).strokeColor('#E5E7EB').lineWidth(1).stroke();
     doc.y = yMax + 16;
 
-    // "Conversa"
+    // Conversa
     doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Conversa');
     doc.moveDown(0.4);
 
     if (!rows.length) {
       doc.fillColor('#6B7280').fontSize(11).text('Não há histórico de mensagens neste ticket.', { align: 'center', width: contentW });
       doc.end();
-      return; // ✅ fim
+      return;
     }
 
     function ensureSpace(need) {
@@ -190,11 +183,9 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       const innerW = maxBubbleW - bubblePadX * 2;
       const meta = `${who} — ${when}`;
 
-      const metaH = doc.heightOfString(meta, { width: innerW });
-      const textH = text ? doc.heightOfString(text, { width: innerW }) : 0;
-      const linksH = links.length
-        ? links.reduce((acc, l) => acc + doc.heightOfString(l.label, { width: innerW }) + 4, 0)
-        : 0;
+      const metaH  = doc.heightOfString(meta, { width: innerW });
+      const textH  = text ? doc.heightOfString(text, { width: innerW }) : 0;
+      const linksH = links.length ? links.reduce((acc, l) => acc + doc.heightOfString(l.label, { width: innerW }) + 4, 0) : 0;
 
       const totalH = bubblePadY + metaH + (text ? 6 + textH : 0) + (imageBuf ? 8 + 180 : 0) + (links.length ? 6 + linksH : 0) + bubblePadY;
       ensureSpace(totalH + gapY);
@@ -235,21 +226,22 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       doc.y = by + totalH + gapY;
     }
 
+    // 6) Loop das mensagens
     for (const m of rows) {
       const ts = new Date(m.timestamp);
       const dayKey = ts.toISOString().slice(0, 10);
       if (dayKey !== lastDay) { drawDaySeparator(ts); lastDay = dayKey; }
 
-      const dir = String(m.direction || '').toLowerCase();
+      const dir  = String(m.direction || '').toLowerCase();
       const type = String(m.type || '').toLowerCase();
       const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
-      const c = normalize(m.content, meta, type);
+      const c    = normalize(m.content, meta, type);
 
       if (dir === 'system') {
         const pill = c?.text || c?.body || c?.caption || '[evento]';
         const w = Math.min(300, contentW * 0.6);
         const padX = 10, padY = 6;
-        const h = doc.heightOfString(pill, { width: w - padX * 2 }) + padX * 2;
+        const h = doc.heightOfString(pill, { width: w - padX * 2 }) + padY * 2;
         ensureSpace(h + gapY);
         const x = M + (contentW - w) / 2;
         doc.save()
@@ -264,17 +256,45 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       const who = dir === 'outgoing'
         ? (m.assigned_to || ticket.assigned_to || 'Atendente')
         : (ticket.customer_name || ticket.user_id || 'Cliente');
-
       const when = ts.toLocaleString('pt-BR');
 
       const text = typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || null);
       const url  = c?.url || null;
       const mime = c?.mime_type || null;
 
+      // imagem inline?
       let imageBuf = null;
       if (url && (isImageUrl(url) || isImageMime(mime))) {
         imageBuf = await fetchImageBuffer(url);
       }
+
+      // se não é imagem, vira link com filename
+      const links = [];
+      if (url && !imageBuf) {
+        let name = c?.filename;
+        if (!name) {
+          try { name = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'arquivo'); }
+          catch { name = 'arquivo'; }
+        }
+        links.push({ label: name, url });
+      }
+
+      await drawBubble({
+        who, when,
+        side: dir === 'outgoing' ? 'right' : 'left',
+        text,
+        imageBuf,
+        links
+      });
+    }
+
+    doc.end(); // ✅ finaliza o PDF (fecha o stream)
+  } catch (err) {
+    req.log.error({ err }, 'Erro ao gerar PDF');
+    if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
+  }
+});
+
 
 
 fastify.get('/history/:id', async (req, reply) => {
