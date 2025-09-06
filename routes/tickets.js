@@ -28,298 +28,321 @@ async function ticketsRoutes(fastify, options) {
 // routes/tickets.js (trecho) — GET /tickets/history/:id/pdf
 
 
-// GET /tickets/history/:id/pdf  -> gera e baixa o PDF do ticket (layout de chat)
-fastify.get('/history/:id/pdf', async (req, reply) => {
-  try {
-    const { id } = req.params || {};
+ fastify.get('/history/:id/pdf', async (req, reply) => {
+    try {
+      const { id } = req.params || {};
 
-    // 1) Ticket + dados do cliente
-    const tRes = await req.db.query(`
-      SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
-             t.status, t.created_at, t.updated_at,
-             c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
-        FROM tickets t
-        LEFT JOIN clientes c ON c.user_id = t.user_id
-       WHERE t.id::text = $1
-    `, [String(id)]);
-    if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
-    const ticket = tRes.rows[0];
+      // 1) Ticket + cliente
+      const tRes = await req.db.query(
+        `
+        SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
+               t.status, t.created_at, t.updated_at,
+               c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
+          FROM tickets t
+          LEFT JOIN clientes c ON c.user_id = t.user_id
+         WHERE t.id::text = $1
+        `,
+        [String(id)]
+      );
+      if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
+      const ticket = tRes.rows[0];
 
-    // 2) Mensagens (ordem cronológica)
-    const mRes = await req.db.query(`
-      SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
-             m.metadata, m.assigned_to
-        FROM messages m
-       WHERE m.ticket_number = $1
-       ORDER BY m."timestamp" ASC, m.id ASC
-       LIMIT 2000
-    `, [String(ticket.ticket_number || '')]);
-    const rows = mRes.rows || [];
+      // 2) Mensagens (ordenadas)
+      const mRes = await req.db.query(
+        `
+        SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
+               m.metadata, m.assigned_to
+          FROM messages m
+         WHERE m.ticket_number = $1
+         ORDER BY m."timestamp" ASC, m.id ASC
+         LIMIT 2000
+        `,
+        [String(ticket.ticket_number || '')]
+      );
+      const rows = mRes.rows || [];
 
-    // 3) Cabeçalhos HTTP + stream (uma única resposta)
-    const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
-    const filename = `ticket-${num}.pdf`;
+      // 3) Cabeçalhos HTTP + PassThrough (uma única resposta)
+      const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
+      const filename = `ticket-${num}.pdf`;
+      reply
+        .type('application/pdf')
+        .header('Content-Disposition', `attachment; filename="${filename}"`);
 
-    reply
-      .type('application/pdf')
-      .header('Content-Disposition', `attachment; filename="${filename}"`);
+      const out = new PassThrough();
+      reply.send(out); // envia o stream (não chamar reply.send novamente)
 
-    const out = new PassThrough();
-    reply.send(out); // ✅ envia só uma vez
+      // 4) PDF
+      const doc = new PDFDocument({ size: 'A4', margin: 36 });
+      doc.on('error', (e) => out.destroy(e));
+      doc.pipe(out); // PDF -> PassThrough -> cliente
 
-    // 4) PDF
-    const doc = new PDFDocument({ size: 'A4', margin: 36 });
-    doc.on('error', (e) => out.destroy(e));
-    doc.pipe(out); // PDF -> PassThrough -> cliente
+      // ==== Helpers ====
+      const safeParse = (raw) => {
+        if (raw == null) return null;
+        if (typeof raw === 'object') return raw;
+        const s = String(raw);
+        try { return JSON.parse(s); } catch {
+          if (/^https?:\/\//i.test(s)) return { url: s };
+          return s;
+        }
+      };
 
-    // ==== helpers de conteúdo ====
-    const safeParse = (raw) => {
-      if (raw == null) return null;
-      if (typeof raw === 'object') return raw;
-      const s = String(raw);
-      try { return JSON.parse(s); } catch {
-        if (/^https?:\/\//i.test(s)) return { url: s };
-        return s;
+      const normalize = (raw, meta, type) => {
+        const c = safeParse(raw);
+        const base =
+          (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
+          (typeof c === 'string' ? { text: c } : {});
+        const m = meta || {};
+        base.url       ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
+        base.filename  ??= m.filename || m.name || null;
+        base.mime_type ??= m.mime || m.mimetype || m.content_type || null;
+        base.caption   ??= m.caption || null;
+        base.size      ??= m.size || m.filesize || null;
+        return base;
+      };
+
+      const isImageUrl  = (u) => /\.(png|jpe?g)$/i.test(u || '');
+      const isImageMime = (m) => /^image\/(png|jpe?g)$/i.test(String(m || ''));
+
+      async function fetchImageBuffer(url) {
+        try {
+          const rsp = await fetch(url);
+          if (!rsp.ok) return null;
+          const ct = rsp.headers.get('content-type') || '';
+          if (!/^image\/(png|jpe?g)/i.test(ct)) return null;
+          const ab = await rsp.arrayBuffer();
+          return Buffer.from(ab);
+        } catch { return null; }
       }
-    };
-    const normalize = (raw, meta, type) => {
-      const c = safeParse(raw);
-      const base = (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
-                   (typeof c === 'string' ? { text: c } : {});
-      const m = meta || {};
-      base.url       ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
-      base.filename  ??= m.filename || m.name || null;
-      base.mime_type ??= m.mime || m.mimetype || m.content_type || null;
-      base.caption   ??= m.caption || null;
-      base.size      ??= m.size || m.filesize || null;
-      return base;
-    };
-    const isImageUrl  = (u) => /\.(png|jpe?g)$/i.test(u || '');
-    const isImageMime = (m) => /^image\/(png|jpe?g)$/i.test(String(m || ''));
-    async function fetchImageBuffer(url) {
-      try {
-        const rsp = await fetch(url);
-        if (!rsp.ok) return null;
-        const ct = rsp.headers.get('content-type') || '';
-        if (!/^image\/(png|jpe?g)/i.test(ct)) return null;
-        const ab = await rsp.arrayBuffer();
-        return Buffer.from(ab);
-      } catch { return null; }
-    }
 
-    // ==== layout ====
-    const M = 36;
-    const pageW = doc.page.width;
-    const pageH = doc.page.height;
-    const contentW = pageW - M * 2;
-    const maxBubbleW = Math.min(380, contentW * 0.78);
-    const gapY = 10;
-    const bubblePadX = 10;
-    const bubblePadY = 8;
+      // Remove prefixos tipo "*Nome:* " no início (mensagens encaminhadas/quote)
+      const cleanupForwardPrefix = (s) => {
+        if (!s) return s;
+        return String(s).replace(/^\*[^:*]{1,60}:\*\s*/i, '');
+      };
 
-    const colIncomingBg = '#F3F4F6'; // esquerda (cliente)
-    const colOutgoingBg = '#2563EB'; // direita (agente)
-    const colOutgoingTx = '#FFFFFF';
-    const colMeta       = '#6B7280';
-    const colSystemBg   = '#E5E7EB';
+      // ==== Layout base ====
+      const M = 36;
+      const pageW = doc.page.width;
+      const pageH = doc.page.height;
+      const contentW = pageW - M * 2;
+      const maxBubbleW = Math.min(440, contentW * 0.85);
+      const gapY = 12;
+      const bubblePadX = 12;
+      const bubblePadY = 10;
 
-    // Header
-    doc.font('Helvetica-Bold').fontSize(18).fillColor('#111827').text(`Ticket #${num}`);
-    doc.moveDown(0.3);
-    doc.font('Helvetica').fontSize(10).fillColor('#6B7280')
-       .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
-    doc.moveDown(0.4);
+      const colIncomingBg = '#F3F4F6'; // esquerda (cliente)
+      const colOutgoingBg = '#2563EB'; // direita (agente)
+      const colOutgoingTx = '#FFFFFF';
+      const colMeta       = '#6B7280';
+      const colLinkIn     = '#1D4ED8';
+      const colLinkOut    = '#E0E7FF';
+      const colSystemBg   = '#E5E7EB';
+      const colTitle      = '#111827';
 
-    // Info do cliente (duas colunas)
-    const leftColX = M;
-    const rightColX = M + contentW / 2;
-    const lineH = 14;
-    function labelValue(label, value, x, y) {
-      doc.fillColor('#6B7280').font('Helvetica-Bold').fontSize(9).text(label, x, y);
-      doc.fillColor('#111827').font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
-      return y + 10 + lineH;
-    }
-    let y = doc.y;
-    const yStart = y;
-    y  = labelValue('Cliente',  ticket.customer_name || ticket.user_id, leftColX,  y);
-    y  = labelValue('Contato',  ticket.customer_phone || ticket.customer_email || '—', leftColX,  y);
-    let y2 = yStart;
-    y2 = labelValue('Fila',     ticket.fila,          rightColX,       y2);
-    y2 = labelValue('Atendente',ticket.assigned_to,   rightColX,       y2);
-    const yMax = Math.max(y, y2);
-    doc.moveTo(M, yMax + 8).lineTo(M + contentW, yMax + 8).strokeColor('#E5E7EB').lineWidth(1).stroke();
-    doc.y = yMax + 16;
+      // Header
+      doc.font('Helvetica-Bold').fontSize(18).fillColor(colTitle).text(`Ticket #${num}`);
+      doc.moveDown(0.3);
+      doc.font('Helvetica').fontSize(10).fillColor('#6B7280')
+         .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
+      doc.moveDown(0.4);
 
-    // Título "Conversa"
-    doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Conversa');
-    doc.moveDown(0.4);
+      // Info cliente (duas colunas)
+      const leftColX = M;
+      const rightColX = M + contentW / 2;
+      const lineH = 14;
+      function labelValue(label, value, x, y) {
+        doc.fillColor('#6B7280').font('Helvetica-Bold').fontSize(9).text(label, x, y);
+        doc.fillColor(colTitle).font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
+        return y + 10 + lineH;
+      }
+      let y = doc.y;
+      const yStart = y;
+      y  = labelValue('Cliente', ticket.customer_name || ticket.user_id, leftColX, y);
+      y  = labelValue('Contato', ticket.customer_phone || ticket.customer_email || '—', leftColX, y);
+      let y2 = yStart;
+      y2 = labelValue('Fila', ticket.fila, rightColX, y2);
+      y2 = labelValue('Atendente', ticket.assigned_to, rightColX, y2);
+      const yMax = Math.max(y, y2);
+      doc.moveTo(M, yMax + 8).lineTo(M + contentW, yMax + 8).strokeColor('#E5E7EB').lineWidth(1).stroke();
+      doc.y = yMax + 16;
 
-    if (!rows.length) {
-      doc.fillColor('#6B7280').fontSize(11)
-         .text('Não há histórico de mensagens neste ticket.', { align: 'center', width: contentW });
-      doc.end();
-      return; // ✅ fim
-    }
+      // "Conversa"
+      doc.fillColor(colTitle).font('Helvetica-Bold').fontSize(12).text('Conversa');
+      doc.moveDown(0.4);
 
-    // quebra de página
-    function ensureSpace(need) {
-      if (doc.y + need <= pageH - M) return;
-      doc.addPage();
-      doc.fillColor('#6B7280').font('Helvetica').fontSize(10)
-         .text(`Ticket #${num} — continuação`, M, M);
-      doc.moveDown(0.5);
-    }
-
-    // separador por dia
-    let lastDay = '';
-    function drawDaySeparator(date) {
-      const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-      const pillPadX = 8, pillPadY = 3;
-      const w = doc.widthOfString(label) + pillPadX * 2;
-      const x = M + (contentW - w) / 2;
-      const h = doc.currentLineHeight() + pillPadY * 2;
-      ensureSpace(h + 8);
-      doc.save();
-      doc.roundedRect(x, doc.y, w, h, 6).fill(colSystemBg);
-      doc.fillColor('#374151').fontSize(9)
-         .text(label, x + pillPadX, doc.y + pillPadY, { width: w - pillPadX * 2, align: 'center' });
-      doc.restore();
-      doc.moveDown(0.6);
-    }
-
-    // desenha uma bolha (incoming/outgoing) ou pílula system
-    async function drawBubble({ who, when, side, text, imageBuf, links }) {
-      if (side === 'center') {
-        const pill = text || `${who} — ${when}`;
-        const w = Math.min(300, contentW * 0.6);
-        const padX = 10, padY = 6;
-        const h = doc.heightOfString(pill, { width: w - padX * 2 }) + padY * 2;
-        ensureSpace(h + gapY);
-        const x = M + (contentW - w) / 2;
-        doc.save();
-        doc.roundedRect(x, doc.y, w, h, 8).fill(colSystemBg);
-        doc.fillColor('#374151').font('Helvetica').fontSize(10)
-           .text(pill, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
-        doc.restore();
-        doc.moveDown(0.5);
+      if (!rows.length) {
+        doc.fillColor('#6B7280').fontSize(11)
+           .text('Não há histórico de mensagens neste ticket.', { align: 'center', width: contentW });
+        doc.end();
         return;
       }
 
-      const isRight = side === 'right';
-      const bg      = isRight ? colOutgoingBg : colIncomingBg;
-      const txtCol  = isRight ? colOutgoingTx : '#111827';
-      const metaCol = isRight ? '#DDE7FF' : colMeta;
-
-      const innerW = maxBubbleW - bubblePadX * 2;
-      const meta = `${who} — ${when}`;
-
-      const metaH  = doc.heightOfString(meta,  { width: innerW });
-      const textH  = text ? doc.heightOfString(text, { width: innerW }) : 0;
-      const linksH = links.length
-        ? links.reduce((acc, l) => acc + doc.heightOfString(l.label, { width: innerW }) + 4, 0)
-        : 0;
-
-      const totalH = bubblePadY + metaH + (text ? 6 + textH : 0) + (imageBuf ? 8 + 180 : 0) + (links.length ? 6 + linksH : 0) + bubblePadY;
-      ensureSpace(totalH + gapY);
-
-      const bx = isRight ? (M + contentW - maxBubbleW) : M;
-      const by = doc.y;
-
-      doc.save();
-      doc.roundedRect(bx, by, maxBubbleW, totalH, 10).fill(bg);
-
-      doc.fillColor(metaCol).font('Helvetica').fontSize(9)
-         .text(meta, bx + bubblePadX, by + bubblePadY, { width: innerW });
-      let cy = by + bubblePadY + metaH;
-
-      if (text) {
-        cy += 6;
-        doc.fillColor(txtCol).font('Helvetica').fontSize(11)
-           .text(text, bx + bubblePadX, cy, { width: innerW });
-        cy = doc.y;
+      function ensureSpace(need) {
+        if (doc.y + need <= pageH - M) return;
+        doc.addPage();
+        // cabeçalho leve da continuação
+        doc.fillColor('#6B7280').font('Helvetica').fontSize(10)
+           .text(`Ticket #${num} — continuação`, M, M);
+        doc.moveDown(0.5);
       }
 
-      if (imageBuf) {
-        cy += 8;
-        doc.image(imageBuf, bx + bubblePadX, cy, { width: innerW });
-        cy += 180; // reserva aproximada
+      let lastDay = '';
+      function drawDaySeparator(date) {
+        const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        const pillPadX = 8, pillPadY = 3;
+        const w = doc.widthOfString(label) + pillPadX * 2;
+        const x = M + (contentW - w) / 2;
+        const h = doc.currentLineHeight() + pillPadY * 2;
+        ensureSpace(h + 8);
+        doc.save()
+          .roundedRect(x, doc.y, w, h, 6).fill(colSystemBg)
+          .fillColor('#374151').fontSize(9)
+          .text(label, x + pillPadX, doc.y + pillPadY, { width: w - pillPadX * 2, align: 'center' })
+          .restore();
+        doc.moveDown(0.6);
       }
 
-      if (links.length) {
-        cy += 6;
-        doc.font('Helvetica').fontSize(10).fillColor(isRight ? '#E0E7FF' : '#1D4ED8');
-        for (const l of links) {
-          doc.text(l.label, bx + bubblePadX, cy, { width: innerW, link: l.url, underline: true });
-          cy = doc.y + 4;
+      async function drawBubble({ who, when, side, text, imageBuf, links }) {
+        if (side === 'center') {
+          // pílula central (mensagem de sistema)
+          const pill = text || `${who} — ${when}`;
+          const w = Math.min(360, contentW * 0.7);
+          const padX = 12, padY = 8;
+          const h = doc.heightOfString(pill, { width: w - padX * 2 }) + padY * 2;
+          ensureSpace(h + gapY);
+          const x = M + (contentW - w) / 2;
+          doc.save()
+            .roundedRect(x, doc.y, w, h, 10).fill(colSystemBg)
+            .fillColor('#374151').font('Helvetica').fontSize(10)
+            .text(pill, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' })
+            .restore();
+          doc.moveDown(0.5);
+          return;
         }
-      }
 
-      doc.restore();
-      doc.y = by + totalH + gapY;
-    }
+        const isRight = side === 'right';
+        const bg      = isRight ? colOutgoingBg : colIncomingBg;
+        const txtCol  = isRight ? colOutgoingTx : '#111827';
+        const metaCol = isRight ? '#DDE7FF'    : colMeta;
+        const linkCol = isRight ? colLinkOut   : colLinkIn;
 
-    // 5) Loop das mensagens
-    for (const m of rows) {
-      const ts = new Date(m.timestamp);
-      const dayKey = ts.toISOString().slice(0, 10);
-      if (dayKey !== lastDay) { drawDaySeparator(ts); lastDay = dayKey; }
+        const innerW = maxBubbleW - bubblePadX * 2;
+        const meta = `${who} — ${when}`;
 
-      const dir  = String(m.direction || '').toLowerCase();
-      const type = String(m.type || '').toLowerCase();
-      const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
-      const c    = normalize(m.content, meta, type);
+        const body = cleanupForwardPrefix(text);
+        const metaH  = doc.heightOfString(meta, { width: innerW });
+        const textH  = body ? doc.heightOfString(body, { width: innerW }) : 0;
+        const linksH = links.length
+          ? links.reduce((acc, l) => acc + doc.heightOfString(l.label, { width: innerW }) + 4, 0)
+          : 0;
 
-      // quem/onde
-      const who = dir === 'outgoing'
-        ? (m.assigned_to || ticket.assigned_to || 'Atendente')
-        : dir === 'system'
-        ? 'Sistema'
-        : (ticket.customer_name || ticket.user_id || 'Cliente');
+        // reserva 200px para imagem
+        const imgBudget = imageBuf ? 200 : 0;
+        const totalH = bubblePadY + metaH + (body ? 6 + textH : 0) + (imageBuf ? 8 + imgBudget : 0) + (links.length ? 6 + linksH : 0) + bubblePadY;
 
-      const when = ts.toLocaleString('pt-BR');
+        ensureSpace(totalH + gapY);
 
-      const text =
-        typeof c === 'string' ? c :
-        (c?.text || c?.body || c?.caption || null);
+        const bx = isRight ? (M + contentW - maxBubbleW) : M;
+        const by = doc.y;
 
-      const url  = c?.url || null;
-      const mime = c?.mime_type || null;
+        doc.save();
+        doc.roundedRect(bx, by, maxBubbleW, totalH, 12).fill(bg);
 
-      // imagem inline (png/jpg) ou links para outros tipos
-      let imageBuf = null;
-      if (url && (isImageUrl(url) || isImageMime(mime))) {
-        imageBuf = await fetchImageBuffer(url);
-      }
+        // meta
+        doc.fillColor(metaCol).font('Helvetica').fontSize(9)
+           .text(meta, bx + bubblePadX, by + bubblePadY, { width: innerW });
+        let cy = by + bubblePadY + metaH;
 
-      const links = [];
-      if (url && !imageBuf) {
-        let name = c?.filename;
-        if (!name) {
-          try { name = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'arquivo'); }
-          catch { name = 'arquivo'; }
+        // texto
+        if (body) {
+          cy += 6;
+          doc.fillColor(txtCol).font('Helvetica').fontSize(11)
+             .text(body, bx + bubblePadX, cy, { width: innerW });
+          cy = doc.y;
         }
-        links.push({ label: name, url });
+
+        // imagem (se houver)
+        if (imageBuf) {
+          cy += 8;
+          doc.image(imageBuf, bx + bubblePadX, cy, { width: innerW });
+          cy += imgBudget;
+        }
+
+        // links (anexos não-imagem)
+        if (links.length) {
+          cy += 6;
+          doc.font('Helvetica').fontSize(10).fillColor(linkCol);
+          for (const l of links) {
+            doc.text(l.label, bx + bubblePadX, cy, { width: innerW, link: l.url, underline: true });
+            cy = doc.y + 4;
+          }
+        }
+
+        doc.restore();
+        doc.y = by + totalH + gapY;
       }
 
-      await drawBubble({
-        who,
-        when,
-        side: dir === 'system' ? 'center' : (dir === 'outgoing' ? 'right' : 'left'),
-        text,
-        imageBuf,
-        links
-      });
+      // 6) Loop das mensagens (com separador por dia)
+      for (const m of rows) {
+        const ts = new Date(m.timestamp);
+        const dayKey = ts.toISOString().slice(0, 10);
+        if (dayKey !== lastDay) { drawDaySeparator(ts); lastDay = dayKey; }
+
+        const dir = String(m.direction || '').toLowerCase();
+        const type = String(m.type || '').toLowerCase();
+        const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
+        const c = normalize(m.content, meta, type);
+
+        const who =
+          dir === 'outgoing' ? (m.assigned_to || ticket.assigned_to || 'Atendente') :
+          dir === 'system'   ? 'Sistema' :
+          (ticket.customer_name || ticket.user_id || 'Cliente');
+
+        const when = ts.toLocaleString('pt-BR');
+        const text =
+          typeof c === 'string' ? c :
+          (c?.text || c?.body || c?.caption || null);
+
+        const url = c?.url || null;
+        const mime = c?.mime_type || null;
+
+        let imageBuf = null;
+        if (url && (isImageUrl(url) || isImageMime(mime))) {
+          imageBuf = await fetchImageBuffer(url);
+        }
+
+        const fileLinks = [];
+        if (url && !imageBuf) {
+          let name = c?.filename;
+          if (!name) {
+            try { name = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'arquivo'); }
+            catch { name = 'arquivo'; }
+          }
+          // opcional: tamanho, se houver
+          const sizeStr = c?.size ? ` (${Math.round(Number(c.size)/1024)} KB)` : '';
+          fileLinks.push({ label: `${name}${sizeStr}`, url });
+        }
+
+        const side =
+          dir === 'outgoing' ? 'right' :
+          dir === 'incoming' ? 'left'  :
+          'center';
+
+        await drawBubble({
+          who, when, side,
+          text,
+          imageBuf,
+          links: fileLinks
+        });
+      }
+
+      doc.end(); // finaliza o PDF (o PassThrough fecha junto)
+    } catch (err) {
+      req.log.error({ err }, 'Erro ao gerar PDF');
+      if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
     }
-
-    doc.end(); // ✅ fecha o PDF e o PassThrough termina a resposta
-  } catch (err) {
-    req.log.error({ err }, 'Erro ao gerar PDF');
-    if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
-  }
-});
-
-
-
+  });
 fastify.get('/history/:id', async (req, reply) => {
   const { id } = req.params || {};
   const { include, messages_limit } = req.query || {};
