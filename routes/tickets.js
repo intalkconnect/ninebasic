@@ -25,10 +25,8 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-  fastify.get('/history/:id/pdf', async (req, reply) => {
+ fastify.get('/history/:id/pdf', async (req, reply) => {
     let doc;
-    let ended = false;
-
     try {
       const { id } = req.params || {};
 
@@ -41,9 +39,7 @@ async function ticketsRoutes(fastify, options) {
           LEFT JOIN clientes c ON c.user_id = t.user_id
          WHERE t.id::text = $1
       `, [String(id)]);
-      if (!tRes.rowCount) {
-        return reply.code(404).send({ error: 'Ticket não encontrado' });
-      }
+      if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
       const ticket = tRes.rows[0];
 
       // 2) Mensagens (ordenadas)
@@ -57,18 +53,22 @@ async function ticketsRoutes(fastify, options) {
       `, [String(ticket.ticket_number || '')]);
       const rows = mRes.rows || [];
 
-      // 3) Cabeçalhos + cria o PDF
+      // 3) Começa streaming de forma *hijacked* (evita write-after-end)
       const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
-      reply
-        .type('application/pdf')
-        .header('Content-Disposition', `attachment; filename="ticket-${num}.pdf"`);
+      reply.hijack(); // Fastify não mais controla a resposta
+      reply.raw.writeHead(200, {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="ticket-${num}.pdf"`
+      });
 
       doc = new PDFDocument({ size: 'A4', margin: 40 });
-      doc.on('end', () => { ended = true; });
-      // ⚠️ Deixe o Fastify fazer o pipe do stream
-      reply.send(doc);
+      doc.pipe(reply.raw);
+      doc.on('error', (e) => {
+        req.log.error({ err: e }, 'pdf stream error');
+        try { reply.raw.destroy(e); } catch {}
+      });
 
-      // ------- helpers -------
+      // ---------- Helpers ----------
       const safeParse = (raw) => {
         if (raw == null) return null;
         if (typeof raw === 'object') return raw;
@@ -91,7 +91,7 @@ async function ticketsRoutes(fastify, options) {
         return base;
       };
 
-      // retângulo arredondado compatível com versões antigas do pdfkit
+      // Retângulo arredondado compatível com PDFKit antigo
       function fillRoundedRect(doc, x, y, w, h, r, color) {
         doc.save();
         doc.fillColor(color);
@@ -108,7 +108,7 @@ async function ticketsRoutes(fastify, options) {
         doc.restore();
       }
 
-      // ------- layout / cores -------
+      // ---------- Layout e Cores ----------
       const M = 40;
       const pageW = doc.page.width;
       const pageH = doc.page.height;
@@ -119,23 +119,24 @@ async function ticketsRoutes(fastify, options) {
       const bubblePadY = 8;
       const maxBubbleW = Math.min(420, contentW * 0.78);
 
-      // paleta suave
+      // paleta neutra “soft” (sem azul vibrante)
       const colText       = '#1F2937'; // slate-800
       const colMeta       = '#8A8F98'; // cinza brando
-      const colSep        = '#E5E7EB'; // separador
-      const colDayPill    = '#EEF2F7';
-      const colIncomingBg = '#F6F7F9';
-      const colOutgoingBg = '#ECEFF3';
+      const colSep        = '#E5E7EB'; // linha separadora
+      const colDayPill    = '#EEF2F7'; // separador de dia
+      const colIncomingBg = '#F6F7F9'; // bolha incoming (cliente)
+      const colOutgoingBg = '#ECEFF3'; // bolha outgoing (agente)
+      const colLink       = '#4B5563'; // link discreto (sem azul forte)
 
-      // header do ticket (fora de bubble)
+      // Header do ticket (fora de bubble)
       doc.fillColor(colText).font('Helvetica-Bold').fontSize(18)
-         .text(`Ticket #${num}`, M, undefined, { width: contentW });
+         .text(`Ticket #${num}`, M, undefined, { width: contentW, align: 'left' });
       doc.moveDown(0.2);
       doc.fillColor(colMeta).font('Helvetica').fontSize(10)
-         .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, { width: contentW });
+         .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, { width: contentW, align: 'left' });
       doc.moveDown(0.6);
 
-      // bloco de informações (duas colunas)
+      // Bloco de dados (duas colunas)
       const leftX  = M;
       const rightX = M + contentW / 2;
       const lh = 14;
@@ -155,11 +156,10 @@ async function ticketsRoutes(fastify, options) {
          .moveTo(M, yMax + 8).lineTo(M + contentW, yMax + 8).stroke();
       doc.y = yMax + 16;
 
-      // título conversa
+      // Título “Conversa”
       doc.fillColor(colText).font('Helvetica-Bold').fontSize(12).text('Conversa');
       doc.moveDown(0.3);
 
-      // sem mensagens → finalizar o PDF (NÃO retornar sem end)
       if (!rows.length) {
         doc.fillColor(colMeta).font('Helvetica').fontSize(11)
            .text('Não há histórico de mensagens neste ticket.', { width: contentW, align: 'center' });
@@ -175,6 +175,7 @@ async function ticketsRoutes(fastify, options) {
         doc.moveDown(0.5);
       }
 
+      // Separador por dia
       let lastDay = '';
       function daySeparator(date) {
         const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -189,12 +190,14 @@ async function ticketsRoutes(fastify, options) {
         doc.moveDown(0.6);
       }
 
+      // Links de mídia como “Clique aqui...”
       const buildLinkLabels = (links) =>
         (links || []).map(l =>
           l?.filename ? `${l.filename} — Clique aqui para abrir a mídia`
                       : 'Clique aqui para abrir a mídia'
         );
 
+      // Bolha (incoming esquerda / outgoing direita)
       function drawBubble({ who, when, side, body, links }) {
         const isRight = side === 'right';
         const bg = isRight ? colOutgoingBg : colIncomingBg;
@@ -203,6 +206,7 @@ async function ticketsRoutes(fastify, options) {
 
         const linkLabels = buildLinkLabels(links);
 
+        // medir alturas antes de desenhar
         const metaH  = doc.heightOfString(metaLine, { width: innerW });
         const bodyH  = body ? doc.heightOfString(body, { width: innerW }) : 0;
         const linksH = linkLabels.length
@@ -217,7 +221,7 @@ async function ticketsRoutes(fastify, options) {
         const bx = isRight ? (M + contentW - maxBubbleW) : M;
         const by = doc.y;
 
-        // card arredondado
+        // “card” arredondado
         fillRoundedRect(doc, bx, by, maxBubbleW, totalH, 10, bg);
 
         // meta
@@ -234,10 +238,10 @@ async function ticketsRoutes(fastify, options) {
           cy = doc.y;
         }
 
-        // links (mídias/anexos) — “Clique aqui…”
+        // links (mídias/anexos) — tom discreto e sublinhado
         if (linkLabels.length) {
           cy += 8;
-          doc.fillColor('#1D4ED8').font('Helvetica').fontSize(10);
+          doc.fillColor(colLink).font('Helvetica').fontSize(10);
           for (let i = 0; i < linkLabels.length; i++) {
             doc.text(linkLabels[i], bx + bubblePadX, cy, {
               width: innerW,
@@ -251,7 +255,7 @@ async function ticketsRoutes(fastify, options) {
         doc.y = by + totalH + gapY;
       }
 
-      // 6) loop das mensagens
+      // 4) Loop das mensagens
       for (const m of rows) {
         const ts = new Date(m.timestamp);
         const dayKey = ts.toISOString().slice(0, 10);
@@ -262,7 +266,7 @@ async function ticketsRoutes(fastify, options) {
         const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
         const c = normalize(m.content, meta, type);
 
-        // eventos de sistema → pílula central
+        // Eventos de sistema → pílula central, sem bubble
         if (dir === 'system') {
           const text = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '[evento]'));
           const padX = 10, padY = 6;
@@ -278,7 +282,7 @@ async function ticketsRoutes(fastify, options) {
           continue;
         }
 
-        // remetente
+        // Quem fala
         const who = dir === 'outgoing'
           ? (m.assigned_to || ticket.assigned_to || 'Atendente')
           : (ticket.customer_name || ticket.user_id || 'Cliente');
@@ -288,7 +292,7 @@ async function ticketsRoutes(fastify, options) {
           typeof c === 'string' ? c :
           (c?.text || c?.body || c?.caption || null);
 
-        // mídias como link
+        // Converter mídia para link
         const url = c?.url || null;
         const links = url ? [{ url, filename: c?.filename || null }] : [];
 
@@ -301,13 +305,17 @@ async function ticketsRoutes(fastify, options) {
         });
       }
 
-      // FINALIZA
-      if (!ended) doc.end();
+      // encerra o PDF (encerra também a resposta hijacked)
+      doc.end();
 
     } catch (err) {
       req.log.error({ err }, 'Erro ao gerar PDF');
-      // Não tente escrever outra resposta — já enviamos headers/stream.
-      try { if (doc && !ended) doc.end(); } catch {}
+      if (doc) {
+        try { doc.end(); } catch {}
+      } else {
+        // se falhou antes do hijack/head, ainda podemos responder JSON
+        if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
+      }
     }
   });
   
