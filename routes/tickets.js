@@ -18,17 +18,17 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-// GET /tickets/history/:id/pdf  -> gera e baixa o PDF do ticket
 fastify.get('/history/:id/pdf', async (req, reply) => {
   try {
     const { id } = req.params || {};
 
-    // ----- Interop CJS em ambiente ESM -----
+    // ---- ESM interop + stream ----
     const { createRequire } = await import('node:module');
-    const require = createRequire(import.meta.url);
-    const PDFDocument = require('pdfkit'); // agora funciona no ESM
+    const { PassThrough }   = await import('node:stream');
+    const require           = createRequire(import.meta.url);
+    const PDFDocument       = require('pdfkit');
 
-    // ----- Ticket + dados do cliente -----
+    // ---- Ticket + cliente ----
     const tRes = await req.db.query(
       `
       SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
@@ -43,10 +43,9 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       [String(id)]
     );
     if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
-
     const ticket = tRes.rows[0];
 
-    // ----- Mensagens do ticket -----
+    // ---- Mensagens ----
     const mRes = await req.db.query(
       `
       SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
@@ -60,49 +59,39 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     );
     const msgs = mRes.rows || [];
 
-    // ----- Cabeçalhos da resposta -----
-    const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
-    const filename = `ticket-${num}.pdf`;
+    // ---- Cabeçalhos de resposta ----
+    const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : null;
+    const safeName = num ? `ticket-${num}.pdf` : `ticket-sem-numero.pdf`;
 
     reply
       .header('Content-Type', 'application/pdf')
-      .header('Content-Disposition', `attachment; filename="${filename}"`);
+      .header('Content-Disposition', `attachment; filename="${safeName}"`)
+      .header('Cache-Control', 'no-store');
 
-    // ----- Geração do PDF -----
-    const doc = new PDFDocument({ size: 'A4', margin: 36 });
-    doc.pipe(reply.raw);
+    // ---- Stream estável via PassThrough ----
+    const stream = new PassThrough();
+    const doc    = new PDFDocument({ size: 'A4', margin: 36 });
 
-    // Título
-    doc.fontSize(18).font('Helvetica-Bold').text(`Ticket #${num}`);
-    doc.moveDown(0.3);
-    doc.fontSize(10).fillColor('#666')
-      .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
-    doc.moveDown(0.8);
+    // Propaga erros de stream
+    doc.on('error', (err) => {
+      req.log.error({ err }, 'pdfkit error');
+      if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
+      try { stream.destroy(err); } catch {}
+    });
+    stream.on('error', (err) => {
+      req.log.error({ err }, 'stream error');
+    });
 
-    // Cliente
-    doc.fillColor('#000').font('Helvetica-Bold').text('Cliente');
-    doc.font('Helvetica').fontSize(11)
-      .text(ticket.customer_name || '—')
-      .text(ticket.customer_phone || ticket.user_id || '—')
-      .text(ticket.customer_email || '—');
-    doc.moveDown(0.6);
+    // Conecta as pontas e envia a resposta
+    doc.pipe(stream);
+    reply.send(stream);
 
-    // Infos
+    // ---- Conteúdo do PDF ----
     const info = (label, value) => {
       doc.font('Helvetica-Bold').text(label);
       doc.font('Helvetica').text(value || '—');
       doc.moveDown(0.3);
     };
-    info('Fila', ticket.fila);
-    info('Atendente', ticket.assigned_to);
-    info('Status', ticket.status);
-    info('Última atualização', new Date(ticket.updated_at).toLocaleString('pt-BR'));
-    doc.moveDown(0.5);
-
-    // Conversa
-    doc.font('Helvetica-Bold').fontSize(12).text('Conversa');
-    doc.moveDown(0.4);
-    doc.font('Helvetica').fontSize(10);
 
     const parseText = (raw) => {
       try {
@@ -121,28 +110,62 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       } catch { return ''; }
     };
 
-    msgs.forEach((m, idx) => {
-      const dir = String(m.direction || '').toLowerCase();
-      const who = dir === 'outgoing' ? (m.assigned_to || 'Atendente')
-                 : dir === 'system'   ? 'Sistema'
-                 : 'Cliente';
-      const when = new Date(m.timestamp).toLocaleString('pt-BR');
-      const text = parseText(m.content);
+    // Título
+    doc.fontSize(18).font('Helvetica-Bold').text(`Ticket #${num ?? '—'}`);
+    doc.moveDown(0.3);
+    doc.fontSize(10).fillColor('#666')
+      .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
+    doc.moveDown(0.8).fillColor('#000');
 
-      doc.font('Helvetica-Bold').text(`${who} — ${when}`);
-      doc.font('Helvetica').text(text || '[mensagem não textual]');
+    // Cliente
+    doc.font('Helvetica-Bold').text('Cliente');
+    doc.font('Helvetica').fontSize(11)
+      .text(ticket.customer_name || '—')
+      .text(ticket.customer_phone || ticket.user_id || '—')
+      .text(ticket.customer_email || '—');
+    doc.moveDown(0.6);
 
-      // Se houver URL em metadata, lista
-      try {
-        const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata) : (m.metadata || {});
-        const url = meta.url || meta.file_url || meta.public_url || meta.download_url || null;
-        if (url) doc.fillColor('#2563eb').text(url).fillColor('#000');
-      } catch {}
+    // Infos
+    info('Fila', ticket.fila);
+    info('Atendente', ticket.assigned_to);
+    info('Status', ticket.status);
+    info('Última atualização', new Date(ticket.updated_at).toLocaleString('pt-BR'));
+    doc.moveDown(0.5);
 
-      if (idx < msgs.length - 1) doc.moveDown(0.6);
-    });
+    // Conversa
+    doc.font('Helvetica-Bold').fontSize(12).text('Conversa');
+    doc.moveDown(0.4);
+    doc.font('Helvetica').fontSize(10);
 
-    doc.end(); // encerra o stream -> envia resposta
+    if (!msgs.length) {
+      doc.text('Não há histórico de mensagens para este ticket.');
+    } else {
+      msgs.forEach((m, idx) => {
+        const dir = String(m.direction || '').toLowerCase();
+        const who = dir === 'outgoing' ? (m.assigned_to || 'Atendente')
+                  : dir === 'system'   ? 'Sistema'
+                  : 'Cliente';
+        const when = new Date(m.timestamp).toLocaleString('pt-BR');
+        const text = parseText(m.content);
+
+        doc.font('Helvetica-Bold').text(`${who} — ${when}`);
+        doc.font('Helvetica').text(text || '[mensagem não textual]');
+
+        // URL de anexo (se houver)
+        try {
+          const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata) : (m.metadata || {});
+          const url  = meta.url || meta.file_url || meta.public_url || meta.download_url || null;
+          if (url) {
+            doc.fillColor('#2563eb').text(url, { link: url, underline: true }).fillColor('#000');
+          }
+        } catch {}
+
+        if (idx < msgs.length - 1) doc.moveDown(0.6);
+      });
+    }
+
+    // Finaliza o PDF (isso fecha o stream)
+    doc.end();
   } catch (err) {
     req.log.error({ err }, 'Erro ao gerar PDF');
     if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
