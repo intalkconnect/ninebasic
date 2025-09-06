@@ -55,19 +55,25 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     `, [String(ticket.ticket_number || '')]);
     const rows = mRes.rows || [];
 
-    // 3) Cabeçalhos + stream
+    // 3) Headers + hijack (sem reply.send)
     const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
     const filename = `ticket-${num}.pdf`;
-    reply.type('application/pdf')
-         .header('Content-Disposition', `attachment; filename="${filename}"`);
+    reply
+      .header('Content-Type', 'application/pdf')
+      .header('Content-Disposition', `attachment; filename="${filename}"`)
+      .hijack(); // <- assume controle do socket
 
-    const out = new PassThrough();
-    reply.send(out); // envia o stream uma única vez
+    const res = reply.raw;
 
     // 4) PDF
     const doc = new PDFDocument({ size: 'A4', margin: 36 });
-    doc.on('error', (e) => out.destroy(e));
-    doc.pipe(out);
+    doc.on('error', (e) => {
+      req.log.error(e, 'pdfkit error');
+      try { res.destroy(e); } catch {}
+    });
+    res.on('error', (e) => req.log.error(e, 'socket error while streaming pdf'));
+
+    doc.pipe(res);
 
     // ==== Helpers ====
     const safeParse = (raw) => {
@@ -101,19 +107,24 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         if (!/^image\/(png|jpe?g)/i.test(ct)) return null;
         const ab = await rsp.arrayBuffer();
         return Buffer.from(ab);
-      } catch { return null; }
+      } catch (e) {
+        req.log.warn({ err: e, url }, 'falha ao baixar imagem para PDF');
+        return null;
+      }
     }
 
-    // ==== Layout ====
+    // ==== Layout / estilo ====
     const M = 36;
     const pageW = doc.page.width;
     const pageH = doc.page.height;
     const contentW = pageW - M * 2;
     const maxBubbleW = Math.min(380, contentW * 0.78);
-    const gapY = 10, bubblePadX = 10, bubblePadY = 8;
+    const gapY = 10;
+    const bubblePadX = 10;
+    const bubblePadY = 8;
 
-    const colIncomingBg = '#F3F4F6'; // esquerda (inbound)
-    const colOutgoingBg = '#2563EB'; // direita  (outbound)
+    const colIncomingBg = '#F3F4F6'; // inbound esquerda
+    const colOutgoingBg = '#2563EB'; // outbound direita
     const colOutgoingTx = '#FFFFFF';
     const colMeta = '#6B7280';
     const colSystemBg = '#E5E7EB';
@@ -126,22 +137,26 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     doc.moveDown(0.4);
 
     // Info cliente (duas colunas)
-    const leftColX = M, rightColX = M + contentW / 2, lineH = 14;
+    const leftColX = M;
+    const rightColX = M + contentW / 2;
+    const lineH = 14;
     function labelValue(label, value, x, y) {
       doc.fillColor('#6B7280').font('Helvetica-Bold').fontSize(9).text(label, x, y);
       doc.fillColor('#111827').font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
       return y + 10 + lineH;
     }
-    let y = doc.y, y2 = doc.y;
-    y  = labelValue('Cliente',  ticket.customer_name || ticket.user_id, leftColX,  y);
-    y  = labelValue('Contato',  ticket.customer_phone || ticket.customer_email || '—', leftColX,  y);
-    y2 = labelValue('Fila',     ticket.fila,          rightColX, y2);
-    y2 = labelValue('Atendente',ticket.assigned_to,   rightColX, y2);
+    let y = doc.y;
+    const yStart = y;
+    y = labelValue('Cliente', ticket.customer_name || ticket.user_id, leftColX, y);
+    y = labelValue('Contato', ticket.customer_phone || ticket.customer_email || '—', leftColX, y);
+    let y2 = yStart;
+    y2 = labelValue('Fila', ticket.fila, rightColX, y2);
+    y2 = labelValue('Atendente', ticket.assigned_to, rightColX, y2);
     const yMax = Math.max(y, y2);
     doc.moveTo(M, yMax + 8).lineTo(M + contentW, yMax + 8).strokeColor('#E5E7EB').lineWidth(1).stroke();
     doc.y = yMax + 16;
 
-    // Conversa
+    // "Conversa"
     doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Conversa');
     doc.moveDown(0.4);
 
@@ -288,13 +303,14 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       });
     }
 
-    doc.end(); // ✅ finaliza o PDF (fecha o stream)
+    doc.end(); // fecha o stream
   } catch (err) {
     req.log.error({ err }, 'Erro ao gerar PDF');
+    // Como hijack já foi feito, se der erro muito cedo, talvez headers não tenham ido.
+    // Se ainda não foram enviados, responde 500:
     if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
   }
 });
-
 
 
 fastify.get('/history/:id', async (req, reply) => {
