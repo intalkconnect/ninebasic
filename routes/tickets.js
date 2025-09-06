@@ -25,12 +25,12 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-// routes/tickets.js (versão melhorada) — GET /tickets/history/:id/pdf
+// routes/tickets.js (versão simplificada) — GET /tickets/history/:id/pdf
 fastify.get('/history/:id/pdf', async (req, reply) => {
   try {
     const { id } = req.params || {};
 
-    // 1) Buscar dados do ticket e mensagens (mesmo código original)
+    // 1) Buscar dados do ticket e mensagens
     const tRes = await req.db.query(
       `SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
               t.status, t.created_at, t.updated_at,
@@ -55,7 +55,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     const rows = mRes.rows || [];
 
     // 2) Setup da resposta HTTP
-    const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
+    const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '';
     const filename = `ticket-${num}.pdf`;
     reply
       .type('application/pdf')
@@ -64,7 +64,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     const out = new PassThrough();
     reply.send(out);
 
-    // 3) Configuração do PDF melhorada
+    // 3) Configuração do PDF
     const doc = new PDFDocument({ 
       size: 'A4', 
       margin: 40,
@@ -77,25 +77,21 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     doc.on('error', (e) => out.destroy(e));
     doc.pipe(out);
 
-    // ==== CONSTANTES DE LAYOUT MELHORADAS ====
+    // ==== CONSTANTES DE LAYOUT ====
     const M = 40; // margem
     const pageW = doc.page.width;
     const pageH = doc.page.height;
     const contentW = pageW - M * 2;
-    const maxBubbleW = Math.min(420, contentW * 0.82);
-    const gapY = 14;
-    const bubblePadX = 16;
-    const bubblePadY = 12;
+    const maxBubbleW = Math.min(320, contentW * 0.65); // Diminuído o tamanho das bolhas
+    const gapY = 10;
+    const bubblePadX = 12;
+    const bubblePadY = 8;
 
-    // CORES REFINADAS
+    // CORES SIMPLES
     const colors = {
       primary: '#1F2937',
       secondary: '#6B7280', 
       accent: '#3B82F6',
-      success: '#10B981',
-      warning: '#F59E0B',
-      error: '#EF4444',
-      // Bolhas de chat
       incoming: {
         bg: '#F8FAFC',
         border: '#E2E8F0',
@@ -115,7 +111,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       }
     };
 
-    // ==== HELPER FUNCTIONS MELHORADAS ====
+    // ==== HELPER FUNCTIONS ====
     const safeParse = (raw) => {
       if (raw == null) return null;
       if (typeof raw === 'object') return raw;
@@ -131,31 +127,30 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       const base = (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
                    (typeof c === 'string' ? { text: c } : {});
       const m = meta || {};
-      base.url ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
-      base.filename ??= m.filename || m.name || null;
-      base.mime_type ??= m.mime || m.mimetype || m.content_type || null;
-      base.caption ??= m.caption || null;
-      base.size ??= m.size || m.filesize || null;
+      base.url = base.url || m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
+      base.filename = base.filename || m.filename || m.name || null;
+      base.mime_type = base.mime_type || m.mime || m.mimetype || m.content_type || null;
+      base.caption = base.caption || m.caption || null;
+      base.size = base.size || m.size || m.filesize || null;
       return base;
     };
 
     const isImageUrl = (u) => /\.(png|jpe?g|webp|gif)$/i.test(u || '');
     const isImageMime = (m) => /^image\/(png|jpe?g|webp|gif)$/i.test(String(m || ''));
 
-    async function fetchImageBuffer(url) {
-      try {
-        const rsp = await fetch(url);
-        if (!rsp.ok) return null;
-        const ct = rsp.headers.get('content-type') || '';
-        if (!/^image\/(png|jpe?g|webp|gif)/i.test(ct)) return null;
-        const ab = await rsp.arrayBuffer();
-        return Buffer.from(ab);
-      } catch { return null; }
-    }
+    // Função para sanitizar texto UTF-8
+    const sanitizeText = (text) => {
+      if (!text) return '';
+      return String(text)
+        .replace(/[\u0000-\u001F\u007F-\u009F]/g, '') // Remove caracteres de controle
+        .replace(/[\uFFF0-\uFFFF]/g, '') // Remove caracteres especiais problemáticos
+        .trim();
+    };
 
     const cleanupForwardPrefix = (s) => {
       if (!s) return s;
-      return String(s).replace(/^\*[^:*]{1,60}:\*\s*/i, '');
+      const cleaned = String(s).replace(/^\*[^:*]{1,60}:\*\s*/i, '');
+      return sanitizeText(cleaned);
     };
 
     function ensureSpace(need) {
@@ -164,17 +159,17 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       // Header da página
       doc.save();
       doc.fillColor(colors.secondary).fontSize(9).font('Helvetica');
-      doc.text(`Ticket #${num} — Página ${doc.bufferedPageRange().count}`, M, M);
+      doc.text(`Ticket #${num} - Página ${doc.bufferedPageRange().count}`, M, M);
       doc.moveTo(M, M + 15).lineTo(M + contentW, M + 15)
          .strokeColor('#E5E7EB').lineWidth(0.5).stroke();
       doc.restore();
       doc.y = M + 25;
     }
 
-    function drawSectionTitle(title, icon = '') {
-      ensureSpace(35);
+    function drawSectionTitle(title) {
+      ensureSpace(30);
       doc.save();
-      const bgHeight = 28;
+      const bgHeight = 24;
       doc.rect(M, doc.y, contentW, bgHeight)
          .fill(colors.system.bg)
          .strokeColor(colors.system.border)
@@ -183,116 +178,91 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       
       doc.fillColor(colors.primary)
          .font('Helvetica-Bold')
-         .fontSize(12);
-      doc.text(`${icon} ${title}`, M + 12, doc.y + 8);
+         .fontSize(11);
+      doc.text(sanitizeText(title), M + 10, doc.y + 6);
       doc.restore();
-      doc.y += bgHeight + 12;
+      doc.y += bgHeight + 10;
     }
 
-    // ==== CABEÇALHO PRINCIPAL MELHORADO ====
-    ensureSpace(120);
+    // ==== CABEÇALHO PRINCIPAL ====
+    ensureSpace(80);
     
-    // Logo/Título principal
     doc.save();
-    doc.rect(M, doc.y, contentW, 50)
+    doc.rect(M, doc.y, contentW, 40)
        .fill(colors.accent)
        .stroke();
     
     doc.fillColor('#FFFFFF')
        .font('Helvetica-Bold')
-       .fontSize(22);
-    doc.text(`Ticket #${num}`, M + 20, doc.y + 12);
+       .fontSize(18);
+    doc.text(`Ticket #${num}`, M + 15, doc.y + 8);
     
-    doc.fontSize(11)
+    doc.fontSize(10)
        .font('Helvetica');
-    doc.text(`Criado em ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, M + 20, doc.y + 8);
+    doc.text(`Criado em ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, M + 15, doc.y + 6);
     doc.restore();
-    doc.y += 60;
+    doc.y += 50;
 
-    // ==== INFORMAÇÕES DO TICKET (LAYOUT EM GRID) ====
-    drawSectionTitle('Informações do Ticket', '📋');
+    // ==== INFORMAÇÕES DO TICKET ====
+    drawSectionTitle('Informações do Ticket');
     
-    const gridCols = 2;
-    const colWidth = (contentW - 20) / gridCols;
-    const rowHeight = 45;
-    
-    function drawInfoCard(label, value, x, y, width = colWidth) {
-      doc.save();
-      // Card background
-      doc.roundedRect(x, y, width, rowHeight, 6)
-         .fill('#FFFFFF')
-         .strokeColor('#E5E7EB')
-         .lineWidth(1)
-         .stroke();
-      
-      // Label
-      doc.fillColor(colors.secondary)
-         .font('Helvetica-Bold')
-         .fontSize(9)
-         .text(label.toUpperCase(), x + 12, y + 8);
-      
-      // Value
-      doc.fillColor(colors.primary)
-         .font('Helvetica')
-         .fontSize(11)
-         .text(value || '—', x + 12, y + 22, { width: width - 24 });
-      doc.restore();
-    }
-
-    let gridY = doc.y;
     const infoItems = [
-      ['Cliente', ticket.customer_name || ticket.user_id],
-      ['Status', ticket.status],
-      ['Contato', ticket.customer_phone || ticket.customer_email || '—'],
-      ['Fila', ticket.fila],
-      ['Atendente', ticket.assigned_to || '—'],
+      ['Cliente', sanitizeText(ticket.customer_name || ticket.user_id || '')],
+      ['Status', sanitizeText(ticket.status || '')],
+      ['Contato', sanitizeText(ticket.customer_phone || ticket.customer_email || '')],
+      ['Fila', sanitizeText(ticket.fila || '')],
+      ['Atendente', sanitizeText(ticket.assigned_to || '')],
       ['Atualizado', new Date(ticket.updated_at).toLocaleString('pt-BR')]
     ];
 
-    for (let i = 0; i < infoItems.length; i += 2) {
-      const leftX = M;
-      const rightX = M + colWidth + 10;
+    let infoY = doc.y;
+    for (const [label, value] of infoItems) {
+      doc.save();
+      doc.fillColor(colors.secondary)
+         .font('Helvetica-Bold')
+         .fontSize(9)
+         .text(`${label}:`, M, infoY);
       
-      drawInfoCard(infoItems[i][0], infoItems[i][1], leftX, gridY);
-      if (infoItems[i + 1]) {
-        drawInfoCard(infoItems[i + 1][0], infoItems[i + 1][1], rightX, gridY);
-      }
-      gridY += rowHeight + 8;
+      doc.fillColor(colors.primary)
+         .font('Helvetica')
+         .fontSize(10)
+         .text(value || '—', M + 80, infoY);
+      doc.restore();
+      infoY += 15;
     }
     
-    doc.y = gridY + 10;
+    doc.y = infoY + 10;
 
-    // ==== SEÇÃO DE CONVERSA MELHORADA ====
-    drawSectionTitle('Histórico da Conversa', '💬');
+    // ==== SEÇÃO DE CONVERSA ====
+    drawSectionTitle('Histórico da Conversa');
 
     if (!rows.length) {
       doc.save();
-      doc.roundedRect(M, doc.y, contentW, 60, 8)
+      doc.rect(M, doc.y, contentW, 40)
          .fill('#FEF3F2')
          .strokeColor('#FECACA')
          .stroke();
       doc.fillColor('#DC2626')
-         .fontSize(12)
+         .fontSize(11)
          .font('Helvetica');
-      doc.text('⚠️  Não há mensagens registradas neste ticket.', 
-               M + 20, doc.y + 22, { width: contentW - 40, align: 'center' });
+      doc.text('Não há mensagens registradas neste ticket.', 
+               M + 15, doc.y + 15, { width: contentW - 30, align: 'center' });
       doc.restore();
       doc.end();
       return;
     }
 
-    // ==== FUNÇÃO PARA DESENHAR BOLHAS MELHORADAS ====
-    async function drawEnhancedBubble({ who, when, side, text, imageBuf, imageUrl, links, type }) {
+    // ==== FUNÇÃO PARA DESENHAR BOLHAS SIMPLES ====
+    function drawSimpleBubble({ who, when, side, text, hasAttachment, attachmentUrl, type }) {
       if (side === 'center') {
-        const pill = text || `${who} — ${when}`;
-        const w = Math.min(400, contentW * 0.8);
-        const padX = 16, padY = 10;
-        const h = doc.heightOfString(pill, { width: w - padX * 2 }) + padY * 2;
+        const pill = sanitizeText(text || `${who} - ${when}`);
+        const w = Math.min(300, contentW * 0.6);
+        const h = 20;
         ensureSpace(h + gapY);
         
         const x = M + (contentW - w) / 2;
         doc.save()
-          .roundedRect(x, doc.y, w, h, 12)
+          .roundedRect(x, doc.y, w, h, 8)
           .fill(colors.system.bg)
           .strokeColor(colors.system.border)
           .lineWidth(1)
@@ -300,8 +270,8 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         
         doc.fillColor(colors.system.text)
            .font('Helvetica')
-           .fontSize(10)
-           .text(pill, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
+           .fontSize(9)
+           .text(pill, x + 10, doc.y + 6, { width: w - 20, align: 'center' });
         doc.restore();
         doc.y += h + gapY;
         return;
@@ -312,107 +282,62 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       const innerW = maxBubbleW - bubblePadX * 2;
 
       // Calcular dimensões
-      const meta = `${who} • ${when}`;
-      const body = cleanupForwardPrefix(text);
+      const meta = sanitizeText(`${who} • ${when}`);
+      const body = sanitizeText(cleanupForwardPrefix(text));
       const metaH = doc.heightOfString(meta, { width: innerW });
       const textH = body ? doc.heightOfString(body, { width: innerW }) : 0;
-      const imgBudget = imageBuf ? Math.min(200, innerW * 0.8) : 0;
-      const linksH = (links?.length || 0) * 18;
+      const attachmentH = hasAttachment ? 15 : 0;
 
-      const totalH = bubblePadY + metaH + (body ? 8 + textH : 0) + 
-                     (imageBuf ? 10 + imgBudget : 0) + (linksH ? 8 + linksH : 0) + bubblePadY;
+      const totalH = bubblePadY + metaH + (body ? 6 + textH : 0) + attachmentH + bubblePadY;
       
       ensureSpace(totalH + gapY);
 
       const bx = isRight ? (M + contentW - maxBubbleW) : M;
       const by = doc.y;
 
-      // Desenhar bolha com sombra sutil
+      // Desenhar bolha simples
       doc.save();
-      
-      // Sombra
-      const shadowOffset = 2;
-      doc.roundedRect(bx + shadowOffset, by + shadowOffset, maxBubbleW, totalH, 12)
-         .fill('#00000008');
-      
-      // Bolha principal
-      doc.roundedRect(bx, by, maxBubbleW, totalH, 12)
+      doc.roundedRect(bx, by, maxBubbleW, totalH, 8)
          .fill(theme.bg)
          .strokeColor(theme.border)
          .lineWidth(1)
          .stroke();
 
-      // Indicador de tipo de mensagem
-      if (type && type !== 'text') {
-        const typeIcons = {
-          image: '🖼️',
-          document: '📎',
-          audio: '🎵',
-          video: '🎥',
-          location: '📍'
-        };
-        const icon = typeIcons[type] || '📄';
-        doc.fillColor(theme.meta)
-           .fontSize(10)
-           .text(icon, bx + bubblePadX - 2, by + bubblePadY - 2);
-      }
-
       // Metadados (quem/quando)
       doc.fillColor(theme.meta)
          .font('Helvetica-Bold')
-         .fontSize(9)
+         .fontSize(8)
          .text(meta, bx + bubblePadX, by + bubblePadY, { width: innerW });
       let cy = by + bubblePadY + metaH;
 
       // Texto da mensagem
       if (body) {
-        cy += 8;
+        cy += 6;
         doc.fillColor(theme.text)
            .font('Helvetica')
-           .fontSize(11)
+           .fontSize(10)
            .text(body, bx + bubblePadX, cy, { width: innerW });
         cy = doc.y;
       }
 
-      // Imagem
-      if (imageBuf) {
-        cy += 10;
-        try {
-          doc.roundedRect(bx + bubblePadX, cy, innerW, imgBudget, 6)
-             .stroke('#E5E7EB');
-          doc.image(imageBuf, bx + bubblePadX + 2, cy + 2, { 
-            width: innerW - 4, 
-            height: imgBudget - 4 
+      // Anexo/Link simples
+      if (hasAttachment && attachmentUrl) {
+        cy += 4;
+        doc.fillColor(theme.text)
+           .fontSize(9);
+        
+        if (isImageUrl(attachmentUrl) || isImageMime(type)) {
+          doc.text('📷 Clique aqui para ver imagem', bx + bubblePadX, cy, {
+            link: attachmentUrl,
+            underline: true,
+            width: innerW
           });
-        } catch (e) {
-          // Fallback se imagem falhar
-          doc.fillColor(theme.text)
-             .fontSize(10)
-             .text('🖼️ Imagem não pôde ser exibida', bx + bubblePadX, cy);
-        }
-        cy += imgBudget;
-
-        if (imageUrl) {
-          cy += 6;
-          doc.fillColor(theme.text)
-             .fontSize(9)
-             .text('🔗 ', bx + bubblePadX, cy, { continued: true });
-          doc.fillColor(isRight ? '#BFDBFE' : colors.accent)
-             .text('Ver imagem original', { link: imageUrl, underline: true });
-          cy = doc.y;
-        }
-      }
-
-      // Links/anexos
-      if (links && links.length) {
-        cy += 8;
-        for (const l of links) {
-          doc.fillColor(theme.text)
-             .fontSize(10)
-             .text('📎 Anexo - ', bx + bubblePadX, cy, { continued: true });
-          doc.fillColor(isRight ? '#BFDBFE' : colors.accent)
-             .text('Download', { link: l.url, underline: true });
-          cy += 18;
+        } else {
+          doc.text('📎 Clique aqui para ver anexo', bx + bubblePadX, cy, {
+            link: attachmentUrl,
+            underline: true,
+            width: innerW
+          });
         }
       }
 
@@ -431,25 +356,24 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       let label;
       const dateStr = date.toDateString();
       if (dateStr === today.toDateString()) {
-        label = '🗓️ Hoje';
+        label = 'Hoje';
       } else if (dateStr === yesterday.toDateString()) {
-        label = '🗓️ Ontem';
+        label = 'Ontem';
       } else {
-        label = `🗓️ ${date.toLocaleDateString('pt-BR', { 
-          weekday: 'long', 
+        label = date.toLocaleDateString('pt-BR', { 
           day: '2-digit', 
           month: 'long', 
           year: 'numeric' 
-        })}`;
+        });
       }
       
-      const w = Math.min(300, contentW * 0.6);
-      const h = 24;
-      ensureSpace(h + 16);
+      const w = Math.min(200, contentW * 0.5);
+      const h = 18;
+      ensureSpace(h + 12);
       
       const x = M + (contentW - w) / 2;
       doc.save()
-        .roundedRect(x, doc.y, w, h, 12)
+        .roundedRect(x, doc.y, w, h, 8)
         .fill('#EEF2FF')
         .strokeColor('#C7D2FE')
         .lineWidth(1)
@@ -457,10 +381,10 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       
       doc.fillColor('#4338CA')
          .font('Helvetica-Bold')
-         .fontSize(10)
-         .text(label, x + 12, doc.y + 7, { width: w - 24, align: 'center' });
+         .fontSize(9)
+         .text(sanitizeText(label), x + 10, doc.y + 5, { width: w - 20, align: 'center' });
       doc.restore();
-      doc.y += h + 16;
+      doc.y += h + 12;
     }
 
     // Processar cada mensagem
@@ -478,50 +402,40 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
       const c = normalize(m.content, meta, type);
 
-      const who = dir === 'outgoing' ? (m.assigned_to || ticket.assigned_to || 'Atendente') :
-                  dir === 'system' ? 'Sistema' :
-                  (ticket.customer_name || ticket.user_id || 'Cliente');
+      const who = sanitizeText(
+        dir === 'outgoing' ? (m.assigned_to || ticket.assigned_to || 'Atendente') :
+        dir === 'system' ? 'Sistema' :
+        (ticket.customer_name || ticket.user_id || 'Cliente')
+      );
 
       const when = ts.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-      const text = typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || null);
+      const text = typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '');
 
       const url = c?.url || null;
-      const mime = c?.mime_type || null;
-
-      let imageBuf = null;
-      let imageUrl = null;
-      if (url && (isImageUrl(url) || isImageMime(mime))) {
-        imageBuf = await fetchImageBuffer(url);
-        imageUrl = url;
-      }
-
-      const fileLinks = [];
-      if (url && !imageBuf) {
-        fileLinks.push({ url });
-      }
+      const hasAttachment = !!url;
 
       const side = dir === 'outgoing' ? 'right' : dir === 'incoming' ? 'left' : 'center';
 
-      await drawEnhancedBubble({
+      drawSimpleBubble({
         who, when, side, text, type,
-        imageBuf, imageUrl,
-        links: fileLinks
+        hasAttachment,
+        attachmentUrl: url
       });
     }
 
     // ==== RODAPÉ FINAL ====
-    ensureSpace(60);
-    doc.y += 20;
+    ensureSpace(40);
+    doc.y += 15;
     
     doc.save();
     doc.moveTo(M, doc.y).lineTo(M + contentW, doc.y)
        .strokeColor('#E5E7EB').lineWidth(1).stroke();
     
     doc.fillColor(colors.secondary)
-       .fontSize(9)
+       .fontSize(8)
        .font('Helvetica');
-    doc.text(`Relatório gerado em ${new Date().toLocaleString('pt-BR')}`, M, doc.y + 10);
-    doc.text(`Total: ${rows.length} mensagem(ns)`, M + contentW - 120, doc.y);
+    doc.text(`Relatório gerado em ${new Date().toLocaleString('pt-BR')}`, M, doc.y + 8);
+    doc.text(`Total: ${rows.length} mensagem(ns)`, M + contentW - 100, doc.y + 8);
     doc.restore();
 
     doc.end();
