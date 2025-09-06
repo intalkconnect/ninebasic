@@ -43,12 +43,10 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         `,
         [String(id)]
       );
-      if (!tRes.rowCount) {
-        return reply.code(404).send({ error: 'Ticket não encontrado' });
-      }
+      if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
       const ticket = tRes.rows[0];
 
-      // 2) Mensagens (ordem cronológica)
+      // 2) Mensagens
       const mRes = await req.db.query(
         `
         SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
@@ -62,17 +60,21 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       );
       const rows = mRes.rows || [];
 
-      // 3) Cabeçalhos HTTP + PassThrough (uma única resposta)
+      // 3) Cabeçalhos HTTP e HIJACK do reply
       const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
       const filename = `ticket-${num}.pdf`;
-      reply
-        .type('application/pdf')
-        .header('Content-Disposition', `attachment; filename="${filename}"`);
+      reply.header('Content-Type', 'application/pdf');
+      reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+      reply.hijack(); // vamos escrever direto no socket
 
-      const out = new PassThrough();
-      reply.send(out); // envia stream uma única vez
+      // 4) PDF (sem PassThrough, sem reply.send)
+      const doc = new PDFDocument({ size: 'A4', margin: 36 });
+      doc.on('error', (e) => {
+        try { reply.raw.destroy(e); } catch {}
+      });
+      doc.pipe(reply.raw);
 
-      // ==== Helpers/Normalização (somente para extrair links/textos) ====
+      // ==== helpers de conteúdo ====
       const safeParse = (raw) => {
         if (raw == null) return null;
         if (typeof raw === 'object') return raw;
@@ -82,7 +84,6 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
           return s;
         }
       };
-
       const normalize = (rawContent, meta, type) => {
         const c = safeParse(rawContent);
         const base =
@@ -97,56 +98,37 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         return base;
       };
 
-      // ==== PDF ====
-      const doc = new PDFDocument({ size: 'A4', margin: 36 });
-      doc.on('error', (e) => out.destroy(e));
-      doc.pipe(out);
-
-      // Cores
-      const colIncomingBg = '#F3F4F6'; // cinza claro (cliente) - esquerda
-      const colOutgoingBg = '#2563EB'; // azul (agente)      - direita
-      const colOutgoingTx = '#FFFFFF'; // texto branco
-      const colMeta       = '#6B7280'; // meta cinza
-      const colSystemBg   = '#E5E7EB'; // pílula central
-      const colBody       = '#111827'; // corpo
-      const colLinkLeft   = '#1D4ED8'; // link incoming
-      const colLinkRight  = '#E0E7FF'; // link outgoing
-
+      // ==== layout ====
       const M = 36;
       const pageW = doc.page.width;
       const pageH = doc.page.height;
       const contentW = pageW - M * 2;
       const maxBubbleW = Math.min(380, contentW * 0.78);
-      const padX = 10;
-      const padY = 8;
       const gapY = 10;
+      const padX = 10, padY = 8;
 
-      // roundedRect seguro (fallback para rect em versões antigas)
-      function roundedRectSafe(x, y, w, h, r = 8) {
-        try {
-          if (typeof doc.roundedRect === 'function') {
-            doc.roundedRect(x, y, w, h, r);
-          } else {
-            doc.rect(x, y, w, h);
-          }
-        } catch {
-          doc.rect(x, y, w, h);
-        }
-      }
+      const colIncomingBg = '#F3F4F6'; // esquerda (cliente)
+      const colOutgoingBg = '#2563EB'; // direita (agente)
+      const colOutgoingTx = '#FFFFFF';
+      const colMeta  = '#6B7280';
+      const colBody  = '#111827';
+      const colSysBg = '#E5E7EB';
+      const colLinkLeft  = '#1D4ED8';
+      const colLinkRight = '#E0E7FF';
 
-      // Header
+      // Cabeçalho
       doc.font('Helvetica-Bold').fontSize(18).fillColor(colBody).text(`Ticket #${num}`);
       doc.moveDown(0.3);
       doc.font('Helvetica').fontSize(10).fillColor(colMeta)
          .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
       doc.moveDown(0.5);
 
-      // Bloco dados do cliente (duas colunas enxutas)
-      const leftX = M, rightX = M + contentW / 2, lh = 14;
+      // Info cliente (duas colunas simples)
+      const leftX = M, rightX = M + contentW / 2, lineH = 14;
       function field(label, value, x, y) {
         doc.fillColor(colMeta).font('Helvetica-Bold').fontSize(9).text(label, x, y);
         doc.fillColor(colBody).font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
-        return y + 10 + lh;
+        return y + 10 + lineH;
       }
       let y1 = doc.y, y2 = doc.y;
       y1 = field('Cliente', ticket.customer_name || ticket.user_id, leftX,  y1);
@@ -157,7 +139,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       doc.moveTo(M, yMax + 8).lineWidth(1).strokeColor('#E5E7EB').lineTo(M + contentW, yMax + 8).stroke();
       doc.y = yMax + 16;
 
-      // Título seção conversa
+      // Título conversa
       doc.fillColor(colBody).font('Helvetica-Bold').fontSize(12).text('Conversa');
       doc.moveDown(0.4);
 
@@ -169,7 +151,6 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         return;
       }
 
-      // Controle de quebra de página
       function ensureSpace(need) {
         if (doc.y + need <= pageH - M) return;
         doc.addPage();
@@ -177,28 +158,31 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         doc.moveDown(0.5);
       }
 
-      // Separador por dia
+      // separador por dia (texto central com linhas laterais — sem shapes complexos)
       let lastDay = '';
       function daySeparator(date) {
         const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-        const pillPadX = 8, pillPadY = 3;
-        const w = doc.widthOfString(label) + pillPadX * 2;
-        const h = doc.currentLineHeight() + pillPadY * 2;
-        ensureSpace(h + 8);
-        const x = M + (contentW - w) / 2;
-        const y = doc.y;
+        const lh = doc.currentLineHeight();
+        ensureSpace(lh + 12);
+
+        const y = doc.y + 3;
+        const wLabel = doc.widthOfString(label);
+        const xLabel = M + (contentW - wLabel) / 2;
 
         doc.save();
-        roundedRectSafe(x, y, w, h, 6);
-        doc.fill(colSystemBg);
-        doc.fillColor('#374151').font('Helvetica').fontSize(9)
-           .text(label, x + pillPadX, y + pillPadY, { width: w - pillPadX * 2, align: 'center' });
+        doc.strokeColor('#E5E7EB').lineWidth(1);
+        // linha esquerda
+        doc.moveTo(M, y).lineTo(xLabel - 10, y).stroke();
+        // texto
+        doc.fillColor('#374151').font('Helvetica').fontSize(9).text(label, xLabel, doc.y, { width: wLabel });
+        // linha direita
+        const xAfter = xLabel + wLabel + 10;
+        doc.moveTo(xAfter, y).lineTo(M + contentW, y).stroke();
         doc.restore();
 
         doc.moveDown(0.6);
       }
 
-      // Desenha uma bolha (incoming/outgoing) ou pílula (system)
       function drawBubble({ side, who, when, body, link }) {
         const isRight = side === 'right';
         const bg      = isRight ? colOutgoingBg : colIncomingBg;
@@ -207,8 +191,6 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
 
         const innerW = maxBubbleW - padX * 2;
         const metaStr = `${who} — ${when}`;
-
-        // Medidas
         const metaH = doc.heightOfString(metaStr, { width: innerW });
         const bodyH = body ? doc.heightOfString(body, { width: innerW }) : 0;
         const linkLabel = link ? 'Clique aqui para abrir a mídia' : '';
@@ -220,10 +202,9 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         const bx = isRight ? (M + contentW - maxBubbleW) : M;
         const by = doc.y;
 
-        // container
+        // fundo (retângulo simples — compatível com qualquer PDFKit)
         doc.save();
-        roundedRectSafe(bx, by, maxBubbleW, totalH, 10);
-        doc.fill(bg);
+        doc.rect(bx, by, maxBubbleW, totalH).fill(bg);
 
         // meta
         doc.fillColor(metaCol).font('Helvetica').fontSize(9)
@@ -243,7 +224,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         if (link) {
           cy += 8;
           doc.font('Helvetica').fontSize(10).fillColor(isRight ? colLinkRight : colLinkLeft)
-             .text(linkLabel, bx + padX, cy, {
+             .text('Clique aqui para abrir a mídia', bx + padX, cy, {
                width: innerW,
                link,
                underline: true
@@ -255,14 +236,11 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         doc.y = by + totalH + gapY;
       }
 
-      // Loop de mensagens
+      // loop
       for (const m of rows) {
         const ts = new Date(m.timestamp);
-        const dayKey = ts.toISOString().slice(0, 10);
-        if (dayKey !== lastDay) {
-          daySeparator(ts);
-          lastDay = dayKey;
-        }
+        const key = ts.toISOString().slice(0, 10);
+        if (key !== lastDay) { daySeparator(ts); lastDay = key; }
 
         const dir  = String(m.direction || '').toLowerCase(); // incoming|outgoing|system
         const type = String(m.type || '').toLowerCase();
@@ -270,20 +248,19 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         const c    = normalize(m.content, meta, type);
 
         if (dir === 'system') {
-          // pílula central com o texto do evento
-          const pillText = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption)) || '[evento]';
+          // pílula simples: retângulo central cinza claro
+          const pill = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption)) || '[evento]';
           const w = Math.min(320, contentW * 0.65);
-          const padx = 10, pady = 6;
-          const h = doc.heightOfString(pillText, { width: w - padx * 2 }) + pady * 2;
+          const padX2 = 10, padY2 = 6;
+          const h = doc.heightOfString(pill, { width: w - padX2 * 2 }) + padY2 * 2;
           ensureSpace(h + 8);
           const x = M + (contentW - w) / 2;
           const y = doc.y;
 
           doc.save();
-          roundedRectSafe(x, y, w, h, 8);
-          doc.fill(colSystemBg);
+          doc.rect(x, y, w, h).fill(colSysBg);
           doc.fillColor('#374151').font('Helvetica').fontSize(10)
-             .text(pillText, x + padx, y + pady, { width: w - padx * 2, align: 'center' });
+             .text(pill, x + padX2, y + padY2, { width: w - padX2 * 2, align: 'center' });
           doc.restore();
 
           doc.moveDown(0.5);
@@ -295,12 +272,10 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
           : (ticket.customer_name || ticket.user_id || 'Cliente');
 
         const when = ts.toLocaleString('pt-BR');
-
         const body =
           typeof c === 'string' ? c :
           (c?.text || c?.body || c?.caption || null);
 
-        // Sempre como link para mídias/anexos (conforme pedido)
         const link = c?.url || null;
 
         drawBubble({
@@ -309,10 +284,10 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         });
       }
 
-      doc.end(); // encerra stream
+      doc.end(); // fecha o stream e envia
     } catch (err) {
       req.log.error({ err }, 'Erro ao gerar PDF');
-      if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
+      try { if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' }); } catch {}
     }
   });
 
