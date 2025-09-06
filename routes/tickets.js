@@ -25,433 +25,296 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-// routes/tickets.js (versão simplificada corrigida) — GET /tickets/history/:id/pdf
 fastify.get('/history/:id/pdf', async (req, reply) => {
-  try {
-    const { id } = req.params || {};
+    try {
+      const { id } = req.params || {};
 
-    // 1) Buscar dados do ticket e mensagens
-    const tRes = await req.db.query(
-      `SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
-              t.status, t.created_at, t.updated_at,
-              c.name AS customer_name, c.email AS customer_email, c.phone AS customer_phone
-       FROM tickets t
-       LEFT JOIN clientes c ON c.user_id = t.user_id
-       WHERE t.id::text = $1`,
-      [String(id)]
-    );
-    if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
-    const ticket = tRes.rows[0];
-
-    const mRes = await req.db.query(
-      `SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
-              m.metadata, m.assigned_to
-       FROM messages m
-       WHERE m.ticket_number = $1
-       ORDER BY m."timestamp" ASC, m.id ASC
-       LIMIT 2000`,
-      [String(ticket.ticket_number || '')]
-    );
-    const rows = mRes.rows || [];
-
-    // 2) Setup da resposta HTTP
-    const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '';
-    const filename = `ticket-${num}.pdf`;
-    
-    reply
-      .type('application/pdf')
-      .header('Content-Disposition', `attachment; filename="${filename}"`);
-
-    // 3) Configuração do PDF
-    const doc = new PDFDocument({ 
-      size: 'A4', 
-      margin: 40,
-      info: {
-        Title: `Ticket #${num}`,
-        Subject: 'Histórico de Atendimento',
-        Producer: 'Sistema de Tickets'
+      // 1) Ticket + cliente
+      const tRes = await req.db.query(
+        `
+        SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
+               t.status, t.created_at, t.updated_at,
+               c.name  AS customer_name,
+               c.email AS customer_email,
+               c.phone AS customer_phone
+          FROM tickets t
+          LEFT JOIN clientes c ON c.user_id = t.user_id
+         WHERE t.id::text = $1
+        `,
+        [String(id)]
+      );
+      if (!tRes.rowCount) {
+        return reply.code(404).send({ error: 'Ticket não encontrado' });
       }
-    });
+      const ticket = tRes.rows[0];
 
-    // Stream para capturar os chunks do PDF
-    const chunks = [];
-    doc.on('data', chunk => chunks.push(chunk));
-    doc.on('end', () => {
-      const pdfBuffer = Buffer.concat(chunks);
-      reply.send(pdfBuffer);
-    });
-    doc.on('error', (err) => {
-      req.log.error({ err }, 'Erro no documento PDF');
-      if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
-    });
+      // 2) Mensagens (ordem cronológica)
+      const mRes = await req.db.query(
+        `
+        SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
+               m.metadata, m.assigned_to
+          FROM messages m
+         WHERE m.ticket_number = $1
+         ORDER BY m."timestamp" ASC, m.id ASC
+         LIMIT 2000
+        `,
+        [String(ticket.ticket_number || '')]
+      );
+      const rows = mRes.rows || [];
 
-    // ==== CONSTANTES DE LAYOUT ====
-    const M = 40; // margem
-    const pageW = doc.page.width;
-    const pageH = doc.page.height;
-    const contentW = pageW - M * 2;
-    const maxBubbleW = Math.min(320, contentW * 0.65); // Diminuído o tamanho das bolhas
-    const gapY = 10;
-    const bubblePadX = 12;
-    const bubblePadY = 8;
+      // 3) Cabeçalhos HTTP + PassThrough (uma única resposta)
+      const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
+      const filename = `ticket-${num}.pdf`;
+      reply
+        .type('application/pdf')
+        .header('Content-Disposition', `attachment; filename="${filename}"`);
 
-    // CORES SIMPLES
-    const colors = {
-      primary: '#1F2937',
-      secondary: '#6B7280', 
-      accent: '#3B82F6',
-      incoming: {
-        bg: '#F8FAFC',
-        border: '#E2E8F0',
-        text: '#1F2937',
-        meta: '#64748B'
-      },
-      outgoing: {
-        bg: '#3B82F6',
-        border: '#2563EB', 
-        text: '#FFFFFF',
-        meta: '#DBEAFE'
-      },
-      system: {
-        bg: '#F1F5F9',
-        border: '#CBD5E1',
-        text: '#475569'
-      }
-    };
+      const out = new PassThrough();
+      reply.send(out); // envia stream uma única vez
 
-    // ==== HELPER FUNCTIONS ====
-    const safeParse = (raw) => {
-      if (raw == null) return null;
-      if (typeof raw === 'object') return raw;
-      const s = String(raw);
-      try { return JSON.parse(s); } catch {
-        if (/^https?:\/\//i.test(s)) return { url: s };
-        return s;
-      }
-    };
+      // ==== Helpers/Normalização (somente para extrair links/textos) ====
+      const safeParse = (raw) => {
+        if (raw == null) return null;
+        if (typeof raw === 'object') return raw;
+        const s = String(raw);
+        try { return JSON.parse(s); } catch {
+          if (/^https?:\/\//i.test(s)) return { url: s };
+          return s;
+        }
+      };
 
-    const normalize = (raw, meta, type) => {
-      const c = safeParse(raw);
-      const base = (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
-                   (typeof c === 'string' ? { text: c } : {});
-      const m = meta || {};
-      base.url = base.url || m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
-      base.filename = base.filename || m.filename || m.name || null;
-      base.mime_type = base.mime_type || m.mime || m.mimetype || m.content_type || null;
-      base.caption = base.caption || m.caption || null;
-      base.size = base.size || m.size || m.filesize || null;
-      return base;
-    };
+      const normalize = (rawContent, meta, type) => {
+        const c = safeParse(rawContent);
+        const base =
+          (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
+          (typeof c === 'string' ? { text: c } : {});
+        const m = meta || {};
+        base.url        ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
+        base.filename   ??= m.filename || m.name || null;
+        base.mime_type  ??= m.mime || m.mimetype || m.content_type || null;
+        base.caption    ??= m.caption || null;
+        base.size       ??= m.size || m.filesize || null;
+        return base;
+      };
 
-    const isImageUrl = (u) => /\.(png|jpe?g|webp|gif)$/i.test(u || '');
-    const isImageMime = (m) => /^image\/(png|jpe?g|webp|gif)$/i.test(String(m || ''));
+      // ==== PDF ====
+      const doc = new PDFDocument({ size: 'A4', margin: 36 });
+      doc.on('error', (e) => out.destroy(e));
+      doc.pipe(out);
 
-    // Função para sanitizar texto UTF-8
-    const sanitizeText = (text) => {
-      if (!text) return '';
-      return String(text)
-        .replace(/[\u0000-\u001F\u007F-\u009F]/g, '') // Remove caracteres de controle
-        .replace(/[\uFFF0-\uFFFF]/g, '') // Remove caracteres especiais problemáticos
-        .trim();
-    };
+      // Cores
+      const colIncomingBg = '#F3F4F6'; // cinza claro (cliente) - esquerda
+      const colOutgoingBg = '#2563EB'; // azul (agente)      - direita
+      const colOutgoingTx = '#FFFFFF'; // texto branco
+      const colMeta       = '#6B7280'; // meta cinza
+      const colSystemBg   = '#E5E7EB'; // pílula central
+      const colBody       = '#111827'; // corpo
+      const colLinkLeft   = '#1D4ED8'; // link incoming
+      const colLinkRight  = '#E0E7FF'; // link outgoing
 
-    const cleanupForwardPrefix = (s) => {
-      if (!s) return s;
-      const cleaned = String(s).replace(/^\*[^:*]{1,60}:\*\s*/i, '');
-      return sanitizeText(cleaned);
-    };
+      const M = 36;
+      const pageW = doc.page.width;
+      const pageH = doc.page.height;
+      const contentW = pageW - M * 2;
+      const maxBubbleW = Math.min(380, contentW * 0.78);
+      const padX = 10;
+      const padY = 8;
+      const gapY = 10;
 
-    function ensureSpace(need) {
-      if (doc.y + need <= pageH - M) return;
-      doc.addPage();
-      // Header da página
-      doc.save();
-      doc.fillColor(colors.secondary).fontSize(9).font('Helvetica');
-      doc.text(`Ticket #${num} - Página ${doc.bufferedPageRange().count}`, M, M);
-      doc.moveTo(M, M + 15).lineTo(M + contentW, M + 15)
-         .strokeColor('#E5E7EB').lineWidth(0.5).stroke();
-      doc.restore();
-      doc.y = M + 25;
-    }
-
-    function drawSectionTitle(title) {
-      ensureSpace(30);
-      doc.save();
-      const bgHeight = 24;
-      doc.rect(M, doc.y, contentW, bgHeight)
-         .fill(colors.system.bg)
-         .strokeColor(colors.system.border)
-         .lineWidth(1)
-         .stroke();
-      
-      doc.fillColor(colors.primary)
-         .font('Helvetica-Bold')
-         .fontSize(11);
-      doc.text(sanitizeText(title), M + 10, doc.y + 6);
-      doc.restore();
-      doc.y += bgHeight + 10;
-    }
-
-    // ==== CABEÇALHO PRINCIPAL ====
-    ensureSpace(80);
-    
-    doc.save();
-    doc.rect(M, doc.y, contentW, 40)
-       .fill(colors.accent)
-       .stroke();
-    
-    doc.fillColor('#FFFFFF')
-       .font('Helvetica-Bold')
-       .fontSize(18);
-    doc.text(`Ticket #${num}`, M + 15, doc.y + 8);
-    
-    doc.fontSize(10)
-       .font('Helvetica');
-    doc.text(`Criado em ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, M + 15, doc.y + 6);
-    doc.restore();
-    doc.y += 50;
-
-    // ==== INFORMAÇÕES DO TICKET ====
-    drawSectionTitle('Informações do Ticket');
-    
-    const infoItems = [
-      ['Cliente', sanitizeText(ticket.customer_name || ticket.user_id || '')],
-      ['Status', sanitizeText(ticket.status || '')],
-      ['Contato', sanitizeText(ticket.customer_phone || ticket.customer_email || '')],
-      ['Fila', sanitizeText(ticket.fila || '')],
-      ['Atendente', sanitizeText(ticket.assigned_to || '')],
-      ['Atualizado', new Date(ticket.updated_at).toLocaleString('pt-BR')]
-    ];
-
-    let infoY = doc.y;
-    for (const [label, value] of infoItems) {
-      doc.save();
-      doc.fillColor(colors.secondary)
-         .font('Helvetica-Bold')
-         .fontSize(9)
-         .text(`${label}:`, M, infoY);
-      
-      doc.fillColor(colors.primary)
-         .font('Helvetica')
-         .fontSize(10)
-         .text(value || '—', M + 80, infoY);
-      doc.restore();
-      infoY += 15;
-    }
-    
-    doc.y = infoY + 10;
-
-    // ==== SEÇÃO DE CONVERSA ====
-    drawSectionTitle('Histórico da Conversa');
-
-    if (!rows.length) {
-      doc.save();
-      doc.rect(M, doc.y, contentW, 40)
-         .fill('#FEF3F2')
-         .strokeColor('#FECACA')
-         .stroke();
-      doc.fillColor('#DC2626')
-         .fontSize(11)
-         .font('Helvetica');
-      doc.text('Não há mensagens registradas neste ticket.', 
-               M + 15, doc.y + 15, { width: contentW - 30, align: 'center' });
-      doc.restore();
-      doc.end();
-      return;
-    }
-
-    // ==== FUNÇÃO PARA DESENHAR BOLHAS SIMPLES ====
-    function drawSimpleBubble({ who, when, side, text, hasAttachment, attachmentUrl, type }) {
-      if (side === 'center') {
-        const pill = sanitizeText(text || `${who} - ${when}`);
-        const w = Math.min(300, contentW * 0.6);
-        const h = 20;
-        ensureSpace(h + gapY);
-        
-        const x = M + (contentW - w) / 2;
-        doc.save()
-          .roundedRect(x, doc.y, w, h, 8)
-          .fill(colors.system.bg)
-          .strokeColor(colors.system.border)
-          .lineWidth(1)
-          .stroke();
-        
-        doc.fillColor(colors.system.text)
-           .font('Helvetica')
-           .fontSize(9)
-           .text(pill, x + 10, doc.y + 6, { width: w - 20, align: 'center' });
-        doc.restore();
-        doc.y += h + gapY;
-        return;
-      }
-
-      const isRight = side === 'right';
-      const theme = isRight ? colors.outgoing : colors.incoming;
-      const innerW = maxBubbleW - bubblePadX * 2;
-
-      // Calcular dimensões
-      const meta = sanitizeText(`${who} • ${when}`);
-      const body = sanitizeText(cleanupForwardPrefix(text));
-      const metaH = doc.heightOfString(meta, { width: innerW });
-      const textH = body ? doc.heightOfString(body, { width: innerW }) : 0;
-      const attachmentH = hasAttachment ? 15 : 0;
-
-      const totalH = bubblePadY + metaH + (body ? 6 + textH : 0) + attachmentH + bubblePadY;
-      
-      ensureSpace(totalH + gapY);
-
-      const bx = isRight ? (M + contentW - maxBubbleW) : M;
-      const by = doc.y;
-
-      // Desenhar bolha simples
-      doc.save();
-      doc.roundedRect(bx, by, maxBubbleW, totalH, 8)
-         .fill(theme.bg)
-         .strokeColor(theme.border)
-         .lineWidth(1)
-         .stroke();
-
-      // Metadados (quem/quando)
-      doc.fillColor(theme.meta)
-         .font('Helvetica-Bold')
-         .fontSize(8)
-         .text(meta, bx + bubblePadX, by + bubblePadY, { width: innerW });
-      let cy = by + bubblePadY + metaH;
-
-      // Texto da mensagem
-      if (body) {
-        cy += 6;
-        doc.fillColor(theme.text)
-           .font('Helvetica')
-           .fontSize(10)
-           .text(body, bx + bubblePadX, cy, { width: innerW });
-        cy = doc.y;
-      }
-
-      // Anexo/Link simples
-      if (hasAttachment && attachmentUrl) {
-        cy += 4;
-        doc.fillColor(theme.text)
-           .fontSize(9);
-        
-        if (isImageUrl(attachmentUrl) || isImageMime(type)) {
-          doc.text('📷 Clique aqui para ver imagem', bx + bubblePadX, cy, {
-            link: attachmentUrl,
-            underline: true,
-            width: innerW
-          });
-        } else {
-          doc.text('📎 Clique aqui para ver anexo', bx + bubblePadX, cy, {
-            link: attachmentUrl,
-            underline: true,
-            width: innerW
-          });
+      // roundedRect seguro (fallback para rect em versões antigas)
+      function roundedRectSafe(x, y, w, h, r = 8) {
+        try {
+          if (typeof doc.roundedRect === 'function') {
+            doc.roundedRect(x, y, w, h, r);
+          } else {
+            doc.rect(x, y, w, h);
+          }
+        } catch {
+          doc.rect(x, y, w, h);
         }
       }
 
-      doc.restore();
-      doc.y = by + totalH + gapY;
-    }
+      // Header
+      doc.font('Helvetica-Bold').fontSize(18).fillColor(colBody).text(`Ticket #${num}`);
+      doc.moveDown(0.3);
+      doc.font('Helvetica').fontSize(10).fillColor(colMeta)
+         .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
+      doc.moveDown(0.5);
 
-    // ==== PROCESSAR MENSAGENS COM SEPARADORES DE DATA ====
-    let lastDay = '';
-    
-    function drawDateSeparator(date) {
-      const today = new Date();
-      const yesterday = new Date(today);
-      yesterday.setDate(yesterday.getDate() - 1);
-      
-      let label;
-      const dateStr = date.toDateString();
-      if (dateStr === today.toDateString()) {
-        label = 'Hoje';
-      } else if (dateStr === yesterday.toDateString()) {
-        label = 'Ontem';
-      } else {
-        label = date.toLocaleDateString('pt-BR', { 
-          day: '2-digit', 
-          month: 'long', 
-          year: 'numeric' 
+      // Bloco dados do cliente (duas colunas enxutas)
+      const leftX = M, rightX = M + contentW / 2, lh = 14;
+      function field(label, value, x, y) {
+        doc.fillColor(colMeta).font('Helvetica-Bold').fontSize(9).text(label, x, y);
+        doc.fillColor(colBody).font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
+        return y + 10 + lh;
+      }
+      let y1 = doc.y, y2 = doc.y;
+      y1 = field('Cliente', ticket.customer_name || ticket.user_id, leftX,  y1);
+      y1 = field('Contato', ticket.customer_phone || ticket.customer_email || '—', leftX,  y1);
+      y2 = field('Fila',    ticket.fila,               rightX, y2);
+      y2 = field('Atendente', ticket.assigned_to,      rightX, y2);
+      const yMax = Math.max(y1, y2);
+      doc.moveTo(M, yMax + 8).lineWidth(1).strokeColor('#E5E7EB').lineTo(M + contentW, yMax + 8).stroke();
+      doc.y = yMax + 16;
+
+      // Título seção conversa
+      doc.fillColor(colBody).font('Helvetica-Bold').fontSize(12).text('Conversa');
+      doc.moveDown(0.4);
+
+      // Sem histórico
+      if (!rows.length) {
+        doc.fillColor(colMeta).font('Helvetica').fontSize(11)
+           .text('Não há histórico de mensagens neste ticket.', { align: 'center', width: contentW });
+        doc.end();
+        return;
+      }
+
+      // Controle de quebra de página
+      function ensureSpace(need) {
+        if (doc.y + need <= pageH - M) return;
+        doc.addPage();
+        doc.fillColor(colMeta).font('Helvetica').fontSize(10).text(`Ticket #${num} — continuação`, M, M);
+        doc.moveDown(0.5);
+      }
+
+      // Separador por dia
+      let lastDay = '';
+      function daySeparator(date) {
+        const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        const pillPadX = 8, pillPadY = 3;
+        const w = doc.widthOfString(label) + pillPadX * 2;
+        const h = doc.currentLineHeight() + pillPadY * 2;
+        ensureSpace(h + 8);
+        const x = M + (contentW - w) / 2;
+        const y = doc.y;
+
+        doc.save();
+        roundedRectSafe(x, y, w, h, 6);
+        doc.fill(colSystemBg);
+        doc.fillColor('#374151').font('Helvetica').fontSize(9)
+           .text(label, x + pillPadX, y + pillPadY, { width: w - pillPadX * 2, align: 'center' });
+        doc.restore();
+
+        doc.moveDown(0.6);
+      }
+
+      // Desenha uma bolha (incoming/outgoing) ou pílula (system)
+      function drawBubble({ side, who, when, body, link }) {
+        const isRight = side === 'right';
+        const bg      = isRight ? colOutgoingBg : colIncomingBg;
+        const txtCol  = isRight ? colOutgoingTx : colBody;
+        const metaCol = isRight ? '#DDE7FF'     : colMeta;
+
+        const innerW = maxBubbleW - padX * 2;
+        const metaStr = `${who} — ${when}`;
+
+        // Medidas
+        const metaH = doc.heightOfString(metaStr, { width: innerW });
+        const bodyH = body ? doc.heightOfString(body, { width: innerW }) : 0;
+        const linkLabel = link ? 'Clique aqui para abrir a mídia' : '';
+        const linkH = link ? (doc.heightOfString(linkLabel, { width: innerW }) + 2) : 0;
+
+        const totalH = padY + metaH + (body ? 6 + bodyH : 0) + (link ? 8 + linkH : 0) + padY;
+        ensureSpace(totalH + gapY);
+
+        const bx = isRight ? (M + contentW - maxBubbleW) : M;
+        const by = doc.y;
+
+        // container
+        doc.save();
+        roundedRectSafe(bx, by, maxBubbleW, totalH, 10);
+        doc.fill(bg);
+
+        // meta
+        doc.fillColor(metaCol).font('Helvetica').fontSize(9)
+           .text(metaStr, bx + padX, by + padY, { width: innerW });
+
+        let cy = by + padY + metaH;
+
+        // corpo
+        if (body) {
+          cy += 6;
+          doc.fillColor(txtCol).font('Helvetica').fontSize(11)
+             .text(body, bx + padX, cy, { width: innerW });
+          cy = doc.y;
+        }
+
+        // link (mídia/anexo)
+        if (link) {
+          cy += 8;
+          doc.font('Helvetica').fontSize(10).fillColor(isRight ? colLinkRight : colLinkLeft)
+             .text(linkLabel, bx + padX, cy, {
+               width: innerW,
+               link,
+               underline: true
+             });
+          cy = doc.y;
+        }
+
+        doc.restore();
+        doc.y = by + totalH + gapY;
+      }
+
+      // Loop de mensagens
+      for (const m of rows) {
+        const ts = new Date(m.timestamp);
+        const dayKey = ts.toISOString().slice(0, 10);
+        if (dayKey !== lastDay) {
+          daySeparator(ts);
+          lastDay = dayKey;
+        }
+
+        const dir  = String(m.direction || '').toLowerCase(); // incoming|outgoing|system
+        const type = String(m.type || '').toLowerCase();
+        const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
+        const c    = normalize(m.content, meta, type);
+
+        if (dir === 'system') {
+          // pílula central com o texto do evento
+          const pillText = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption)) || '[evento]';
+          const w = Math.min(320, contentW * 0.65);
+          const padx = 10, pady = 6;
+          const h = doc.heightOfString(pillText, { width: w - padx * 2 }) + pady * 2;
+          ensureSpace(h + 8);
+          const x = M + (contentW - w) / 2;
+          const y = doc.y;
+
+          doc.save();
+          roundedRectSafe(x, y, w, h, 8);
+          doc.fill(colSystemBg);
+          doc.fillColor('#374151').font('Helvetica').fontSize(10)
+             .text(pillText, x + padx, y + pady, { width: w - padx * 2, align: 'center' });
+          doc.restore();
+
+          doc.moveDown(0.5);
+          continue;
+        }
+
+        const who = (dir === 'outgoing')
+          ? (m.assigned_to || ticket.assigned_to || 'Atendente')
+          : (ticket.customer_name || ticket.user_id || 'Cliente');
+
+        const when = ts.toLocaleString('pt-BR');
+
+        const body =
+          typeof c === 'string' ? c :
+          (c?.text || c?.body || c?.caption || null);
+
+        // Sempre como link para mídias/anexos (conforme pedido)
+        const link = c?.url || null;
+
+        drawBubble({
+          side: dir === 'outgoing' ? 'right' : 'left',
+          who, when, body, link
         });
       }
-      
-      const w = Math.min(200, contentW * 0.5);
-      const h = 18;
-      ensureSpace(h + 12);
-      
-      const x = M + (contentW - w) / 2;
-      doc.save()
-        .roundedRect(x, doc.y, w, h, 8)
-        .fill('#EEF2FF')
-        .strokeColor('#C7D2FE')
-        .lineWidth(1)
-        .stroke();
-      
-      doc.fillColor('#4338CA')
-         .font('Helvetica-Bold')
-         .fontSize(9)
-         .text(sanitizeText(label), x + 10, doc.y + 5, { width: w - 20, align: 'center' });
-      doc.restore();
-      doc.y += h + 12;
+
+      doc.end(); // encerra stream
+    } catch (err) {
+      req.log.error({ err }, 'Erro ao gerar PDF');
+      if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
     }
-
-    // Processar cada mensagem
-    for (const m of rows) {
-      const ts = new Date(m.timestamp);
-      const dayKey = ts.toISOString().slice(0, 10);
-      
-      if (dayKey !== lastDay) {
-        drawDateSeparator(ts);
-        lastDay = dayKey;
-      }
-
-      const dir = String(m.direction || '').toLowerCase();
-      const type = String(m.type || '').toLowerCase();
-      const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
-      const c = normalize(m.content, meta, type);
-
-      const who = sanitizeText(
-        dir === 'outgoing' ? (m.assigned_to || ticket.assigned_to || 'Atendente') :
-        dir === 'system' ? 'Sistema' :
-        (ticket.customer_name || ticket.user_id || 'Cliente')
-      );
-
-      const when = ts.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-      const text = typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '');
-
-      const url = c?.url || null;
-      const hasAttachment = !!url;
-
-      const side = dir === 'outgoing' ? 'right' : dir === 'incoming' ? 'left' : 'center';
-
-      drawSimpleBubble({
-        who, when, side, text, type,
-        hasAttachment,
-        attachmentUrl: url
-      });
-    }
-
-    // ==== RODAPÉ FINAL ====
-    ensureSpace(40);
-    doc.y += 15;
-    
-    doc.save();
-    doc.moveTo(M, doc.y).lineTo(M + contentW, doc.y)
-       .strokeColor('#E5E7EB').lineWidth(1).stroke();
-    
-    doc.fillColor(colors.secondary)
-       .fontSize(8)
-       .font('Helvetica');
-    doc.text(`Relatório gerado em ${new Date().toLocaleString('pt-BR')}`, M, doc.y + 8);
-    doc.text(`Total: ${rows.length} mensagem(ns)`, M + contentW - 100, doc.y + 8);
-    doc.restore();
-
-    doc.end();
-  } catch (err) {
-    req.log.error({ err }, 'Erro ao gerar PDF');
-    if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
-  }
-});
+  });
 
 
   // GET /tickets/last/:user_id → retorna o ticket mais recente do usuário
