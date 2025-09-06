@@ -25,18 +25,47 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-fastify.get('/history/:id/pdf', async (req, reply) => {
+// routes/tickets.js (ESM)
+
+import amqplib from 'amqplib';
+import { PassThrough } from 'node:stream';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const PDFDocument = require('pdfkit'); // CJS em ESM, estável
+
+const AMQP_URL = process.env.AMQP_URL || 'amqp://guest:guest@rabbitmq:5672/';
+const INCOMING_QUEUE = process.env.INCOMING_QUEUE || 'hmg.incoming';
+
+let amqpConn, amqpChIncoming;
+async function ensureAMQPIncoming() {
+  if (amqpChIncoming) return amqpChIncoming;
+  amqpConn = await amqplib.connect(AMQP_URL, { heartbeat: 15 });
+  amqpConn.on('close', () => { amqpConn = null; amqpChIncoming = null; });
+  amqpChIncoming = await amqpConn.createChannel();
+  await amqpChIncoming.assertQueue(INCOMING_QUEUE, { durable: true });
+  return amqpChIncoming;
+}
+
+async function ticketsRoutes(fastify, _options) {
+  // validação simples do user_id
+  function isValidUserId(user_id) {
+    return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
+  }
+
+  // -----------------------------
+  // GET /tickets/history/:id/pdf
+  // -----------------------------
+  fastify.get('/history/:id/pdf', async (req, reply) => {
     try {
       const { id } = req.params || {};
 
-      // 1) Ticket + cliente
+      // 1) ticket + cliente
       const tRes = await req.db.query(
         `
         SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
                t.status, t.created_at, t.updated_at,
-               c.name  AS customer_name,
-               c.email AS customer_email,
-               c.phone AS customer_phone
+               c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
           FROM tickets t
           LEFT JOIN clientes c ON c.user_id = t.user_id
          WHERE t.id::text = $1
@@ -46,7 +75,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
       const ticket = tRes.rows[0];
 
-      // 2) Mensagens
+      // 2) mensagens (ordem cronológica)
       const mRes = await req.db.query(
         `
         SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
@@ -60,21 +89,17 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       );
       const rows = mRes.rows || [];
 
-      // 3) Cabeçalhos HTTP e HIJACK do reply
+      // 3) headers + stream (enviar uma única vez)
       const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
       const filename = `ticket-${num}.pdf`;
-      reply.header('Content-Type', 'application/pdf');
-      reply.header('Content-Disposition', `attachment; filename="${filename}"`);
-      reply.hijack(); // vamos escrever direto no socket
+      reply
+        .type('application/pdf')
+        .header('Content-Disposition', `attachment; filename="${filename}"`);
 
-      // 4) PDF (sem PassThrough, sem reply.send)
-      const doc = new PDFDocument({ size: 'A4', margin: 36 });
-      doc.on('error', (e) => {
-        try { reply.raw.destroy(e); } catch {}
-      });
-      doc.pipe(reply.raw);
+      const out = new PassThrough();
+      reply.send(out); // ✅ inicia o streaming
 
-      // ==== helpers de conteúdo ====
+      // 4) helpers
       const safeParse = (raw) => {
         if (raw == null) return null;
         if (typeof raw === 'object') return raw;
@@ -84,69 +109,98 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
           return s;
         }
       };
-      const normalize = (rawContent, meta, type) => {
-        const c = safeParse(rawContent);
-        const base =
-          (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
-          (typeof c === 'string' ? { text: c } : {});
+      const normalize = (raw, meta, type) => {
+        const c = safeParse(raw);
+        const base = (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } :
+                     (typeof c === 'string' ? { text: c } : {});
         const m = meta || {};
-        base.url        ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
-        base.filename   ??= m.filename || m.name || null;
-        base.mime_type  ??= m.mime || m.mimetype || m.content_type || null;
-        base.caption    ??= m.caption || null;
-        base.size       ??= m.size || m.filesize || null;
+        base.url       ??= m.url || m.file_url || m.download_url || m.signed_url || m.public_url || null;
+        base.filename  ??= m.filename || m.name || null;
+        base.mime_type ??= m.mime || m.mimetype || m.content_type || null;
+        base.caption   ??= m.caption || null;
+        base.size      ??= m.size || m.filesize || null;
         return base;
       };
 
-      // ==== layout ====
-      const M = 36;
+      // desenha um retângulo arredondado (compatível c/ versões antigas do pdfkit)
+      function fillRoundedRect(doc, x, y, w, h, r, color) {
+        doc.save();
+        doc.fillColor(color);
+        doc.moveTo(x + r, y);
+        doc.lineTo(x + w - r, y);
+        doc.quadraticCurveTo(x + w, y, x + w, y + r);
+        doc.lineTo(x + w, y + h - r);
+        doc.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        doc.lineTo(x + r, y + h);
+        doc.quadraticCurveTo(x, y + h, x, y + h - r);
+        doc.lineTo(x, y + r);
+        doc.quadraticCurveTo(x, y, x + r, y);
+        doc.fill();
+        doc.restore();
+      }
+
+      // 5) PDF
+      const doc = new PDFDocument({ size: 'A4', margin: 40 });
+      doc.on('error', (e) => out.destroy(e));
+      doc.pipe(out);
+
+      // layout base (soft)
+      const M = 40; // margem
       const pageW = doc.page.width;
       const pageH = doc.page.height;
       const contentW = pageW - M * 2;
-      const maxBubbleW = Math.min(380, contentW * 0.78);
-      const gapY = 10;
-      const padX = 10, padY = 8;
 
-      const colIncomingBg = '#F3F4F6'; // esquerda (cliente)
-      const colOutgoingBg = '#2563EB'; // direita (agente)
-      const colOutgoingTx = '#FFFFFF';
-      const colMeta  = '#6B7280';
-      const colBody  = '#111827';
-      const colSysBg = '#E5E7EB';
-      const colLinkLeft  = '#1D4ED8';
-      const colLinkRight = '#E0E7FF';
+      const gapY = 12;
+      const bubblePadX = 10;
+      const bubblePadY = 8;
+      const maxBubbleW = Math.min(420, contentW * 0.78);
 
-      // Cabeçalho
-      doc.font('Helvetica-Bold').fontSize(18).fillColor(colBody).text(`Ticket #${num}`);
-      doc.moveDown(0.3);
-      doc.font('Helvetica').fontSize(10).fillColor(colMeta)
-         .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
-      doc.moveDown(0.5);
+      // paleta neutra e suave
+      const colText       = '#1F2937'; // slate-800
+      const colMeta       = '#8A8F98'; // cinza brando
+      const colSep        = '#E5E7EB'; // linha
+      const colDayPill    = '#EEF2F7';
+      const colIncomingBg = '#F6F7F9'; // bolha clara (cliente)
+      const colOutgoingBg = '#ECEFF3'; // bolha clara (agente)
 
-      // Info cliente (duas colunas simples)
-      const leftX = M, rightX = M + contentW / 2, lineH = 14;
-      function field(label, value, x, y) {
+      // cabeçalho do ticket (fora de bolha)
+      doc.fillColor(colText).font('Helvetica-Bold').fontSize(18)
+         .text(`Ticket #${num}`, M, undefined, { width: contentW, align: 'left' });
+      doc.moveDown(0.2);
+      doc.fillColor(colMeta).font('Helvetica').fontSize(10)
+         .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`, {
+           width: contentW, align: 'left'
+         });
+      doc.moveDown(0.6);
+
+      // bloco infos (duas colunas)
+      const leftX  = M;
+      const rightX = M + contentW / 2;
+      const lh     = 14;
+
+      function labelValue(label, value, x, y) {
         doc.fillColor(colMeta).font('Helvetica-Bold').fontSize(9).text(label, x, y);
-        doc.fillColor(colBody).font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
-        return y + 10 + lineH;
+        doc.fillColor(colText).font('Helvetica').fontSize(11).text(value || '—', x, y + 10);
+        return y + 10 + lh;
       }
       let y1 = doc.y, y2 = doc.y;
-      y1 = field('Cliente', ticket.customer_name || ticket.user_id, leftX,  y1);
-      y1 = field('Contato', ticket.customer_phone || ticket.customer_email || '—', leftX,  y1);
-      y2 = field('Fila',    ticket.fila,               rightX, y2);
-      y2 = field('Atendente', ticket.assigned_to,      rightX, y2);
+      y1 = labelValue('Cliente',  ticket.customer_name || ticket.user_id, leftX,  y1);
+      y1 = labelValue('Contato',  ticket.customer_phone || ticket.customer_email || '—', leftX,  y1);
+      y2 = labelValue('Fila',     ticket.fila,          rightX, y2);
+      y2 = labelValue('Atendente',ticket.assigned_to,   rightX, y2);
+
       const yMax = Math.max(y1, y2);
-      doc.moveTo(M, yMax + 8).lineWidth(1).strokeColor('#E5E7EB').lineTo(M + contentW, yMax + 8).stroke();
+      doc.strokeColor(colSep).lineWidth(1)
+         .moveTo(M, yMax + 8).lineTo(M + contentW, yMax + 8).stroke();
       doc.y = yMax + 16;
 
-      // Título conversa
-      doc.fillColor(colBody).font('Helvetica-Bold').fontSize(12).text('Conversa');
-      doc.moveDown(0.4);
+      // título conversa
+      doc.fillColor(colText).font('Helvetica-Bold').fontSize(12).text('Conversa', { width: contentW });
+      doc.moveDown(0.3);
 
-      // Sem histórico
       if (!rows.length) {
         doc.fillColor(colMeta).font('Helvetica').fontSize(11)
-           .text('Não há histórico de mensagens neste ticket.', { align: 'center', width: contentW });
+           .text('Não há histórico de mensagens neste ticket.', { width: contentW, align: 'center' });
         doc.end();
         return;
       }
@@ -154,140 +208,144 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
       function ensureSpace(need) {
         if (doc.y + need <= pageH - M) return;
         doc.addPage();
-        doc.fillColor(colMeta).font('Helvetica').fontSize(10).text(`Ticket #${num} — continuação`, M, M);
+        // cabeçalho mínimo da continuação (texto pequeno, sem “bolha”)
+        doc.fillColor(colMeta).font('Helvetica').fontSize(10)
+           .text(`Ticket #${num} — continuação`, M, M);
         doc.moveDown(0.5);
       }
 
-      // separador por dia (texto central com linhas laterais — sem shapes complexos)
+      // separador por dia (pílula central suave)
       let lastDay = '';
       function daySeparator(date) {
         const label = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-        const lh = doc.currentLineHeight();
-        ensureSpace(lh + 12);
-
-        const y = doc.y + 3;
-        const wLabel = doc.widthOfString(label);
-        const xLabel = M + (contentW - wLabel) / 2;
-
-        doc.save();
-        doc.strokeColor('#E5E7EB').lineWidth(1);
-        // linha esquerda
-        doc.moveTo(M, y).lineTo(xLabel - 10, y).stroke();
-        // texto
-        doc.fillColor('#374151').font('Helvetica').fontSize(9).text(label, xLabel, doc.y, { width: wLabel });
-        // linha direita
-        const xAfter = xLabel + wLabel + 10;
-        doc.moveTo(xAfter, y).lineTo(M + contentW, y).stroke();
-        doc.restore();
-
+        const padX = 8, padY = 3;
+        const w = doc.widthOfString(label) + padX * 2;
+        const h = doc.currentLineHeight() + padY * 2;
+        const x = M + (contentW - w) / 2;
+        ensureSpace(h + 8);
+        // “pílula” arredondada
+        fillRoundedRect(doc, x, doc.y, w, h, 6, colDayPill);
+        doc.fillColor('#4B5563').font('Helvetica').fontSize(9)
+           .text(label, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
         doc.moveDown(0.6);
       }
 
-      function drawBubble({ side, who, when, body, link }) {
+      // desenha bolha (incoming à esquerda, outgoing à direita)
+      function drawBubble({ who, when, side, body, links }) {
         const isRight = side === 'right';
-        const bg      = isRight ? colOutgoingBg : colIncomingBg;
-        const txtCol  = isRight ? colOutgoingTx : colBody;
-        const metaCol = isRight ? '#DDE7FF'     : colMeta;
+        const bg = isRight ? colOutgoingBg : colIncomingBg;
+        const metaLine = `${who} — ${when}`;
+        const innerW = maxBubbleW - bubblePadX * 2;
 
-        const innerW = maxBubbleW - padX * 2;
-        const metaStr = `${who} — ${when}`;
-        const metaH = doc.heightOfString(metaStr, { width: innerW });
-        const bodyH = body ? doc.heightOfString(body, { width: innerW }) : 0;
-        const linkLabel = link ? 'Clique aqui para abrir a mídia' : '';
-        const linkH = link ? (doc.heightOfString(linkLabel, { width: innerW }) + 2) : 0;
+        // medir alturas
+        const metaH = doc.heightOfString(metaLine, { width: innerW, align: 'left' });
+        const bodyH = body ? doc.heightOfString(body, { width: innerW, align: 'left' }) : 0;
+        const linksH = (links && links.length)
+          ? links.reduce((acc, l) => acc + doc.heightOfString(l.label, { width: innerW }) + 4, 0)
+          : 0;
 
-        const totalH = padY + metaH + (body ? 6 + bodyH : 0) + (link ? 8 + linkH : 0) + padY;
+        const totalH = bubblePadY + metaH + (body ? 6 + bodyH : 0)
+                     + (links && links.length ? 8 + linksH : 0) + bubblePadY;
+
         ensureSpace(totalH + gapY);
 
         const bx = isRight ? (M + contentW - maxBubbleW) : M;
         const by = doc.y;
 
-        // fundo (retângulo simples — compatível com qualquer PDFKit)
-        doc.save();
-        doc.rect(bx, by, maxBubbleW, totalH).fill(bg);
+        // “card” arredondado suave, sem borda
+        fillRoundedRect(doc, bx, by, maxBubbleW, totalH, 10, bg);
 
-        // meta
-        doc.fillColor(metaCol).font('Helvetica').fontSize(9)
-           .text(metaStr, bx + padX, by + padY, { width: innerW });
+        // meta (nome + horário)
+        doc.fillColor(colMeta).font('Helvetica').fontSize(9)
+           .text(metaLine, bx + bubblePadX, by + bubblePadY, { width: innerW });
 
-        let cy = by + padY + metaH;
+        let cy = by + bubblePadY + metaH;
 
         // corpo
         if (body) {
           cy += 6;
-          doc.fillColor(txtCol).font('Helvetica').fontSize(11)
-             .text(body, bx + padX, cy, { width: innerW });
+          doc.fillColor(colText).font('Helvetica').fontSize(11)
+             .text(body, bx + bubblePadX, cy, { width: innerW });
           cy = doc.y;
         }
 
-        // link (mídia/anexo)
-        if (link) {
+        // links (mídias/anexos) — “Clique aqui para abrir a mídia”
+        if (links && links.length) {
           cy += 8;
-          doc.font('Helvetica').fontSize(10).fillColor(isRight ? colLinkRight : colLinkLeft)
-             .text('Clique aqui para abrir a mídia', bx + padX, cy, {
-               width: innerW,
-               link,
-               underline: true
-             });
-          cy = doc.y;
+          doc.fillColor('#1D4ED8').font('Helvetica').fontSize(10);
+          for (const l of links) {
+            const label = l.filename ? `${l.filename} — Clique aqui para abrir a mídia`
+                                     : 'Clique aqui para abrir a mídia';
+            doc.text(label, bx + bubblePadX, cy, {
+              width: innerW,
+              link: l.url,
+              underline: true
+            });
+            cy = doc.y + 4;
+          }
         }
 
-        doc.restore();
         doc.y = by + totalH + gapY;
       }
 
-      // loop
+      // loop das mensagens
       for (const m of rows) {
         const ts = new Date(m.timestamp);
-        const key = ts.toISOString().slice(0, 10);
-        if (key !== lastDay) { daySeparator(ts); lastDay = key; }
+        const dayKey = ts.toISOString().slice(0, 10);
+        if (dayKey !== lastDay) { daySeparator(ts); lastDay = dayKey; }
 
-        const dir  = String(m.direction || '').toLowerCase(); // incoming|outgoing|system
+        const dir  = String(m.direction || '').toLowerCase(); // incoming | outgoing | system
         const type = String(m.type || '').toLowerCase();
         const meta = typeof m.metadata === 'string' ? safeParse(m.metadata) : (m.metadata || {});
-        const c    = normalize(m.content, meta, type);
+        const c = normalize(m.content, meta, type);
 
+        // eventos de sistema: pílula central (sem bolha)
         if (dir === 'system') {
-          // pílula simples: retângulo central cinza claro
-          const pill = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption)) || '[evento]';
-          const w = Math.min(320, contentW * 0.65);
-          const padX2 = 10, padY2 = 6;
-          const h = doc.heightOfString(pill, { width: w - padX2 * 2 }) + padY2 * 2;
-          ensureSpace(h + 8);
+          const text = (typeof c === 'string' ? c : (c?.text || c?.body || c?.caption || '[evento]'));
+          const padX = 10, padY = 6;
+          const w = Math.min(320, contentW * 0.6);
+          const txtH = doc.heightOfString(text, { width: w - padX * 2 });
+          const h = padY * 2 + txtH;
+          ensureSpace(h + gapY);
           const x = M + (contentW - w) / 2;
-          const y = doc.y;
-
-          doc.save();
-          doc.rect(x, y, w, h).fill(colSysBg);
-          doc.fillColor('#374151').font('Helvetica').fontSize(10)
-             .text(pill, x + padX2, y + padY2, { width: w - padX2 * 2, align: 'center' });
-          doc.restore();
-
+          fillRoundedRect(doc, x, doc.y, w, h, 8, colDayPill);
+          doc.fillColor('#4B5563').font('Helvetica').fontSize(10)
+             .text(text, x + padX, doc.y + padY, { width: w - padX * 2, align: 'center' });
           doc.moveDown(0.5);
           continue;
         }
 
-        const who = (dir === 'outgoing')
+        // remetente/atendente
+        const who = dir === 'outgoing'
           ? (m.assigned_to || ticket.assigned_to || 'Atendente')
           : (ticket.customer_name || ticket.user_id || 'Cliente');
-
         const when = ts.toLocaleString('pt-BR');
+
+        // texto
         const body =
           typeof c === 'string' ? c :
           (c?.text || c?.body || c?.caption || null);
 
-        const link = c?.url || null;
+        // mídias como links
+        const url = c?.url || null;
+        const links = url ? [{
+          url,
+          filename: c?.filename || null
+        }] : [];
 
         drawBubble({
+          who,
+          when,
           side: dir === 'outgoing' ? 'right' : 'left',
-          who, when, body, link
+          body,
+          links
         });
       }
 
-      doc.end(); // fecha o stream e envia
+      doc.end();
     } catch (err) {
       req.log.error({ err }, 'Erro ao gerar PDF');
-      try { if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' }); } catch {}
+      if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
     }
   });
 
