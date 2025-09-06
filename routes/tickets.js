@@ -18,9 +18,8 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-// GET /tickets/history/:id/pdf  -> download de PDF (sem streaming; envia 1 buffer)
+// GET /tickets/history/:id/pdf  -> download de PDF com layout "chat"
 fastify.get('/history/:id/pdf', async (req, reply) => {
-  // --- ESM/CJS interop
   const { createRequire } = await import('node:module');
   const require     = createRequire(import.meta.url);
   const PDFDocument = require('pdfkit');
@@ -40,7 +39,6 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     [String(id)]
   );
   if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
-
   const ticket   = tRes.rows[0];
   const num      = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : null;
   const filename = num ? `ticket-${num}.pdf` : `ticket-sem-numero.pdf`;
@@ -59,7 +57,34 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
   );
   const msgs = mRes.rows || [];
 
-  // 3) Gera o PDF em memória e aguarda terminar
+  // 3) helpers de conteúdo
+  const parseText = (raw) => {
+    try {
+      if (!raw) return '';
+      if (typeof raw === 'object') {
+        const t = raw.text || raw.body || raw.caption || raw.message;
+        return typeof t === 'string' ? t : (t ? String(t) : JSON.stringify(raw));
+      }
+      const s = String(raw);
+      try { const o = JSON.parse(s); return o?.text || o?.body || o?.caption || s; }
+      catch { return s; }
+    } catch { return ''; }
+  };
+  const extractUrlAndFile = (metaLike) => {
+    const meta = typeof metaLike === 'string'
+      ? (JSON.parse(metaLike || '{}') || {}) : (metaLike || {});
+    const url = meta.url || meta.file_url || meta.public_url || meta.download_url || null;
+    let filename = meta.filename || meta.name || null;
+    if (!filename && url) {
+      try { const u = new URL(url); filename = decodeURIComponent(u.pathname.split('/').pop() || 'arquivo'); }
+      catch { filename = 'arquivo'; }
+    }
+    const mime = meta.mime || meta.mimetype || meta.content_type || null;
+    const size = meta.size || meta.filesize || null;
+    return { url, filename, mime, size };
+  };
+
+  // 4) Geração do PDF em buffer com layout de chat
   function buildPdf(t, messages) {
     return new Promise((resolve, reject) => {
       try {
@@ -69,90 +94,207 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
         doc.on('error', reject);
         doc.on('end', () => resolve(Buffer.concat(chunks)));
 
-        // helpers
-        const info = (label, value) => {
-          doc.font('Helvetica-Bold').text(label);
-          doc.font('Helvetica').text(value || '—');
-          doc.moveDown(0.3);
+        // Paleta e métricas
+        const palette = {
+          agentBg:     '#F1F5F9',  // cinza claro (agente/sistema)
+          agentText:   '#0f172a',
+          custBg:      '#2563eb',  // azul (cliente)
+          custText:    '#ffffff',
+          subText:     '#64748b',
+          divider:     '#e5e7eb',
+          dateChipBg:  '#e2e8f0',
+          link:        '#2563eb',
         };
-        const parseText = (raw) => {
-          try {
-            if (!raw) return '';
-            if (typeof raw === 'object') {
-              const t = raw.text || raw.body || raw.caption;
-              return t || JSON.stringify(raw);
-            }
-            const s = String(raw);
-            try { const o = JSON.parse(s); return o?.text || o?.body || o?.caption || s; }
-            catch { return s; }
-          } catch { return ''; }
+        const MARGIN = 36;
+        const PAGE_W = doc.page.width, PAGE_H = doc.page.height;
+        const CONTENT_X = MARGIN;
+        const CONTENT_W = PAGE_W - MARGIN * 2;
+        const BUBBLE_MAX_W = Math.round(CONTENT_W * 0.72);
+        const PAD_X = 10, PAD_Y = 8;
+        const GAP_Y = 10;
+        const BUBBLE_R = 10;
+
+        const ensurePage = (neededH = 0) => {
+          const bottom = doc.y + neededH + 10;
+          if (bottom > PAGE_H - MARGIN) {
+            doc.addPage();
+            doc.y = MARGIN;
+          }
         };
 
-        // Cabeçalho
-        doc.fontSize(18).font('Helvetica-Bold').text(`Ticket #${num ?? '—'}`);
-        doc.moveDown(0.3);
-        doc.fontSize(10).fillColor('#666')
+        // Cabeçalho do ticket
+        doc.font('Helvetica-Bold').fontSize(18).text(`Ticket #${num ?? '—'}`);
+        doc.moveDown(0.25);
+        doc.font('Helvetica').fontSize(10).fillColor(palette.subText)
            .text(`Criado em: ${new Date(t.created_at).toLocaleString('pt-BR')}`);
-        doc.moveDown(0.8).fillColor('#000');
+        doc.moveDown(0.6).fillColor('#000');
 
-        // Cliente
-        doc.font('Helvetica-Bold').text('Cliente');
-        doc.font('Helvetica').fontSize(11)
-           .text(t.customer_name || '—')
-           .text(t.customer_phone || t.user_id || '—')
-           .text(t.customer_email || '—');
-        doc.moveDown(0.6);
+        // Cartão do cliente (compacto)
+        const info = (label, value) => {
+          doc.font('Helvetica-Bold').fontSize(10).text(label);
+          doc.font('Helvetica').fontSize(11).text(value || '—');
+          doc.moveDown(0.2);
+        };
+        info('Cliente', t.customer_name || t.user_id || '—');
+        doc.font('Helvetica').fontSize(10).fillColor(palette.subText)
+           .text([t.customer_phone, t.customer_email].filter(Boolean).join(' · ') || '—');
+        doc.moveDown(0.4).fillColor('#000');
+        const startX = doc.x, startY = doc.y;
 
-        // Infos
-        info('Fila', t.fila);
-        info('Atendente', t.assigned_to);
-        info('Status', t.status);
-        info('Última atualização', new Date(t.updated_at).toLocaleString('pt-BR'));
+        // Mini grade com Fila, Atendente, Status, Atualizado
+        const colW = Math.floor(CONTENT_W / 2);
+        const drawKV = (k, v) => {
+          doc.font('Helvetica-Bold').fontSize(9).fillColor(palette.subText).text(k.toUpperCase());
+          doc.font('Helvetica').fontSize(11).fillColor('#000').text(v || '—');
+        };
+        const gTop = doc.y;
+        doc.save();
+        doc.rect(CONTENT_X, gTop, CONTENT_W, 1).fill(palette.divider).restore();
         doc.moveDown(0.5);
 
-        // Conversa
+        const y1 = doc.y;
+        doc.x = CONTENT_X; doc.y = y1; drawKV('Fila', t.fila);
+        const colHeight1 = doc.y - y1;
+
+        doc.x = CONTENT_X + colW; doc.y = y1; drawKV('Atendente', t.assigned_to);
+        const colHeight2 = doc.y - y1;
+
+        const rowH1 = Math.max(colHeight1, colHeight2);
+        doc.y = y1 + rowH1 + 6;
+
+        const y2 = doc.y;
+        doc.x = CONTENT_X; doc.y = y2; drawKV('Status', t.status);
+        const colHeight3 = doc.y - y2;
+
+        doc.x = CONTENT_X + colW; doc.y = y2;
+        drawKV('Última atualização', new Date(t.updated_at).toLocaleString('pt-BR'));
+        const colHeight4 = doc.y - y2;
+
+        doc.y = y2 + Math.max(colHeight3, colHeight4) + 10;
+
+        // Título "Conversa"
+        doc.moveDown(0.5);
         doc.font('Helvetica-Bold').fontSize(12).text('Conversa');
-        doc.moveDown(0.4);
-        doc.font('Helvetica').fontSize(10);
+        doc.moveDown(0.3);
 
         if (!messages.length) {
-          doc.text('Não há histórico de mensagens para este ticket.');
-        } else {
-          messages.forEach((m, idx) => {
-            const dir = String(m.direction || '').toLowerCase();
-            const who = dir === 'outgoing' ? (m.assigned_to || 'Atendente')
-                      : dir === 'system'   ? 'Sistema'
-                      : 'Cliente';
-            const when = new Date(m.timestamp).toLocaleString('pt-BR');
-            const text = parseText(m.content);
-
-            doc.font('Helvetica-Bold').text(`${who} — ${when}`);
-            doc.font('Helvetica').text(text || '[mensagem não textual]');
-
-            try {
-              const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata) : (m.metadata || {});
-              const url  = meta.url || meta.file_url || meta.public_url || meta.download_url || null;
-              if (url) doc.fillColor('#2563eb').text(url, { link: url, underline: true }).fillColor('#000');
-            } catch {}
-
-            if (idx < messages.length - 1) doc.moveDown(0.6);
-          });
+          doc.font('Helvetica').fontSize(10).fillColor(palette.subText)
+             .text('Não há histórico de mensagens para este ticket.');
+          doc.end();
+          return;
         }
 
+        // Separador por dia (pílula central)
+        const drawDayChip = (dateStr) => {
+          const label = new Date(dateStr).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+          const w = doc.widthOfString(label, { font: 'Helvetica-Bold', size: 9 }) + 16;
+          const h = 16;
+          const x = CONTENT_X + (CONTENT_W - w) / 2;
+          ensurePage(h + 12);
+          doc.save();
+          doc.fillColor(palette.dateChipBg).roundedRect(x, doc.y, w, h, 8).fill();
+          doc.fillColor('#111827').font('Helvetica-Bold').fontSize(9)
+             .text(label, x, doc.y + 3, { width: w, align: 'center' });
+          doc.restore();
+          doc.moveDown(1);
+        };
+
+        // Bolha de mensagem
+        const drawBubble = ({ who, when, text, url, filename, isCustomer }) => {
+          const maxW = BUBBLE_MAX_W;
+          const innerW = maxW - PAD_X * 2;
+
+          // Medir altura do texto principal
+          doc.font('Helvetica').fontSize(11);
+          const textH = text
+            ? doc.heightOfString(text, { width: innerW, align: 'left' })
+            : 0;
+
+          // Medir “Baixar …” se houver anexo
+          let attachH = 0;
+          const hasAttach = !!url;
+          if (hasAttach) {
+            doc.font('Helvetica').fontSize(10);
+            const attachLine = filename ? `📎 ${filename}` : '📎 Anexo';
+            attachH = doc.heightOfString(attachLine, { width: innerW })
+                    + doc.heightOfString('Baixar', { width: innerW }); // link na linha seguinte
+          }
+
+          // Medir cabeçalho (quem + hora)
+          doc.font('Helvetica').fontSize(8);
+          const headH = doc.heightOfString(`${who} — ${when}`, { width: innerW });
+
+          const bubbleH = headH + (text ? textH + 6 : 0) + (hasAttach ? attachH + 6 : 0) + PAD_Y * 2;
+
+          ensurePage(bubbleH);
+
+          const x = isCustomer
+            ? CONTENT_X + CONTENT_W - maxW  // direita
+            : CONTENT_X;                    // esquerda
+          const y = doc.y;
+
+          // Caixa
+          doc.save();
+          doc.fillColor(isCustomer ? palette.custBg : palette.agentBg)
+             .roundedRect(x, y, maxW, bubbleH, BUBBLE_R).fill();
+
+          // Cabeçalho
+          doc.fillColor(isCustomer ? '#bfdbfe' : palette.subText)
+             .font('Helvetica-Bold').fontSize(8)
+             .text(`${who} — ${when}`, x + PAD_X, y + PAD_Y, { width: innerW });
+
+          // Texto
+          if (text) {
+            doc.font('Helvetica').fontSize(11)
+               .fillColor(isCustomer ? palette.custText : palette.agentText)
+               .text(text, x + PAD_X, doc.y + 4, { width: innerW });
+          }
+
+          // Anexo, se houver
+          if (hasAttach) {
+            doc.moveDown(0.2);
+            doc.font('Helvetica').fontSize(10)
+               .fillColor(isCustomer ? '#dbeafe' : '#111827')
+               .text(filename ? `📎 ${filename}` : '📎 Anexo', x + PAD_X, doc.y, { width: innerW });
+
+            doc.fillColor(palette.link)
+               .text('Baixar', x + PAD_X, doc.y, { width: innerW, link: url, underline: true });
+          }
+
+          doc.restore();
+          doc.y = y + bubbleH + GAP_Y;
+        };
+
+        // Loop de mensagens (agrupa por dia)
+        let lastDayKey = '';
+        messages.forEach((m, idx) => {
+          const dir = String(m.direction || '').toLowerCase();
+          const isCustomer = !(dir === 'outgoing' || dir === 'system'); // incoming = cliente
+          const who = dir === 'outgoing' ? (m.assigned_to || 'Atendente')
+                    : dir === 'system'   ? 'Sistema'
+                    : (t.customer_name || 'Cliente');
+          const when = new Date(m.timestamp).toLocaleString('pt-BR');
+
+          // separador por dia
+          const dayKey = new Date(m.timestamp).toISOString().slice(0, 10);
+          if (dayKey !== lastDayKey) {
+            drawDayChip(dayKey);
+            lastDayKey = dayKey;
+          }
+
+          // conteúdo textual e anexo
+          const txt = parseText(m.content);
+          const { url, filename } = extractUrlAndFile(m.metadata);
+
+          drawBubble({ who, when, text: txt, url, filename, isCustomer });
+        });
+
         doc.end();
-      } catch (e) {
-        reject(e);
-      }
+      } catch (e) { reject(e); }
     });
   }
 
   const pdfBuffer = await buildPdf(ticket, msgs);
-
-  // 4) Desabilita compressão (evita bugs em alguns stacks)
-  // Se usar fastify-compress, você pode desabilitar assim:
-  if (reply.hasHeader && reply.removeHeader) {
-    reply.removeHeader('content-encoding'); // só por precaução
-  }
 
   return reply
     .type('application/pdf')
@@ -161,6 +303,7 @@ fastify.get('/history/:id/pdf', async (req, reply) => {
     .header('Content-Length', String(pdfBuffer.length))
     .send(pdfBuffer);
 });
+
 
 fastify.get('/history/:id', async (req, reply) => {
   const { id } = req.params || {};
