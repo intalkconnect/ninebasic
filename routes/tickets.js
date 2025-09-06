@@ -18,122 +18,137 @@ async function ticketsRoutes(fastify, options) {
     return /^[\w\d]+@[\w\d.-]+$/.test(user_id);
   }
 
-// GET /tickets/history/:id/pdf  -> attachment PDF do ticket
+// GET /tickets/history/:id/pdf  -> gera e baixa o PDF do ticket
 fastify.get('/history/:id/pdf', async (req, reply) => {
-  const { id } = req.params || {};
+  try {
+    const { id } = req.params || {};
 
-  // Reusa a query do /history/:id para puxar tudo que precisamos
-  const { rows } = await req.db.query(
-    `
-    SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
-           t.status, t.created_at, t.updated_at,
-           c.name AS customer_name, c.email AS customer_email, c.phone AS customer_phone
-    FROM tickets t
-    LEFT JOIN clientes c ON c.user_id = t.user_id
-    WHERE t.id::text = $1
-    `,
-    [String(id)]
-  );
-  if (!rows.length) return reply.code(404).send({ error: 'Ticket não encontrado' });
+    // ----- Interop CJS em ambiente ESM -----
+    const { createRequire } = await import('node:module');
+    const require = createRequire(import.meta.url);
+    const PDFDocument = require('pdfkit'); // agora funciona no ESM
 
-  const ticket = rows[0];
+    // ----- Ticket + dados do cliente -----
+    const tRes = await req.db.query(
+      `
+      SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
+             t.status, t.created_at, t.updated_at,
+             c.name  AS customer_name,
+             c.email AS customer_email,
+             c.phone AS customer_phone
+        FROM tickets t
+        LEFT JOIN clientes c ON c.user_id = t.user_id
+       WHERE t.id::text = $1
+      `,
+      [String(id)]
+    );
+    if (!tRes.rowCount) return reply.code(404).send({ error: 'Ticket não encontrado' });
 
-  // Mensagens para colocar no PDF (texto simples)
-  const mRes = await req.db.query(
-    `
-    SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
-           m.metadata, m.assigned_to
-    FROM messages m
-    WHERE m.ticket_number = $1
-    ORDER BY m."timestamp" ASC, m.id ASC
-    LIMIT 1000
-    `,
-    [String(ticket.ticket_number || '')]
-  );
-  const msgs = mRes.rows || [];
+    const ticket = tRes.rows[0];
 
-  const PDFDocument = require('pdfkit');
-  const doc = new PDFDocument({ size: 'A4', margin: 36 });
+    // ----- Mensagens do ticket -----
+    const mRes = await req.db.query(
+      `
+      SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
+             m.metadata, m.assigned_to
+        FROM messages m
+       WHERE m.ticket_number = $1
+       ORDER BY m."timestamp" ASC, m.id ASC
+       LIMIT 1000
+      `,
+      [String(ticket.ticket_number || '')]
+    );
+    const msgs = mRes.rows || [];
 
-  const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
-  const filename = `ticket-${num}.pdf`;
+    // ----- Cabeçalhos da resposta -----
+    const num = ticket.ticket_number ? String(ticket.ticket_number).padStart(6, '0') : '—';
+    const filename = `ticket-${num}.pdf`;
 
-  reply
-    .header('Content-Type', 'application/pdf')
-    .header('Content-Disposition', `attachment; filename="${filename}"`);
+    reply
+      .header('Content-Type', 'application/pdf')
+      .header('Content-Disposition', `attachment; filename="${filename}"`);
 
-  doc.pipe(reply.raw);
+    // ----- Geração do PDF -----
+    const doc = new PDFDocument({ size: 'A4', margin: 36 });
+    doc.pipe(reply.raw);
 
-  // Cabeçalho
-  doc.fontSize(18).font('Helvetica-Bold').text(`Ticket #${num}`);
-  doc.moveDown(0.3);
-  doc.fontSize(10).fillColor('#666')
-     .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
-  doc.moveDown(0.8);
+    // Título
+    doc.fontSize(18).font('Helvetica-Bold').text(`Ticket #${num}`);
+    doc.moveDown(0.3);
+    doc.fontSize(10).fillColor('#666')
+      .text(`Criado em: ${new Date(ticket.created_at).toLocaleString('pt-BR')}`);
+    doc.moveDown(0.8);
 
-  // Cliente
-  doc.fillColor('#000').font('Helvetica-Bold').text('Cliente', { continued:false });
-  doc.font('Helvetica').fontSize(11)
-     .text(ticket.customer_name || '—')
-     .text(ticket.customer_phone || ticket.user_id || '—')
-     .text(ticket.customer_email || '—');
-  doc.moveDown(0.6);
+    // Cliente
+    doc.fillColor('#000').font('Helvetica-Bold').text('Cliente');
+    doc.font('Helvetica').fontSize(11)
+      .text(ticket.customer_name || '—')
+      .text(ticket.customer_phone || ticket.user_id || '—')
+      .text(ticket.customer_email || '—');
+    doc.moveDown(0.6);
 
-  // Infos
-  doc.font('Helvetica-Bold').text('Fila');
-  doc.font('Helvetica').text(ticket.fila || '—');
-  doc.moveDown(0.3);
-  doc.font('Helvetica-Bold').text('Atendente');
-  doc.font('Helvetica').text(ticket.assigned_to || '—');
-  doc.moveDown(0.3);
-  doc.font('Helvetica-Bold').text('Status');
-  doc.font('Helvetica').text(ticket.status || '—');
-  doc.moveDown(0.3);
-  doc.font('Helvetica-Bold').text('Última atualização');
-  doc.font('Helvetica').text(new Date(ticket.updated_at).toLocaleString('pt-BR'));
-  doc.moveDown(0.8);
+    // Infos
+    const info = (label, value) => {
+      doc.font('Helvetica-Bold').text(label);
+      doc.font('Helvetica').text(value || '—');
+      doc.moveDown(0.3);
+    };
+    info('Fila', ticket.fila);
+    info('Atendente', ticket.assigned_to);
+    info('Status', ticket.status);
+    info('Última atualização', new Date(ticket.updated_at).toLocaleString('pt-BR'));
+    doc.moveDown(0.5);
 
-  // Mensagens (texto; anexos/medias ficam listados como URL se houver)
-  doc.font('Helvetica-Bold').fontSize(12).text('Conversa');
-  doc.moveDown(0.4);
-  doc.font('Helvetica').fontSize(10);
+    // Conversa
+    doc.font('Helvetica-Bold').fontSize(12).text('Conversa');
+    doc.moveDown(0.4);
+    doc.font('Helvetica').fontSize(10);
 
-  const parseText = (raw, meta) => {
-    try {
-      if (!raw) return '';
-      if (typeof raw === 'object') {
-        const t = raw.text || raw.body || raw.caption;
-        return t || JSON.stringify(raw);
-      }
-      const s = String(raw);
+    const parseText = (raw) => {
       try {
-        const o = JSON.parse(s);
-        return o.text || o.body || o.caption || s;
-      } catch {
-        return s;
-      }
-    } catch { return ''; }
-  };
+        if (!raw) return '';
+        if (typeof raw === 'object') {
+          const t = raw.text || raw.body || raw.caption;
+          return t || JSON.stringify(raw);
+        }
+        const s = String(raw);
+        try {
+          const o = JSON.parse(s);
+          return o?.text || o?.body || o?.caption || s;
+        } catch {
+          return s;
+        }
+      } catch { return ''; }
+    };
 
-  msgs.forEach((m, idx) => {
-    const dir = String(m.direction || '').toLowerCase();
-    const who = dir === 'outgoing' ? (m.assigned_to || 'Atendente') : (dir === 'system' ? 'Sistema' : 'Cliente');
-    const when = new Date(m.timestamp).toLocaleString('pt-BR');
-    const text = parseText(m.content, m.metadata);
+    msgs.forEach((m, idx) => {
+      const dir = String(m.direction || '').toLowerCase();
+      const who = dir === 'outgoing' ? (m.assigned_to || 'Atendente')
+                 : dir === 'system'   ? 'Sistema'
+                 : 'Cliente';
+      const when = new Date(m.timestamp).toLocaleString('pt-BR');
+      const text = parseText(m.content);
 
-    doc.font('Helvetica-Bold').text(`${who} — ${when}`);
-    doc.font('Helvetica').text(text || '[mensagem não textual]');
-    // se tiver alguma URL no metadata/content, lista
-    try {
-      const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata) : (m.metadata || {});
-      const url = meta.url || meta.file_url || meta.public_url || meta.download_url || null;
-      if (url) doc.fillColor('#2563eb').text(url).fillColor('#000');
-    } catch {}
-    if (idx < msgs.length - 1) doc.moveDown(0.6);
-  });
+      doc.font('Helvetica-Bold').text(`${who} — ${when}`);
+      doc.font('Helvetica').text(text || '[mensagem não textual]');
 
-  doc.end();
+      // Se houver URL em metadata, lista
+      try {
+        const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata) : (m.metadata || {});
+        const url = meta.url || meta.file_url || meta.public_url || meta.download_url || null;
+        if (url) doc.fillColor('#2563eb').text(url).fillColor('#000');
+      } catch {}
+
+      if (idx < msgs.length - 1) doc.moveDown(0.6);
+    });
+
+    doc.end(); // encerra o stream -> envia resposta
+  } catch (err) {
+    req.log.error({ err }, 'Erro ao gerar PDF');
+    if (!reply.sent) reply.code(500).send({ error: 'Erro ao gerar PDF' });
+  }
 });
+
 
 fastify.get('/history/:id', async (req, reply) => {
   const { id } = req.params || {};
