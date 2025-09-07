@@ -68,7 +68,7 @@ async function filaRoutes(fastify, options) {
       const { rows } = await req.db.query(
         `
         SELECT id, name, lastname, email, status
-        FROM atendentes
+        FROM users
         WHERE $1 = ANY(filas)
           AND status = 'online'
         ORDER BY name, lastname;
