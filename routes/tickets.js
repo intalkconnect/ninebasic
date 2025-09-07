@@ -747,67 +747,70 @@ async function ticketsRoutes(fastify, options) {
   });
 
   // POST /tickets/transferir → fecha atual e cria novo em outra fila
-  fastify.post('/transferir', async (req, reply) => {
-    const { from_user_id, to_fila, to_assigned_to, transferido_por } = req.body;
+  // POST /tickets/transferir → fecha atual e cria novo em outra fila
+fastify.post('/transferir', async (req, reply) => {
+  const { from_user_id, to_fila, to_assigned_to, transferido_por } = req.body;
 
-    if (!from_user_id || !to_fila || !transferido_por) {
-      return reply.code(400).send({ error: 'Campos obrigatórios: from_user_id, to_fila, transferido_por' });
-    }
+  if (!from_user_id || !to_fila || !transferido_por) {
+    return reply.code(400).send({ error: 'Campos obrigatórios: from_user_id, to_fila, transferido_por' });
+  }
 
-    const client = await req.db.connect();
-    try {
-      await client.query('BEGIN');
+  const client = req.db;                 // << já é o client conectado
+  let inTx = false;
 
-      const update = await client.query(
-        `UPDATE tickets
+  try {
+    await client.query('BEGIN');         // usa a MESMA conexão
+    inTx = true;
+
+    const update = await client.query(
+      `UPDATE tickets
          SET status = 'closed', updated_at = NOW()
-         WHERE user_id = $1 AND status = 'open'`,
-        [from_user_id]
-      );
-
-      if (update.rowCount === 0) {
-        await client.query('ROLLBACK');
-        return reply.code(404).send({ error: 'Ticket atual não encontrado ou já encerrado' });
-      }
-
-      const filaResult = await client.query(
-        `SELECT nome FROM filas WHERE nome = $1`,
-        [to_fila]
-      );
-
-      if (filaResult.rowCount === 0) {
-        await client.query('ROLLBACK');
-        return reply.code(400).send({ error: 'Fila destino não encontrada' });
-      }
-
-      const nomeDaFila = filaResult.rows[0].nome;
-
-      const result = await client.query(
-        `SELECT create_ticket($1, $2, $3) AS ticket_number`,
-        [from_user_id, nomeDaFila, to_assigned_to || null]
-      );
-
-      const novoTicket = await client.query(
-        `SELECT user_id, ticket_number, fila, assigned_to, status
-         FROM tickets
-         WHERE ticket_number = $1`,
-        [result.rows[0].ticket_number]
-      );
-
-      await client.query('COMMIT');
-      return reply.send({
-        sucesso: true,
-        novo_ticket: novoTicket.rows[0],
-      });
-
-    } catch (err) {
+       WHERE user_id = $1 AND status = 'open'`,
+      [from_user_id]
+    );
+    if (update.rowCount === 0) {
       await client.query('ROLLBACK');
-      fastify.log.error({ err, body: req.body }, 'Erro em POST /tickets/transferir');
-      return reply.code(500).send({ error: 'Erro ao transferir atendimento' });
-    } finally {
-      client.release();
+      return reply.code(404).send({ error: 'Ticket atual não encontrado ou já encerrado' });
     }
-  });
+
+    const filaResult = await client.query(
+      `SELECT nome FROM filas WHERE nome = $1`,
+      [to_fila]
+    );
+    if (filaResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return reply.code(400).send({ error: 'Fila destino não encontrada' });
+    }
+    const nomeDaFila = filaResult.rows[0].nome;
+
+    const rCreate = await client.query(
+      `SELECT create_ticket($1, $2, $3) AS ticket_number`,
+      [from_user_id, nomeDaFila, to_assigned_to || null]
+    );
+
+    const novoTicket = await client.query(
+      `SELECT user_id, ticket_number, fila, assigned_to, status
+         FROM tickets
+        WHERE ticket_number = $1`,
+      [rCreate.rows[0].ticket_number]
+    );
+
+    await client.query('COMMIT');
+    inTx = false;
+
+    return reply.code(201).send({
+      sucesso: true,
+      transferido_por,      // já que é obrigatório, devolvemos também
+      novo_ticket: novoTicket.rows[0],
+    });
+  } catch (err) {
+    if (inTx) { try { await client.query('ROLLBACK'); } catch {} }
+    fastify.log.error({ err, body: req.body }, 'Erro em POST /tickets/transferir');
+    return reply.code(500).send({ error: 'Erro ao transferir atendimento' });
+  }
+  // nada de client.release(); // << NÃO existe nesse client
+});
+
 
   // GET /tickets/history → lista de tickets fechados (com busca e período)
   fastify.get('/history', async (req, reply) => {
