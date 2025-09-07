@@ -25,6 +25,7 @@ export default async function analyticsRoutes(fastify, opts) {
     const { rows } = await req.db.query(`
       WITH base AS (
         SELECT
+          t.id::text      AS ticket_id,
           t.ticket_number,
           t.user_id,
           t.fila,
@@ -42,6 +43,7 @@ export default async function analyticsRoutes(fastify, opts) {
         c.name AS cliente,
         c.channel,
         COALESCE(a.name || ' ' || a.lastname, NULL) AS agente,
+        b.ticket_id,
         b.fila,
         b.assigned_to,
         b.ticket_number,
@@ -55,7 +57,8 @@ export default async function analyticsRoutes(fastify, opts) {
     `);
 
     const mapped = rows.map((r, i) => ({
-      id: i + 1,
+      id: i + 1,                
+      ticket_id: r.ticket_id,    
       ticket_number: r.ticket_number,
       cliente: r.cliente,
       canal: r.channel,
