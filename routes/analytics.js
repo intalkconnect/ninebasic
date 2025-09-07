@@ -44,6 +44,7 @@ export default async function analyticsRoutes(fastify, opts) {
         c.channel,
         COALESCE(a.name || ' ' || a.lastname, NULL) AS agente,
         b.ticket_id,
+        b.user_id,
         b.fila,
         b.assigned_to,
         b.ticket_number,
@@ -59,6 +60,7 @@ export default async function analyticsRoutes(fastify, opts) {
     const mapped = rows.map((r, i) => ({
       id: i + 1,                
       ticket_id: r.ticket_id,    
+      user_id: r.user_id, 
       ticket_number: r.ticket_number,
       cliente: r.cliente,
       canal: r.channel,
