@@ -813,77 +813,104 @@ fastify.post('/transferir', async (req, reply) => {
 
 
   // GET /tickets/history → lista de tickets fechados (com busca e período)
-  fastify.get('/history', async (req, reply) => {
-    const { q = '', page = 1, page_size = 10, from = '', to = '' } = req.query || {};
+fastify.get('/history', async (req, reply) => {
+  const { q = '', page = 1, page_size = 10, from = '', to = '' } = req.query || {};
 
-    const allowed = new Set([10, 20, 30, 40]);
-    const pageSize = allowed.has(Number(page_size)) ? Number(page_size) : 10;
-    const pageNum  = Math.max(1, Number(page) || 1);
-    const offset   = (pageNum - 1) * pageSize;
+  const allowed  = new Set([10, 20, 30, 40]);
+  const pageSize = allowed.has(Number(page_size)) ? Number(page_size) : 10;
+  const pageNum  = Math.max(1, Number(page) || 1);
+  const offset   = (pageNum - 1) * pageSize;
 
-    const where = [`status = 'closed'`];
-    const params = [];
+  // WHERE com alias 't' para tickets
+  const where  = [`t.status = 'closed'`];
+  const params = [];
 
-    if (q) {
-      params.push(`%${q}%`);
-      where.push(`(
-        LOWER(COALESCE(ticket_number::text,'')) LIKE LOWER($${params.length})
-        OR LOWER(COALESCE(user_id,''))          LIKE LOWER($${params.length})
-        OR LOWER(COALESCE(fila,''))             LIKE LOWER($${params.length})
-        OR LOWER(COALESCE(assigned_to,''))      LIKE LOWER($${params.length})
-      )`);
-    }
+  if (q) {
+    params.push(`%${q}%`);
+    const qi = params.length;
+    where.push(`(
+      LOWER(COALESCE(t.ticket_number::text,'')) LIKE LOWER($${qi})
+      OR LOWER(COALESCE(t.user_id::text,''))    LIKE LOWER($${qi})
+      OR LOWER(COALESCE(t.fila,''))             LIKE LOWER($${qi})
+      OR LOWER(COALESCE(t.assigned_to,''))      LIKE LOWER($${qi})
+      OR LOWER(COALESCE(c."name",''))           LIKE LOWER($${qi})  -- nome do cliente
+      OR LOWER(COALESCE(c.phone,''))            LIKE LOWER($${qi})  -- telefone do cliente (opcional)
+      OR LOWER(COALESCE(ua.name,''))            LIKE LOWER($${qi})  -- nome do atendente
+      OR LOWER(COALESCE(ua.lastname,''))        LIKE LOWER($${qi})  -- sobrenome do atendente
+      OR LOWER(COALESCE((ua.name || ' ' || ua.lastname),'')) LIKE LOWER($${qi})
+    )`);
+  }
 
-    let fromIdx, toIdx;
-    if (from) {
-      params.push(from + ' 00:00:00');
-      fromIdx = params.length;
-      where.push(`updated_at >= $${fromIdx}`);
-    }
-    if (to) {
-      params.push(to + ' 23:59:59.999');
-      toIdx = params.length;
-      where.push(`updated_at <= $${toIdx}`);
-    }
+  if (from) {
+    params.push(from + ' 00:00:00');
+    where.push(`t.updated_at >= $${params.length}`);
+  }
+  if (to) {
+    params.push(to + ' 23:59:59.999');
+    where.push(`t.updated_at <= $${params.length}`);
+  }
 
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    const sqlCount = `SELECT COUNT(*)::bigint AS total FROM tickets ${whereSql}`;
-    const sqlList  = `
-      SELECT
-        id,
-        ticket_number,
-        user_id,
-        fila,
-        assigned_to,
-        created_at,
-        updated_at
-      FROM tickets
-      ${whereSql}
-      ORDER BY updated_at DESC NULLS LAST, id DESC
-      LIMIT $${params.length + 1}
-      OFFSET $${params.length + 2}
-    `;
+  // JOINs:
+  //  c  -> clientes (por id::text OU por clientes.user_id)
+  //  ua -> users (atendentes) por e-mail em assigned_to
+  const joinSql = `
+    LEFT JOIN clientes c ON (c.id::text = t.user_id OR c.user_id = t.user_id)
+    LEFT JOIN users    ua ON ua.email   = t.assigned_to
+  `;
 
-    try {
-      const rCount = await req.db.query(sqlCount, params);
-      const total = Number(rCount.rows?.[0]?.total || 0);
+  // COUNT precisa dos mesmos JOINs para a busca por nome funcionar no total
+  const sqlCount = `
+    SELECT COUNT(*)::bigint AS total
+    FROM tickets t
+    ${joinSql}
+    ${whereSql}
+  `;
 
-      const rList = await req.db.query(sqlList, [...params, pageSize, offset]);
-      const data = rList.rows || [];
+  // Na lista, devolvemos "user_id" já como NOME do cliente
+  // e "assigned_to" já como NOME do atendente
+  const sqlList = `
+    SELECT
+      t.id,
+      t.ticket_number,
+      COALESCE(NULLIF(c."name", ''), c.phone, t.user_id) AS user_id,  -- nome do cliente no lugar do id
+      t.fila,
+      COALESCE(
+        NULLIF(TRIM(ua.name || ' ' || ua.lastname), ''),
+        ua.name,
+        t.assigned_to
+      ) AS assigned_to,                                               -- nome do atendente no lugar do e-mail
+      t.created_at,
+      t.updated_at
+    FROM tickets t
+    ${joinSql}
+    ${whereSql}
+    ORDER BY t.updated_at DESC NULLS LAST, t.id DESC
+    LIMIT  $${params.length + 1}
+    OFFSET $${params.length + 2}
+  `;
 
-      return reply.send({
-        data,
-        page: pageNum,
-        page_size: pageSize,
-        total,
-        total_pages: Math.max(1, Math.ceil(total / pageSize)),
-      });
-    } catch (err) {
-      req.log.error('Erro em GET /tickets/history:', err);
-      return reply.code(500).send({ error: 'Erro interno ao listar histórico' });
-    }
-  });
+  try {
+    const rCount = await req.db.query(sqlCount, params);
+    const total  = Number(rCount.rows?.[0]?.total || 0);
+
+    const rList  = await req.db.query(sqlList, [...params, pageSize, offset]);
+    const data   = rList.rows || [];
+
+    return reply.send({
+      data,
+      page: pageNum,
+      page_size: pageSize,
+      total,
+      total_pages: Math.max(1, Math.ceil(total / pageSize)),
+    });
+  } catch (err) {
+    req.log.error('Erro em GET /tickets/history:', err);
+    return reply.code(500).send({ error: 'Erro interno ao listar histórico' });
+  }
+});
+
 }
 
 export default ticketsRoutes;
