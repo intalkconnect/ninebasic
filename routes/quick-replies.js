@@ -1,5 +1,5 @@
 // routes/quickReplies.js
-export default async function quickReplysRoutes(fastify) {
+export default async function quickRepliesRoutes(fastify) {
   // ➕ Criar nova resposta rápida
   fastify.post('/', async (req, reply) => {
     const { title, content } = req.body || {};
