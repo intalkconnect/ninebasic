@@ -1,5 +1,5 @@
 // routes/filas.js
-async function filaRoutes(fastify, options) {
+async function queuesRoutes(fastify, options) {
   // Helpers --------------------------------------------------------------
 
   function normalizeHexColor(input) {
@@ -61,8 +61,8 @@ async function filaRoutes(fastify, options) {
   });
 
   // 👥 Atendentes online da fila
-  fastify.get('/atendentes/:fila_nome', async (req, reply) => {
-    const { fila_nome } = req.params;
+  fastify.get('/agents/:queue_name', async (req, reply) => {
+    const { queue_name } = req.params;
 
     try {
       const { rows } = await req.db.query(
@@ -73,7 +73,7 @@ async function filaRoutes(fastify, options) {
           AND status = 'online'
         ORDER BY name, lastname;
         `,
-        [fila_nome]
+        [queue_name]
       );
 
       if (rows.length === 0) {
@@ -104,7 +104,7 @@ async function filaRoutes(fastify, options) {
   });
 
   // 🔄 Definir permissão de transferência
-  fastify.post('/fila-permissoes', async (req, reply) => {
+  fastify.post('/queues-permission', async (req, reply) => {
     const { usuario_email, fila_id, pode_transferir } = req.body || {};
     if (!usuario_email || !fila_id)
       return reply.code(400).send({ error: 'usuario_email e fila_id são obrigatórios' });
@@ -128,7 +128,7 @@ async function filaRoutes(fastify, options) {
   });
 
   // 👀 Obter filas que o usuário pode transferir
-  fastify.get('/fila-permissoes/:email', async (req, reply) => {
+  fastify.get('/queues-permission/:email', async (req, reply) => {
     const { email } = req.params;
 
     try {
@@ -150,4 +150,4 @@ async function filaRoutes(fastify, options) {
   });
 }
 
-export default filaRoutes;
+export default queuesRoutes;
