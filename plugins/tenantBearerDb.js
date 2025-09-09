@@ -8,57 +8,70 @@ function parseBearer(headers = {}) {
   return m ? m[1] : null;
 }
 
+// Formato: "<uuid>.<hexsecret>"
+function splitIdSecret(raw) {
+  const m = /^(?<id>[0-9a-fA-F-]{36})\.(?<secret>[0-9a-fA-F]{64})$/.exec(raw || '');
+  return m?.groups || null;
+}
+
 export function requireTenantBearerDb() {
   return async function (req, reply) {
     try {
-      if (req.method === 'OPTIONS') return; // libera preflight
+      if (req.method === 'OPTIONS') return; // preflight CORS
 
-      // tenant.js já deve ter resolvido o subdomínio e, idealmente, o id
-      const tenantId = req.tenant?.id;
+      // tenant.js deve ter resolvido pelo host:
       const subdomain = req.tenant?.subdomain;
+      let tenantId = req.tenant?.id;
 
-      if (!tenantId && !subdomain) {
+      if (!subdomain && !tenantId) {
         return reply.code(400).send({ error: 'missing_tenant' });
       }
 
-      const rawToken = parseBearer(req.headers);
-      if (!rawToken) {
-        return reply.code(401).send({ error: 'missing_token', message: 'Use Authorization: Bearer <uuid>' });
+      const raw = parseBearer(req.headers);
+      if (!raw) {
+        return reply.code(401).send({ error: 'missing_token', message: 'Use Authorization: Bearer <id>.<secret>' });
       }
 
-      // garante tenantId (se o plugin não tiver preenchido)
-      let tId = tenantId;
-      if (!tId) {
-        const { rows } = await pool.query(
+      const parts = splitIdSecret(raw);
+      if (!parts) {
+        return reply.code(401).send({ error: 'bad_token_format' });
+      }
+
+      const { id: tokenId, secret: presentedSecret } = parts;
+
+      // garante tenantId (1 query) caso o plugin não tenha preenchido
+      if (!tenantId) {
+        const { rows: trows } = await pool.query(
           'SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1',
           [subdomain]
         );
-        tId = rows[0]?.id;
-        if (!tId) return reply.code(404).send({ error: 'tenant_not_found' });
-        req.tenant.id = tId; // cacheia
+        tenantId = trows[0]?.id;
+        if (!tenantId) return reply.code(404).send({ error: 'tenant_not_found' });
+        req.tenant.id = tenantId; // guarda pra frente
       }
 
-      // busca tokens ativos do tenant (sem scopes/expiração)
-      const { rows: toks } = await pool.query(
-        `SELECT id, token_hash, is_default
+      // busca APENAS o token pelo id, vinculado ao tenant
+      const { rows } = await pool.query(
+        `SELECT id, secret_hash, is_default, status
            FROM public.tenant_tokens
-          WHERE tenant_id = $1 AND status = 'active'`,
-        [tId]
+          WHERE id = $1 AND tenant_id = $2
+          LIMIT 1`,
+        [tokenId, tenantId]
       );
 
-      let rec = null;
-      for (const r of toks) {
-        if (await bcrypt.compare(rawToken, r.token_hash)) { rec = r; break; }
-      }
-
+      const rec = rows[0];
       if (!rec) return reply.code(401).send({ error: 'invalid_token' });
+      if (rec.status !== 'active') return reply.code(401).send({ error: 'token_revoked' });
 
-      // contexto útil ao handler
+      const ok = await bcrypt.compare(presentedSecret, rec.secret_hash);
+      if (!ok) return reply.code(401).send({ error: 'invalid_token' });
+
+      // contexto útil
       req.tokenId = rec.id;
       req.tokenIsDefault = !!rec.is_default;
 
-      // marca uso (assíncrono)
-      pool.query(`UPDATE public.tenant_tokens SET last_used_at = now() WHERE id = $1`, [rec.id]).catch(() => {});
+      // marca uso (não bloqueia)
+      pool.query('SELECT public.touch_token_usage($1)', [rec.id]).catch(() => {});
     } catch (err) {
       req.log?.error({ err }, 'tenantBearerDb error');
       return reply.code(500).send({ error: 'auth_error', detail: err?.message || String(err) });
