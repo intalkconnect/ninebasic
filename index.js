@@ -18,7 +18,7 @@ import filaRoutes        from './routes/filas.js';
 import atendentesRoutes  from './routes/atendentes.js';
 import quickRepliesRoutes from './routes/quickReplies.js';
 import analyticsRoutes   from './routes/analytics.js';
-import pausasRoutes      from './routes/pause.js';
+import breaksRoutes      from './routes/breaks.js';
 import queueHoursRoutes  from './routes/queueHoursRoutes.js';
 import templatesRoutes   from './routes/templates.js';
 import usersRoutes       from './routes/users.js';
@@ -63,7 +63,7 @@ async function buildServer() {
     api.register(atendentesRoutes,  { prefix: '/api/v1/agents' });
     api.register(quickRepliesRoutes,{ prefix: '/api/v1/quick-replies' });
     api.register(analyticsRoutes,   { prefix: '/api/v1/analytics' });
-    api.register(pausasRoutes,      { prefix: '/api/v1/breaks' });
+    api.register(breaksRoutes,      { prefix: '/api/v1/breaks' });
     api.register(queueHoursRoutes,  { prefix: '/api/v1/queue-hours' });
     api.register(templatesRoutes,   { prefix: '/api/v1/templates' });
     api.register(usersRoutes,       { prefix: '/api/v1/users' });
@@ -94,4 +94,5 @@ async function start() {
 }
 
 start();
+
 
