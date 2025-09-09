@@ -2,7 +2,7 @@
 import { minioClient } from '../services/minioClient.js'
 import { randomUUID } from 'crypto'
 
-export default async function uploadRoutes(fastify) {
+export default async function storageRoutes(fastify) {
   fastify.get('/presigned-url', async (req, reply) => {
     const { filename, mimetype } = req.query
 
