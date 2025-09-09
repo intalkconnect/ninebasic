@@ -7,7 +7,7 @@ import tenantPlugin from './plugins/tenant.js';
 import { requireTenantBearerDb } from './plugins/tenantBearerDb.js';
 
 // rotas...
-import messageRoutes     from './routes/messages.js';
+import messagesRoutes     from './routes/messages.js';
 import flowsRoutes        from './routes/flows.js';
 import storageRoutes      from './routes/storage.js';
 import customersRoutes    from './routes/customers.js';
@@ -15,8 +15,8 @@ import settingsRoutes    from './routes/settings.js';
 import ticketsRoutes     from './routes/tickets.js';
 import conversationsRoutes       from './routes/conversations.js';
 import queuesRoutes        from './routes/queues.js';
-import atendentesRoutes  from './routes/atendentes.js';
-import quickRepliesRoutes from './routes/quickReplies.js';
+import agentsRoutes  from './routes/agents.js';
+import quickRepliesRoutes from './routes/quick-Replies.js';
 import analyticsRoutes   from './routes/analytics.js';
 import breaksRoutes      from './routes/breaks.js';
 import queueHoursRoutes  from './routes/queueHoursRoutes.js';
@@ -60,7 +60,7 @@ async function buildServer() {
     api.register(settingsRoutes,    { prefix: '/api/v1/settings' });
     api.register(ticketsRoutes,     { prefix: '/api/v1/tickets' });
     api.register(queuesRoutes,        { prefix: '/api/v1/queues' });
-    api.register(atendentesRoutes,  { prefix: '/api/v1/agents' });
+    api.register(agentsRoutes,  { prefix: '/api/v1/agents' });
     api.register(quickRepliesRoutes,{ prefix: '/api/v1/quick-replies' });
     api.register(analyticsRoutes,   { prefix: '/api/v1/analytics' });
     api.register(breaksRoutes,      { prefix: '/api/v1/breaks' });
@@ -94,6 +94,7 @@ async function start() {
 }
 
 start();
+
 
 
 
