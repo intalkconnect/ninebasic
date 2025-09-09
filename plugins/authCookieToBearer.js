@@ -1,24 +1,16 @@
-// plugins/authCookieToBearer.js (para Fastify 4)
+// plugins/authCookieToDefault.js
 import cookie from 'cookie';
 
-export default async function authCookieToBearer(fastify) {
-  fastify.addHook('onRequest', async (req, reply) => {
-    if (!req.cookies) {
-      req.cookies = cookie.parse(req.headers.cookie || '');
-    }
-    // já tem Authorization? deixa
+export default async function authCookieToDefault(fastify) {
+  fastify.addHook('onRequest', async (req) => {
+    if (!req.cookies) req.cookies = cookie.parse(req.headers.cookie || '');
     if (req.headers.authorization || req.raw.headers['authorization']) return;
 
-    const raw = req.cookies?.authToken; // mesmo nome setado no Auth
-    if (!raw) return;
+    const j = req.cookies?.defaultAssert;
+    if (!j) return;
 
-    // Validação leve de formato: "<uuid>.<64 hex>"
-    const okFormat = /^[0-9a-fA-F-]{36}\.[0-9a-fA-F]{64}$/.test(raw);
-    if (!okFormat) return; // deixa o guard responder 401
-
-    // injeta o Bearer nos DOIS lugares
-    const v = `Bearer ${raw}`;
+    const v = `Default ${j}`;
     req.headers.authorization = v;
-    req.raw.headers['authorization'] = v;
+    req.raw.headers['authorization'] = v; // Fastify 4: injete nos dois
   });
 }
