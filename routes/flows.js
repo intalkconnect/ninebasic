@@ -1,4 +1,4 @@
-export default async function flowRoutes(fastify, opts) {
+export default async function flowsRoutes(fastify, opts) {
 fastify.post('/publish', async (req, reply) => {
   const { data } = req.body;
 
