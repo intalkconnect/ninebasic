@@ -53,27 +53,27 @@ async function buildServer() {
 
     // registre TODAS as rotas que precisam de token DENTRO deste escopo:
     api.register(messageRoutes,     { prefix: '/api/v1/messages' });
-    api.register(chatsRoutes,       { prefix: '/api/v1/chats' });
-    api.register(flowRoutes,        { prefix: '/api/v1/flow' });
-    api.register(uploadRoutes,      { prefix: '/api/v1/bucket' });
-    api.register(clientesRoutes,    { prefix: '/api/v1/clientes' });
+    api.register(chatsRoutes,       { prefix: '/api/v1/conversations' });
+    api.register(flowRoutes,        { prefix: '/api/v1/flows' });
+    api.register(uploadRoutes,      { prefix: '/api/v1/storage' });
+    api.register(clientesRoutes,    { prefix: '/api/v1/customers' });
     api.register(settingsRoutes,    { prefix: '/api/v1/settings' });
     api.register(ticketsRoutes,     { prefix: '/api/v1/tickets' });
-    api.register(filaRoutes,        { prefix: '/api/v1/filas' });
-    api.register(atendentesRoutes,  { prefix: '/api/v1/atendentes' });
-    api.register(quickRepliesRoutes,{ prefix: '/api/v1/quickReplies' });
+    api.register(filaRoutes,        { prefix: '/api/v1/queues' });
+    api.register(atendentesRoutes,  { prefix: '/api/v1/agents' });
+    api.register(quickRepliesRoutes,{ prefix: '/api/v1/quick-replies' });
     api.register(analyticsRoutes,   { prefix: '/api/v1/analytics' });
-    api.register(pausasRoutes,      { prefix: '/api/v1/pausas' });
-    api.register(queueHoursRoutes,  { prefix: '/api/v1/queueHours' });
+    api.register(pausasRoutes,      { prefix: '/api/v1/breaks' });
+    api.register(queueHoursRoutes,  { prefix: '/api/v1/queue-hours' });
     api.register(templatesRoutes,   { prefix: '/api/v1/templates' });
     api.register(usersRoutes,       { prefix: '/api/v1/users' });
     api.register(campaignsRoutes,   { prefix: '/api/v1/campaigns' });
     api.register(billingRoutes,     { prefix: '/api/v1/billing' });
 
     // novos, também protegidos:
-    api.register(waProfileRoutes, { prefix: '/api/v1/waProfile' });
-    api.register(waEmbeddedRoutes,{ prefix: '/api/v1/wa' });
-    api.register(telegramRoutes,  { prefix: '/api/v1/tg' });
+    api.register(waProfileRoutes, { prefix: '/api/v1/whatsapp/profile' });
+    api.register(waEmbeddedRoutes,{ prefix: '/api/v1/whatsapp/embedded' });
+    api.register(telegramRoutes,  { prefix: '/api/v1/telegram' });
   });
 
   // se tiver rotas públicas além de /healthz, registre FORA do escopo acima
@@ -94,3 +94,4 @@ async function start() {
 }
 
 start();
+
