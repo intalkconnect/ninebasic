@@ -8,7 +8,7 @@
   "dependencies": {
     "@fastify/cors": "^8.2.1",
     "@fastify/multipart": "^7.6.0",
-    "@fastify/cookie": "^11.0.2",
+    "@fastify/cookie": "^9.4.0",
     "amqplib": "^0.10.3",
     "dotenv": "^16.1.4",
     "minio": "^8.0.5",
@@ -23,6 +23,7 @@
     "pdfkit": "^0.17.2"
   }
 }
+
 
 
 
