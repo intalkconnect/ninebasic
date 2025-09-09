@@ -29,6 +29,8 @@ import waProfileRoutes from './routes/waProfile.js';
 import waEmbeddedRoutes from './routes/waEmbedded.js';
 import telegramRoutes from './routes/telegram.js';
 
+import { requireTenantBearerDb } from '../plugins/tenantBearerDb.js';
+
 dotenv.config();
 
 async function buildServer() {
@@ -45,29 +47,29 @@ async function buildServer() {
 
   await fastify.register(tenantPlugin);
 
-  fastify.register(messageRoutes,     { prefix: '/api/v1/messages' });
-  fastify.register(chatsRoutes,       { prefix: '/api/v1/chats' });
-  fastify.register(flowRoutes,        { prefix: '/api/v1/flow' });
-  fastify.register(uploadRoutes,      { prefix: '/api/v1/bucket' });
-  fastify.register(clientesRoutes,    { prefix: '/api/v1/clientes' });
-  fastify.register(settingsRoutes,    { prefix: '/api/v1/settings' });
-  fastify.register(ticketsRoutes,     { prefix: '/api/v1/tickets' });
-  fastify.register(filaRoutes,        { prefix: '/api/v1/filas' });
-  fastify.register(atendentesRoutes,  { prefix: '/api/v1/atendentes' });
-  fastify.register(quickRepliesRoutes,{ prefix: '/api/v1/quickReplies' });
-  fastify.register(analyticsRoutes,   { prefix: '/api/v1/analytics' });
-  fastify.register(pausasRoutes,      { prefix: '/api/v1/pausas' });
-  fastify.register(queueHoursRoutes,      { prefix: '/api/v1/queueHours' });
-  fastify.register(templatesRoutes,      { prefix: '/api/v1/templates' });
-  fastify.register(usersRoutes,      { prefix: '/api/v1/users' });
-  fastify.register(campaignsRoutes,      { prefix: '/api/v1/campaigns' });
-  fastify.register(billingRoutes,      { prefix: '/api/v1/billing' });
+  fastify.register(messageRoutes,     { prefix: '/api/v1/messages', preHandler: requireTenantBearerDb() });
+  fastify.register(chatsRoutes,       { prefix: '/api/v1/chats', preHandler: requireTenantBearerDb() });
+  fastify.register(flowRoutes,        { prefix: '/api/v1/flow', preHandler: requireTenantBearerDb() });
+  fastify.register(uploadRoutes,      { prefix: '/api/v1/bucket', preHandler: requireTenantBearerDb() });
+  fastify.register(clientesRoutes,    { prefix: '/api/v1/clientes', preHandler: requireTenantBearerDb() });
+  fastify.register(settingsRoutes,    { prefix: '/api/v1/settings', preHandler: requireTenantBearerDb() });
+  fastify.register(ticketsRoutes,     { prefix: '/api/v1/tickets', preHandler: requireTenantBearerDb() });
+  fastify.register(filaRoutes,        { prefix: '/api/v1/filas', preHandler: requireTenantBearerDb() });
+  fastify.register(atendentesRoutes,  { prefix: '/api/v1/atendentes', preHandler: requireTenantBearerDb() });
+  fastify.register(quickRepliesRoutes,{ prefix: '/api/v1/quickReplies', preHandler: requireTenantBearerDb() });
+  fastify.register(analyticsRoutes,   { prefix: '/api/v1/analytics', preHandler: requireTenantBearerDb() });
+  fastify.register(pausasRoutes,      { prefix: '/api/v1/pausas', preHandler: requireTenantBearerDb() });
+  fastify.register(queueHoursRoutes,      { prefix: '/api/v1/queueHours', preHandler: requireTenantBearerDb() });
+  fastify.register(templatesRoutes,      { prefix: '/api/v1/templates', preHandler: requireTenantBearerDb() });
+  fastify.register(usersRoutes,      { prefix: '/api/v1/users', preHandler: requireTenantBearerDb() });
+  fastify.register(campaignsRoutes,      { prefix: '/api/v1/campaigns', preHandler: requireTenantBearerDb() });
+  fastify.register(billingRoutes,      { prefix: '/api/v1/billing', preHandler: requireTenantBearerDb() });
   
 
   // 👉 NOVO: Embedded Signup (prefixo próprio)
-  fastify.register(waProfileRoutes, { prefix: '/api/v1/waProfile' });
-  fastify.register(waEmbeddedRoutes,  { prefix: '/api/v1/wa' });
-  fastify.register(telegramRoutes,  { prefix: '/api/v1/tg' });
+  fastify.register(waProfileRoutes, { prefix: '/api/v1/waProfile', preHandler: requireTenantBearerDb() });
+  fastify.register(waEmbeddedRoutes,  { prefix: '/api/v1/wa', preHandler: requireTenantBearerDb() });
+  fastify.register(telegramRoutes,  { prefix: '/api/v1/tg', preHandler: requireTenantBearerDb() });
 
   return fastify;
 }
@@ -87,6 +89,7 @@ async function start() {
 }
 
 start();
+
 
 
 
