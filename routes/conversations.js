@@ -1,6 +1,6 @@
 
 // routes/chatsRoutes.js
-async function chatsRoutes(fastify, options) {
+async function conversationsRoutes(fastify, options) {
   fastify.get('/', async (req, reply) => {
     const { assigned_to, filas } = req.query;
 
@@ -139,4 +139,4 @@ ORDER BY t.created_at DESC;
   
 }
 
-export default chatsRoutes;
+export default conversationsRoutes;
