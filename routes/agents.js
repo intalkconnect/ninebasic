@@ -154,7 +154,7 @@ async function atendentesRoutes(fastify, _options) {
 
   // ⏸️ Pausar atendimento
  
-  fastify.put('/pause/:email', async (req, reply) => {
+  fastify.put('/breaks/:email', async (req, reply) => {
   const { email } = req.params;
   const { reason_id, reason } = req.body || {};
   if (!email) return reply.code(400).send({ error: 'email é obrigatório' });
