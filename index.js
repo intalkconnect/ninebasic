@@ -5,6 +5,8 @@ import multipart from '@fastify/multipart';
 import dotenv from 'dotenv';
 import tenantPlugin from './plugins/tenant.js';
 import { requireTenantBearerDb } from './plugins/tenantBearerDb.js';
+import cookie from '@fastify/cookie';
+import authCookieToBearer from './plugins/authCookieToBearer.js';
 
 // rotas...
 import messagesRoutes     from './routes/messages.js';
@@ -41,6 +43,10 @@ async function buildServer() {
   });
 
   await fastify.register(multipart);
+
+ await fastify.register(cookie, { secret: process.env.COOKIE_SECRET, hook: 'onRequest' });
+
+ await fastify.register(authCookieToBearer);
 
   fastify.get('/healthz', async () => ({ ok: true }));
 
@@ -94,6 +100,7 @@ async function start() {
 }
 
 start();
+
 
 
 
