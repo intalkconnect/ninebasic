@@ -52,7 +52,7 @@ async function buildServer() {
     api.addHook('preHandler', requireTenantBearerDb());
 
     // registre TODAS as rotas que precisam de token DENTRO deste escopo:
-    api.register(messageRoutes,     { prefix: '/api/v1/messages' });
+    api.register(messagesRoutes,     { prefix: '/api/v1/messages' });
     api.register(conversationsRoutes,       { prefix: '/api/v1/conversations' });
     api.register(flowsRoutes,        { prefix: '/api/v1/flows' });
     api.register(storageRoutes,      { prefix: '/api/v1/storage' });
@@ -94,6 +94,7 @@ async function start() {
 }
 
 start();
+
 
 
 
