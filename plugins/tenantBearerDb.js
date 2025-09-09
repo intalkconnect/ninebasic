@@ -23,7 +23,7 @@ function splitPresentedToken(raw) {
 
 /**
  * Resolve o subdomínio do tenant a partir do request.
- * Você pode padronizar por header `x-tenant` OU query `?subdomain=`.
+ * Padrão: header `x-tenant` OU query `?subdomain=` OU params/body.
  */
 function resolveSubdomain(req) {
   return (
@@ -37,16 +37,20 @@ function resolveSubdomain(req) {
 
 /**
  * Guard de Bearer por tenant (Fastify preHandler).
- * - Valida o "ntk_<id>.<secret>" contra public.tenant_tokens
- * - Exige também o subdomínio do tenant (x-tenant ou ?subdomain=)
+ * - Valida "ntk_<id>.<secret>" em public.tenant_tokens
+ * - Exige também o subdomínio do tenant
  * - Opcionalmente checa escopos (CSV em tenant_tokens.scopes)
  *
  * Uso:
- * fastify.register(minhasRotas, { prefix: '/api/v1/x', preHandler: requireTenantBearerDb(['scope:a']) })
+ *   api.addHook('preHandler', requireTenantBearerDb())
+ *   // ou: api.addHook('preHandler', requireTenantBearerDb(['scope:a']))
  */
 export function requireTenantBearerDb(requiredScopes = []) {
   return async function (req, reply) {
     try {
+      // ✅ Libera preflight CORS
+      if (req.method === 'OPTIONS') return;
+
       // 1) Tenant (subdomain)
       const subdomain = resolveSubdomain(req);
       if (!subdomain) {
@@ -56,7 +60,9 @@ export function requireTenantBearerDb(requiredScopes = []) {
       // 2) Bearer
       const raw = parseBearer(req.headers);
       if (!raw) {
-        return reply.code(401).send({ error: 'missing_token', message: 'Use Authorization: Bearer ntk_<id>.<secret>' });
+        return reply
+          .code(401)
+          .send({ error: 'missing_token', message: 'Use Authorization: Bearer ntk_<id>.<secret>' });
       }
 
       const parts = splitPresentedToken(raw);
@@ -109,7 +115,7 @@ export function requireTenantBearerDb(requiredScopes = []) {
         const got = new Set(
           String(rec.scopes || '')
             .split(',')
-            .map(s => s.trim())
+            .map((s) => s.trim())
             .filter(Boolean)
         );
         for (const s of requiredScopes) {
@@ -128,13 +134,14 @@ export function requireTenantBearerDb(requiredScopes = []) {
 
       // 7) Marca last_used_at (não bloqueia a resposta)
       pool
-        .query(`UPDATE public.tenant_tokens SET last_used_at = NOW() WHERE tenant_id = $1 AND id = $2`, [
-          rec.tenant_id,
-          rec.token_id,
-        ])
+        .query(
+          `UPDATE public.tenant_tokens SET last_used_at = NOW() WHERE tenant_id = $1 AND id = $2`,
+          [rec.tenant_id, rec.token_id]
+        )
         .catch(() => {});
 
       // segue para o handler
+      return;
     } catch (err) {
       req.log?.error({ err }, 'tenantBearerDb error');
       return reply.code(500).send({ error: 'auth_error', detail: err?.message || String(err) });
