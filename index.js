@@ -29,7 +29,7 @@ import waProfileRoutes from './routes/waProfile.js';
 import waEmbeddedRoutes from './routes/waEmbedded.js';
 import telegramRoutes from './routes/telegram.js';
 
-import { requireTenantBearerDb } from '../plugins/tenantBearerDb.js';
+import { requireTenantBearerDb } from './plugins/tenantBearerDb.js';
 
 dotenv.config();
 
@@ -89,6 +89,7 @@ async function start() {
 }
 
 start();
+
 
 
 
