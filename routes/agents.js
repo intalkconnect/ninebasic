@@ -1,5 +1,5 @@
 // routes/atendentes.js
-async function atendentesRoutes(fastify, _options) {
+async function agentsRoutes(fastify, _options) {
   // ------------ Rotas principais ------------
   
   // 🔄 Listar todos os atendentes
@@ -323,4 +323,4 @@ fastify.put('/resume/:email', async (req, reply) => {
   
 }
 
-export default atendentesRoutes;
+export default agentsRoutes;
