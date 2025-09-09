@@ -65,7 +65,7 @@ async function buildServer() {
   
 
   // 👉 NOVO: Embedded Signup (prefixo próprio)
-  fastify.register(waProfileRoutes, { prefix: '/api/v1/wa/profile' });
+  fastify.register(waProfileRoutes, { prefix: '/api/v1/waProfile' });
   fastify.register(waEmbeddedRoutes,  { prefix: '/api/v1/wa' });
   fastify.register(telegramRoutes,  { prefix: '/api/v1/tg' });
 
@@ -87,6 +87,7 @@ async function start() {
 }
 
 start();
+
 
 
 
