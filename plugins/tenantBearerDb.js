@@ -1,4 +1,4 @@
-import bcrypt from 'bcrypt';
+import bcrypt from 'bcryptjs';
 import db from '../services/db.js';
 
 function parseBearer(headers) {
