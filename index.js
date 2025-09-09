@@ -16,7 +16,7 @@ import ticketsRoutes     from './routes/tickets.js';
 import conversationsRoutes       from './routes/conversations.js';
 import queuesRoutes        from './routes/queues.js';
 import agentsRoutes  from './routes/agents.js';
-import quickRepliesRoutes from './routes/quick-Replies.js';
+import quickRepliesRoutes from './routes/quickReplies.js';
 import analyticsRoutes   from './routes/analytics.js';
 import breaksRoutes      from './routes/breaks.js';
 import queueHoursRoutes  from './routes/queueHoursRoutes.js';
@@ -94,6 +94,7 @@ async function start() {
 }
 
 start();
+
 
 
 
