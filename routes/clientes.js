@@ -2,7 +2,7 @@ function isValidUserId(userId) {
   return /^[^@]+@[^@]+\.[^@]+$/.test(userId);
 }
 
-async function clientesRoutes(fastify, options) {
+async function customersRoutes(fastify, options) {
 
   // GET /clientes?page=&page_size=&q=
   fastify.get('/', async (req, reply) => {
@@ -89,7 +89,7 @@ async function clientesRoutes(fastify, options) {
     return reply.code(500).send({ 
       error: 'Erro interno',
       user_id,
-      ...(process.env.NODE_ENV === 'development' && { details: error.message })
+      ...(process.env.NODE_ENV === 'production' && { details: error.message })
     });
   }
 });
@@ -187,10 +187,10 @@ async function clientesRoutes(fastify, options) {
       return reply.code(500).send({
         error: 'Erro ao excluir',
         user_id,
-        ...(process.env.NODE_ENV === 'development' && { details: error.message })
+        ...(process.env.NODE_ENV === 'production' && { details: error.message })
       });
     }
   });
 }
 
-export default clientesRoutes;
+export default customersRoutes;
