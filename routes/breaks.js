@@ -1,5 +1,5 @@
 // routes/pausas.js
-async function pausasRoutes(fastify, _opts) {
+async function breaksRoutes(fastify, _opts) {
   // ========== CRUD: MOTIVOS (pause_reasons) ==========
 
   // Listar motivos (opcional ?active=true|false)
@@ -153,7 +153,7 @@ async function pausasRoutes(fastify, _opts) {
   // ========== SESSÕES DE PAUSA DO ATENDENTE ==========
 
   // Sessão ativa do atendente
-  fastify.get('/atendentes/:email/current', async (req, reply) => {
+  fastify.get('/agents/:email/current', async (req, reply) => {
     const { email } = req.params;
     try {
       const { rows } = await req.db.query(
@@ -175,7 +175,7 @@ async function pausasRoutes(fastify, _opts) {
   });
 
   // Histórico do atendente
-  fastify.get('/atendentes/:email/historico', async (req, reply) => {
+  fastify.get('/agents/:email/history', async (req, reply) => {
     const { email } = req.params;
     const { limit = 50, from } = req.query || {};
     const params = [email];
@@ -204,7 +204,7 @@ async function pausasRoutes(fastify, _opts) {
   });
 
   // Iniciar pausa
-  fastify.post('/atendentes/:email/start', async (req, reply) => {
+  fastify.post('/agents/:email/start', async (req, reply) => {
     const { email } = req.params;
     const { reason_id, notes } = req.body || {};
     if (!reason_id) return reply.code(400).send({ error: 'reason_id é obrigatório' });
@@ -252,7 +252,7 @@ async function pausasRoutes(fastify, _opts) {
   });
 
   // Encerrar pausa
-  fastify.patch('/atendentes/:email/:id/end', async (req, reply) => {
+  fastify.patch('/agents/:email/:id/end', async (req, reply) => {
     const { email, id } = req.params;
     const { ended_at } = req.body || {};
     try {
@@ -294,4 +294,4 @@ async function pausasRoutes(fastify, _opts) {
   });
 }
 
-export default pausasRoutes;
+export default breaksRoutes;
