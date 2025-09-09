@@ -8,13 +8,13 @@ import { requireTenantBearerDb } from './plugins/tenantBearerDb.js';
 
 // rotas...
 import messageRoutes     from './routes/messages.js';
-import flowRoutes        from './routes/flow.js';
-import uploadRoutes      from './routes/uploadRoutes.js';
-import clientesRoutes    from './routes/clientes.js';
+import flowsRoutes        from './routes/flows.js';
+import storageRoutes      from './routes/storage.js';
+import customersRoutes    from './routes/customers.js';
 import settingsRoutes    from './routes/settings.js';
 import ticketsRoutes     from './routes/tickets.js';
 import chatsRoutes       from './routes/chats.js';
-import filaRoutes        from './routes/filas.js';
+import queuesRoutes        from './routes/queues.js';
 import atendentesRoutes  from './routes/atendentes.js';
 import quickRepliesRoutes from './routes/quickReplies.js';
 import analyticsRoutes   from './routes/analytics.js';
@@ -54,12 +54,12 @@ async function buildServer() {
     // registre TODAS as rotas que precisam de token DENTRO deste escopo:
     api.register(messageRoutes,     { prefix: '/api/v1/messages' });
     api.register(chatsRoutes,       { prefix: '/api/v1/conversations' });
-    api.register(flowRoutes,        { prefix: '/api/v1/flows' });
-    api.register(uploadRoutes,      { prefix: '/api/v1/storage' });
-    api.register(clientesRoutes,    { prefix: '/api/v1/customers' });
+    api.register(flowsRoutes,        { prefix: '/api/v1/flows' });
+    api.register(storageRoutes,      { prefix: '/api/v1/storage' });
+    api.register(customersRoutes,    { prefix: '/api/v1/customers' });
     api.register(settingsRoutes,    { prefix: '/api/v1/settings' });
     api.register(ticketsRoutes,     { prefix: '/api/v1/tickets' });
-    api.register(filaRoutes,        { prefix: '/api/v1/queues' });
+    api.register(queuesRoutes,        { prefix: '/api/v1/queues' });
     api.register(atendentesRoutes,  { prefix: '/api/v1/agents' });
     api.register(quickRepliesRoutes,{ prefix: '/api/v1/quick-replies' });
     api.register(analyticsRoutes,   { prefix: '/api/v1/analytics' });
@@ -94,5 +94,6 @@ async function start() {
 }
 
 start();
+
 
 
