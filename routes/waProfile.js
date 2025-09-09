@@ -76,7 +76,7 @@ async function waProfileRoutes(fastify) {
   // ---------- ENDPOINTS ----------
 
   // GET /wa/profile -> phone + business profile
-  fastify.get('/wa/profile', async (req, reply) => {
+  fastify.get('/', async (req, reply) => {
     try {
       requireToken();
       const { phone_id } = await resolveActivePhone(req);
@@ -126,7 +126,7 @@ async function waProfileRoutes(fastify) {
   });
 
   // POST /wa/profile -> update about/address/description/email/vertical/websites
-  fastify.post('/wa/profile', async (req, reply) => {
+  fastify.post('/', async (req, reply) => {
     try {
       requireToken();
       const { phone_id } = await resolveActivePhone(req);
@@ -172,7 +172,7 @@ async function waProfileRoutes(fastify) {
 
   // POST /wa/profile/photo-from-url -> upload + aplicar foto
   // body: { file_url: string, type?: 'image/jpeg'|'image/png' }
-  fastify.post('/wa/profile/photo-from-url', async (req, reply) => {
+  fastify.post('/photo-from-url', async (req, reply) => {
     try {
       requireToken();
       const { phone_id, waba_id } = await resolveActivePhone(req);
@@ -211,7 +211,7 @@ async function waProfileRoutes(fastify) {
   });
 
   // DELETE /wa/profile/photo -> remove foto
-  fastify.delete('/wa/profile/photo', async (req, reply) => {
+  fastify.delete('/photo', async (req, reply) => {
     try {
       requireToken();
       const { phone_id } = await resolveActivePhone(req);
@@ -235,7 +235,7 @@ async function waProfileRoutes(fastify) {
   });
 
   // GET /wa/number -> metadados do número (UI)
-  fastify.get('/wa/number', async (req, reply) => {
+  fastify.get('/number', async (req, reply) => {
     try {
       requireToken();
       const { phone_id } = await resolveActivePhone(req);
