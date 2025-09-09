@@ -1,16 +1,14 @@
 // /app/plugins/tenantBearerDb.js
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken'; // <-- add
+import jwt from 'jsonwebtoken';
 import { pool } from '../services/db.js';
 
 function parseAuth(headers = {}) {
   const h = headers.authorization || '';
-  const m = /^(Bearer|Session)\s+(.+)$/i.exec(h);
-  if (!m) return null;
-  return { scheme: m[1], value: m[2] };
+  const m = /^(Bearer|Default)\s+(.+)$/i.exec(h);
+  return m ? { scheme: m[1], value: m[2] } : null;
 }
 
-// Formato de api-key: "<uuid>.<hexsecret>"
 function splitIdSecret(raw) {
   const m = /^(?<id>[0-9a-fA-F-]{36})\.(?<secret>[0-9a-fA-F]{64})$/.exec(raw || '');
   return m?.groups || null;
@@ -21,7 +19,6 @@ export function requireTenantBearerDb() {
     try {
       if (req.method === 'OPTIONS') return;
 
-      // tenant.js deve ter resolvido pelo host:
       const subdomain = req.tenant?.subdomain;
       let tenantId = req.tenant?.id;
       if (!subdomain && !tenantId) {
@@ -30,48 +27,70 @@ export function requireTenantBearerDb() {
 
       const auth = parseAuth(req.headers);
       if (!auth) {
-        return reply.code(401).send({ error: 'missing_token', message: 'Use Authorization: Bearer <id>.<secret> ou Session <jwt>' });
+        return reply.code(401).send({
+          error: 'missing_token',
+          message: 'Use Authorization: Bearer <id>.<secret> ou Default <jwt>'
+        });
       }
 
-      // === NOVO CAMINHO: sessão via JWT emitido pelo AUTH ===
-      if (auth.scheme.toLowerCase() === 'session') {
+      // ===== NOVO: caminho "Default" (sem secret, usa token default do tenant) =====
+      if (auth.scheme.toLowerCase() === 'default') {
+        let payload;
         try {
-          const payload = jwt.verify(auth.value, process.env.JWT_SECRET); // HS256
-          // opcional, mas recomendado: enforce tenant do subdomínio
-          if (payload.tenant && payload.tenant !== subdomain) {
-            return reply.code(401).send({ error: 'tenant_mismatch' });
-          }
-
-          // garantir tenantId (caso não preenchido)
-          if (!tenantId) {
-            const { rows: trows } = await pool.query(
-              'SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1',
-              [subdomain]
-            );
-            tenantId = trows[0]?.id;
-            if (!tenantId) return reply.code(404).send({ error: 'tenant_not_found' });
-            req.tenant.id = tenantId;
-          }
-
-          // contexto útil como no caminho do Bearer
-          req.tokenId = null;
-          req.tokenIsDefault = false;
-          req.sessionUser = payload; // quem é o usuário logado
-
-          return; // autorizado pelo caminho "Session"
+          payload = jwt.verify(auth.value, process.env.JWT_SECRET); // HS256
         } catch (e) {
-          req.log?.warn({ msg: 'session_jwt_invalid', err: e?.message });
-          return reply.code(401).send({ error: 'invalid_session' });
+          return reply.code(401).send({ error: 'invalid_default_assert' });
         }
-      }
 
-      // === CAMINHO ANTIGO (inalterado): api-key no formato <uuid>.<hexsecret> ===
-      const raw = auth.value;
-      const parts = splitIdSecret(raw);
+        if (payload.typ !== 'default-assert') {
+          return reply.code(401).send({ error: 'invalid_default_assert_type' });
+        }
+
+        // reforço de multitenant: subdomínio deve bater
+        if (payload.tenant && payload.tenant !== subdomain) {
+          return reply.code(401).send({ error: 'tenant_mismatch' });
+        }
+
+        if (!tenantId) {
+          const { rows: trows } = await pool.query(
+            'SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1',
+            [subdomain]
+          );
+          tenantId = trows[0]?.id;
+          if (!tenantId) return reply.code(404).send({ error: 'tenant_not_found' });
+          req.tenant.id = tenantId;
+        }
+
+        // conferir no banco que o tokenId do JWT:
+        // - pertence ao tenant
+        // - está ACTIVE
+        // - é DEFAULT
+        const { rows } = await pool.query(
+          `SELECT id, is_default, status
+             FROM public.tenant_tokens
+            WHERE id = $1 AND tenant_id = $2
+            LIMIT 1`,
+          [payload.tokenId, tenantId]
+        );
+        const rec = rows[0];
+        if (!rec) return reply.code(401).send({ error: 'default_token_not_found' });
+        if (rec.status !== 'active') return reply.code(401).send({ error: 'token_revoked' });
+        if (!rec.is_default) return reply.code(401).send({ error: 'not_default_token' });
+
+        // sucesso: contexto coerente com o caminho Bearer
+        req.tokenId = rec.id;
+        req.tokenIsDefault = true;
+        // opcional: marcar uso
+        pool.query('SELECT public.touch_token_usage($1)', [rec.id]).catch(() => {});
+        return; // autorizado
+      }
+      // ===== FIM do caminho "Default" =====
+
+      // ===== Caminho existente (inalterado): Bearer <uuid>.<hexsecret> =====
+      const parts = splitIdSecret(auth.value);
       if (!parts) {
         return reply.code(401).send({ error: 'bad_token_format' });
       }
-
       const { id: tokenId, secret: presentedSecret } = parts;
 
       if (!tenantId) {
@@ -91,7 +110,6 @@ export function requireTenantBearerDb() {
           LIMIT 1`,
         [tokenId, tenantId]
       );
-
       const rec = rows[0];
       if (!rec) return reply.code(401).send({ error: 'invalid_token' });
       if (rec.status !== 'active') return reply.code(401).send({ error: 'token_revoked' });
@@ -102,6 +120,7 @@ export function requireTenantBearerDb() {
       req.tokenId = rec.id;
       req.tokenIsDefault = !!rec.is_default;
       pool.query('SELECT public.touch_token_usage($1)', [rec.id]).catch(() => {});
+
     } catch (err) {
       req.log?.error({ err }, 'tenantBearerDb error');
       return reply.code(500).send({ error: 'auth_error', detail: err?.message || String(err) });
