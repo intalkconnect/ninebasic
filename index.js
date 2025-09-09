@@ -25,6 +25,7 @@ import campaignsRoutes from './routes/campaigns.js';
 import billingRoutes from './routes/billing.js';
 
 // 👉 NOVO
+import waProfileRoutes from './routes/waProfile.js';
 import waEmbeddedRoutes from './routes/waEmbedded.js';
 import telegramRoutes from './routes/telegram.js';
 
@@ -64,6 +65,7 @@ async function buildServer() {
   
 
   // 👉 NOVO: Embedded Signup (prefixo próprio)
+  fastify.register(waProfileRoutes, { prefix: '/api/v1/wa/profile' });
   fastify.register(waEmbeddedRoutes,  { prefix: '/api/v1/wa' });
   fastify.register(telegramRoutes,  { prefix: '/api/v1/tg' });
 
@@ -85,6 +87,7 @@ async function start() {
 }
 
 start();
+
 
 
 
