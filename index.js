@@ -13,7 +13,7 @@ import storageRoutes      from './routes/storage.js';
 import customersRoutes    from './routes/customers.js';
 import settingsRoutes    from './routes/settings.js';
 import ticketsRoutes     from './routes/tickets.js';
-import chatsRoutes       from './routes/chats.js';
+import conversationsRoutes       from './routes/conversations.js';
 import queuesRoutes        from './routes/queues.js';
 import atendentesRoutes  from './routes/atendentes.js';
 import quickRepliesRoutes from './routes/quickReplies.js';
@@ -53,7 +53,7 @@ async function buildServer() {
 
     // registre TODAS as rotas que precisam de token DENTRO deste escopo:
     api.register(messageRoutes,     { prefix: '/api/v1/messages' });
-    api.register(chatsRoutes,       { prefix: '/api/v1/conversations' });
+    api.register(conversationsRoutes,       { prefix: '/api/v1/conversations' });
     api.register(flowsRoutes,        { prefix: '/api/v1/flows' });
     api.register(storageRoutes,      { prefix: '/api/v1/storage' });
     api.register(customersRoutes,    { prefix: '/api/v1/customers' });
@@ -94,6 +94,7 @@ async function start() {
 }
 
 start();
+
 
 
 
