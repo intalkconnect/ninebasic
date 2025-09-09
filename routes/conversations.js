@@ -97,8 +97,8 @@ ORDER BY t.created_at DESC;
   }
 });
 
-  fastify.put('/fila/proximo', async (req, reply) => {
-  const { email, filas } = req.body;
+  fastify.put('/queues/proximo', async (req, reply) => {
+  const { email, queues } = req.body;
 
   if (!email || !filas || !Array.isArray(filas)) {
     return reply.code(400).send({ error: 'email e filas[] são obrigatórios' });
@@ -121,7 +121,7 @@ ORDER BY t.created_at DESC;
       )
       RETURNING *;
       `,
-      [email, filas]
+      [email, queues]
     );
 
     if (rows.length === 0) {
