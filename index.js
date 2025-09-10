@@ -49,6 +49,11 @@ async function buildServer() {
  await fastify.register(authCookieToBearer);
 
   fastify.get('/healthz', async () => ({ ok: true }));
+  fastify.get('/api/debug/auth', async (req) => ({
+  host: req.headers.host,
+  auth: req.headers.authorization || null
+}));
+
 
   await fastify.register(tenantPlugin);
 
@@ -75,6 +80,7 @@ async function buildServer() {
     api.register(usersRoutes,       { prefix: '/api/v1/users' });
     api.register(campaignsRoutes,   { prefix: '/api/v1/campaigns' });
     api.register(billingRoutes,     { prefix: '/api/v1/billing' });
+    
 
     // novos, também protegidos:
     api.register(waProfileRoutes, { prefix: '/api/v1/whatsapp/profile' });
@@ -100,6 +106,7 @@ async function start() {
 }
 
 start();
+
 
 
 
