@@ -7,7 +7,6 @@ import dotenv from 'dotenv';
 
 import tenantPlugin from './plugins/tenant.js';
 import { requireTenantBearerDb } from './plugins/tenantBearerDb.js';
-import authCookieToBearer from './plugins/authCookieToBearer.js';
 
 // rotas...
 import messagesRoutes      from './routes/messages.js';
@@ -48,17 +47,14 @@ async function buildServer() {
 
   await fastify.register(multipart);
 
-  // 1. Primeiro registra o cookie plugin
+  // 1. Registra o cookie plugin
   await fastify.register(cookie, { 
     secret: false, // não precisamos assinar cookies
     hook: 'onRequest' 
   });
 
-  // 2. Depois registra o tenant plugin (resolve subdomain)
+  // 2. Registra o tenant plugin (resolve subdomain)
   await fastify.register(tenantPlugin);
-
-  // 3. Por último, o authCookieToBearer (depende do cookie estar processado)
-  await fastify.register(authCookieToBearer);
 
   // rotas públicas
   fastify.get('/healthz', async () => ({ ok: true }));
@@ -75,8 +71,44 @@ async function buildServer() {
 
   // 🔒 escopo protegido /api/v1/*
   await fastify.register(async (api) => {
+    // Hook onRequest: converte cookie defaultAssert -> Authorization header
+    api.addHook('onRequest', async (req) => {
+      // Se já veio Authorization, não mexe
+      if (req.headers.authorization) {
+        req.log?.debug({
+          hasExistingAuth: true,
+          path: req.url
+        }, 'authCookieToBearer: Authorization header already exists');
+        return;
+      }
+
+      // Usa o req.cookies que já foi processado pelo @fastify/cookie
+      const cookies = req.cookies || {};
+      
+      // Promove defaultAssert -> Authorization: Bearer <jwt-assert>
+      const assert = cookies.defaultAssert;
+      if (assert) {
+        req.headers.authorization = `Bearer ${assert}`;
+        req.log?.info({
+          injectedAuth: true,
+          tokenPreview: assert.substring(0, 30) + '...',
+          path: req.url
+        }, 'authCookieToBearer: injected Authorization header');
+      } else {
+        req.log?.warn({
+          injectedAuth: false,
+          reason: 'defaultAssert cookie not found',
+          availableCookies: Object.keys(cookies),
+          path: req.url,
+          rawCookieHeader: req.headers.cookie || null
+        }, 'authCookieToBearer: NO TOKEN TO INJECT');
+      }
+    });
+
+    // Hook preHandler: valida token e tenant
     api.addHook('preHandler', requireTenantBearerDb());
 
+    // Registra todas as rotas protegidas
     api.register(messagesRoutes,      { prefix: '/api/v1/messages' });
     api.register(conversationsRoutes, { prefix: '/api/v1/conversations' });
     api.register(flowsRoutes,         { prefix: '/api/v1/flows' });
@@ -118,4 +150,3 @@ async function start() {
 }
 
 start();
-
