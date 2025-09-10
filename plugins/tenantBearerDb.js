@@ -5,7 +5,7 @@ import { pool } from '../services/db.js';
 
 // 🔐 NADA de env aqui: segredo fixo e igual no AUTH e no ENDPOINTS
 // Use exatamente o mesmo valor no AUTH (index.js).
-const JWT_SECRET = '17fa304f805422af7fffa24fa8a9a622df190e049596a4ae009368db986c6e4a6c30166b957cf81743b65526';
+const JWT_SECRET = process.env.JWT_SECRET;
 
 function parseBearer(headers = {}) {
   const h = headers.authorization || '';
