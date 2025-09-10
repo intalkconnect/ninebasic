@@ -2,19 +2,29 @@
 export default async function authCookieToBearer(fastify) {
   fastify.addHook('onRequest', async (req) => {
     // Se já veio Authorization, não mexe
-    if (req.headers.authorization) return;
+    if (req.headers.authorization) {
+      req.log?.info({
+        hasExistingAuth: true,
+        authHeader: req.headers.authorization.substring(0, 20) + '...',
+        path: req.url
+      }, 'authCookieToBearer: Authorization header already exists');
+      return;
+    }
 
-    // Usa o req.cookies que já foi processado pelo @fastify/cookie
+    // Debug completo dos cookies
+    const rawCookieHeader = req.headers.cookie || '';
     const cookies = req.cookies || {};
     
-    // Debug: log dos cookies disponíveis
     req.log?.info({
-      cookiesAvailable: Object.keys(cookies),
-      defaultAssertExists: !!cookies.defaultAssert,
-      defaultAssertValue: cookies.defaultAssert ? `${cookies.defaultAssert.substring(0, 10)}...` : null,
+      hasRawCookieHeader: !!rawCookieHeader,
+      rawCookieHeader: rawCookieHeader,
+      parsedCookies: cookies,
+      cookieNames: Object.keys(cookies),
+      hasDefaultAssert: !!cookies.defaultAssert,
+      defaultAssertValue: cookies.defaultAssert ? `${cookies.defaultAssert.substring(0, 30)}...` : null,
       path: req.url,
       host: req.headers.host,
-    }, 'authCookieToBearer: checking cookies');
+    }, 'authCookieToBearer: cookie analysis');
 
     // Promove defaultAssert -> Authorization: Bearer <jwt-assert>
     const assert = cookies.defaultAssert;
@@ -22,14 +32,17 @@ export default async function authCookieToBearer(fastify) {
       req.headers.authorization = `Bearer ${assert}`;
       req.log?.info({
         injectedAuth: true,
+        tokenPreview: assert.substring(0, 30) + '...',
         path: req.url
       }, 'authCookieToBearer: injected Authorization header');
     } else {
-      req.log?.info({
+      req.log?.warn({
         injectedAuth: false,
         reason: 'defaultAssert cookie not found',
-        availableCookies: Object.keys(cookies)
-      }, 'authCookieToBearer: no token to inject');
+        availableCookies: Object.keys(cookies),
+        rawCookieExists: !!rawCookieHeader,
+        path: req.url
+      }, 'authCookieToBearer: NO TOKEN TO INJECT');
     }
   });
 }
