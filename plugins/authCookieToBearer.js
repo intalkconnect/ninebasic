@@ -1,25 +1,22 @@
-// /app/plugins/authCookieToBearer.js
-// Converte cookies httpOnly setados pelo AUTH em Authorization: Bearer <...>
+import cookie from 'cookie';
+
 export default async function authCookieToBearer(fastify) {
   fastify.addHook('onRequest', async (req) => {
-    // se já veio Authorization do cliente ou de proxy, mantém
     if (req.headers.authorization || req.raw.headers['authorization']) return;
 
-    const cookies = req.cookies || {};
+    // usa req.cookies; se não existir, parse manual do header
+    const cookies = req.cookies ?? cookie.parse(req.headers.cookie || '');
 
-    // PRIORIDADE: defaultAssert (JWT curto emitido pelo AUTH, httpOnly)
-    const defaultAssert = cookies.defaultAssert;
-    if (defaultAssert) {
-      const v = `Bearer ${defaultAssert}`; // SEMPRE Bearer
+    if (cookies.defaultAssert) {
+      const v = `Bearer ${cookies.defaultAssert}`;
       req.headers.authorization = v;
-      req.raw.headers['authorization'] = v; // compat Fastify 4
+      req.raw.headers['authorization'] = v;
       return;
     }
 
-    // Compatibilidade: se existir cookie no formato <uuid>.<64hex>, também usa como Bearer
-    const maybeBearer = cookies.authToken;
-    if (maybeBearer && /^[0-9a-fA-F-]{36}\.[0-9a-fA-F]{64}$/.test(maybeBearer)) {
-      const v = `Bearer ${maybeBearer}`;
+    const t = cookies.authToken;
+    if (t && /^[0-9a-fA-F-]{36}\.[0-9a-fA-F]{64}$/.test(t)) {
+      const v = `Bearer ${t}`;
       req.headers.authorization = v;
       req.raw.headers['authorization'] = v;
     }
