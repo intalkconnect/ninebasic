@@ -3,25 +3,25 @@ import cookie from 'cookie';
 
 export default async function authCookieToBearer(fastify) {
   fastify.addHook('onRequest', async (req) => {
-    // se já veio Authorization, respeita
+    // já tem Authorization? respeita
     if (req.headers.authorization || req.raw.headers['authorization']) return;
 
-    // parse simples
+    // parse simples dos cookies
     if (!req.cookies) req.cookies = cookie.parse(req.headers.cookie || '');
 
-    // 1) Preferir defaultAssert -> Authorization: Default <jwt>
+    // PRIORIDADE: usar o assert curto do AUTH (httpOnly)
     const defaultAssert = req.cookies?.defaultAssert;
     if (defaultAssert) {
-      const v = `Default ${defaultAssert}`;
+      const v = `Bearer ${defaultAssert}`;    // <- sempre "Bearer"
       req.headers.authorization = v;
-      req.raw.headers['authorization'] = v; // Fastify 4
+      req.raw.headers['authorization'] = v;   // Fastify 4
       return;
     }
 
-    // 2) Compatibilidade: authToken no formato <uuid>.<64hex> -> Bearer
-    const authToken = req.cookies?.authToken;
-    if (authToken && /^[0-9a-fA-F-]{36}\.[0-9a-fA-F]{64}$/.test(authToken)) {
-      const v = `Bearer ${authToken}`;
+    // Compat: se existir um cookie que já seja <uuid>.<64hex>, também vira Bearer
+    const maybeBearer = req.cookies?.authToken; // só funciona se estiver no formato id.secret
+    if (maybeBearer && /^[0-9a-fA-F-]{36}\.[0-9a-fA-F]{64}$/.test(maybeBearer)) {
+      const v = `Bearer ${maybeBearer}`;
       req.headers.authorization = v;
       req.raw.headers['authorization'] = v;
     }
