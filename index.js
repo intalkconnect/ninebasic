@@ -127,7 +127,7 @@ async function buildServer() {
     api.register(billingRoutes,       { prefix: '/api/v1/billing' });
 
     // novos
-    api.register(whatsa, { prefix: '/api/v1/whatsapp' });
+    api.register(whatsappRoutes, { prefix: '/api/v1/whatsapp' });
     api.register(telegramRoutes,  { prefix: '/api/v1/telegram' });
   });
 
@@ -148,4 +148,5 @@ async function start() {
 }
 
 start();
+
 
