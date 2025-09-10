@@ -78,18 +78,4 @@ export default async function securityTokensRoutes(fastify) {
     return { ok: true };
   });
 
-  // (Opcional) Tornar default
-  fastify.post('/tokens/:id/set-default', async (req, reply) => {
-    const tenantId = req.tenant?.id;
-    const tokenId = req.params?.id;
-    if (!tenantId || !tokenId) return reply.code(400).send({ ok: false, error: 'bad_request' });
-
-    await pool.query(`UPDATE public.tenant_tokens SET is_default = false WHERE tenant_id = $1`, [tenantId]);
-    const { rowCount } = await pool.query(
-      `UPDATE public.tenant_tokens SET is_default = true WHERE id = $1 AND tenant_id = $2 AND status = 'active'`,
-      [tokenId, tenantId]
-    );
-    if (!rowCount) return reply.code(404).send({ ok: false, error: 'not_found_or_revoked' });
-    return { ok: true };
-  });
 }
