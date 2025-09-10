@@ -6,6 +6,7 @@ import cookie from '@fastify/cookie';
 import dotenv from 'dotenv';
 
 import tenantPlugin from './plugins/tenant.js';
+import securityTokensRoutes from './routes/securityTokens.js';
 import { requireTenantBearerDb } from './plugins/tenantBearerDb.js';
 
 // rotas...
@@ -129,6 +130,7 @@ async function buildServer() {
     // novos
     api.register(whatsappRoutes, { prefix: '/api/v1/whatsapp' });
     api.register(telegramRoutes,  { prefix: '/api/v1/telegram' });
+    api.register(securityTokensRoutes, { prefix: '/api/v1/security' });
   });
 
   return fastify;
@@ -148,5 +150,6 @@ async function start() {
 }
 
 start();
+
 
 
