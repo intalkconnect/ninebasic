@@ -264,7 +264,7 @@ async function whatsappRoutes(fastify) {
   });
 
     // routes/waEmbedded.js (trecho)
-fastify.post('/es/pick-number', async (req, reply) => {
+fastify.post('/embedded/es/pick-number', async (req, reply) => {
   const { subdomain, phone_number_id } = req.body || {};
   if (!subdomain || !phone_number_id) {
     return reply.code(400).send({ error: 'missing_params' });
@@ -296,7 +296,7 @@ fastify.post('/es/pick-number', async (req, reply) => {
 
   // ============ FINALIZE (Embedded Signup) ============
   // POST /api/v1/wa/es/finalize
-  fastify.post('/es/finalize', async (req, reply) => {
+  fastify.post('/embedded/es/finalize', async (req, reply) => {
     // subdomain: preferir do plugin; fallback do body/header
     const subdomain =
       req?.tenant?.subdomain ||
