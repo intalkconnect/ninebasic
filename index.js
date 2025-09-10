@@ -1,4 +1,4 @@
-// /app/endpoints.js
+// endpoints.js (ENDPOINTS)
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
@@ -6,8 +6,8 @@ import dotenv from 'dotenv';
 import cookie from '@fastify/cookie';
 
 import tenantPlugin from './plugins/tenant.js';
-import { requireTenantBearerDb } from './plugins/tenantBearerDb.js';
 import authCookieToBearer from './plugins/authCookieToBearer.js';
+import { requireTenantBearerDb } from './plugins/tenantBearerDb.js';
 
 // rotas...
 import messagesRoutes     from './routes/messages.js';
@@ -27,8 +27,6 @@ import templatesRoutes    from './routes/templates.js';
 import usersRoutes        from './routes/users.js';
 import campaignsRoutes    from './routes/campaigns.js';
 import billingRoutes      from './routes/billing.js';
-
-// novos
 import waProfileRoutes    from './routes/waProfile.js';
 import waEmbeddedRoutes   from './routes/waEmbedded.js';
 import telegramRoutes     from './routes/telegram.js';
@@ -38,46 +36,34 @@ dotenv.config();
 async function buildServer() {
   const fastify = Fastify({ logger: true });
 
-  // CORS (se precisar de credenciais, ajuste credentials:true e origin dinâmico)
   await fastify.register(cors, {
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
   });
 
   await fastify.register(multipart);
 
-  // 1) cookies primeiro, para popular req.cookies no onRequest
+  // cookie PRIMEIRO (para req.cookies)
   await fastify.register(cookie, { secret: process.env.COOKIE_SECRET, hook: 'onRequest' });
 
-  // 2) tenta promover cookie -> Authorization
+  // promove cookie -> Authorization (se header ausente)
   await fastify.register(authCookieToBearer);
 
   // rotas públicas
   fastify.get('/healthz', async () => ({ ok: true }));
-  fastify.get('/api/debug/auth', async (req) => {
-    let jwtDecoded = null;
-    const auth = req.headers.authorization || null;
-    if (auth?.startsWith('Bearer ')) {
-      const raw = auth.slice(7);
-      try {
-        const jwt = await import('jsonwebtoken');
-        jwtDecoded = jwt.default.decode(raw) || null;
-      } catch { /* ignore */ }
-    }
-    return {
-      host: req.headers.host,
-      path: req.url,
-      cookies: Object.keys(req.cookies || {}),
-      authorization: auth,
-      jwtDecoded
-    };
+
+  // debug (ver o header e decodificar o JWT de assert)
+  fastify.get('/api/debug/auth', async (req, reply) => {
+    const hdr = req.headers.authorization || req.raw.headers['authorization'] || null;
+    let cookieNames = [];
+    try { cookieNames = Object.keys(req.cookies || {}); } catch {}
+    return { host: req.headers.host, authorization: hdr, cookieNames };
   });
 
-  // 3) resolve tenant (subdomínio)
+  // resolve tenant pelo host/subdomínio
   await fastify.register(tenantPlugin);
 
-  // 4) escopo protegido
+  // escopo protegido
   await fastify.register(async (api) => {
     api.addHook('preHandler', requireTenantBearerDb());
 
@@ -119,5 +105,4 @@ async function start() {
     process.exit(1);
   }
 }
-
 start();
