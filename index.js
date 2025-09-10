@@ -28,8 +28,7 @@ import campaignsRoutes     from './routes/campaigns.js';
 import billingRoutes       from './routes/billing.js';
 
 // novos
-import waProfileRoutes     from './routes/waProfile.js';
-import waEmbeddedRoutes    from './routes/waEmbedded.js';
+import whatsappRoutes      from './routes/whatsapp.js';
 import telegramRoutes      from './routes/telegram.js';
 
 dotenv.config();
@@ -128,8 +127,7 @@ async function buildServer() {
     api.register(billingRoutes,       { prefix: '/api/v1/billing' });
 
     // novos
-    api.register(waProfileRoutes, { prefix: '/api/v1/whatsapp/profile' });
-    api.register(waEmbeddedRoutes,{ prefix: '/api/v1/whatsapp/embedded' });
+    api.register(whatsa, { prefix: '/api/v1/whatsapp' });
     api.register(telegramRoutes,  { prefix: '/api/v1/telegram' });
   });
 
@@ -150,3 +148,4 @@ async function start() {
 }
 
 start();
+
