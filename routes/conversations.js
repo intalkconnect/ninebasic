@@ -57,7 +57,7 @@ ORDER BY t.created_at DESC;
     }
   });
 
-  fastify.get('/fila', async (req, reply) => {
+  fastify.get('/queues', async (req, reply) => {
   const { filas } = req.query;
 
   if (!filas) {
@@ -97,7 +97,7 @@ ORDER BY t.created_at DESC;
   }
 });
 
-  fastify.put('/queues/proximo', async (req, reply) => {
+  fastify.put('/queues/next', async (req, reply) => {
   const { email, queues } = req.body;
 
   if (!email || !filas || !Array.isArray(filas)) {
