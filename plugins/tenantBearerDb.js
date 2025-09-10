@@ -7,7 +7,6 @@ function parseBearer(h = '') {
   const m = /^Bearer\s+(.+)$/i.exec(h || '');
   return m ? m[1] : null;
 }
-
 function splitIdSecret(raw) {
   const m = /^(?<id>[0-9a-fA-F-]{36})\.(?<secret>[0-9a-fA-F]{64})$/.exec(raw || '');
   return m?.groups || null;
@@ -15,25 +14,22 @@ function splitIdSecret(raw) {
 
 async function resolveTenantIdBySubdomain(subdomain) {
   if (!subdomain) return null;
-
-  // 1) tenta na tabela tenants (subdomain)
+  // 1) tenants.subdomain
   try {
-    const q1 = await pool.query(
+    const r = await pool.query(
       'SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1',
       [subdomain]
     );
-    if (q1.rows[0]?.id) return q1.rows[0].id;
+    if (r.rows[0]?.id) return r.rows[0].id;
   } catch {}
-
   // 2) fallback: companies.slug
   try {
-    const q2 = await pool.query(
+    const r = await pool.query(
       'SELECT id FROM public.companies WHERE slug = $1 LIMIT 1',
       [subdomain]
     );
-    if (q2.rows[0]?.id) return q2.rows[0].id;
+    if (r.rows[0]?.id) return r.rows[0].id;
   } catch {}
-
   return null;
 }
 
@@ -47,12 +43,8 @@ export function requireTenantBearerDb() {
 
       if (!tenantId) {
         tenantId = await resolveTenantIdBySubdomain(subdomain);
-        if (!tenantId) {
-          return reply.code(404).send({ error: 'tenant_not_found' });
-        }
-        // guarda para downstream
-        if (req.tenant) req.tenant.id = tenantId;
-        else req.tenant = { id: tenantId, subdomain };
+        if (!tenantId) return reply.code(404).send({ error: 'tenant_not_found' });
+        if (req.tenant) req.tenant.id = tenantId; else req.tenant = { id: tenantId, subdomain };
       }
 
       const raw = parseBearer(req.headers.authorization || req.raw.headers['authorization'] || '');
@@ -63,11 +55,10 @@ export function requireTenantBearerDb() {
         });
       }
 
-      // Caminho 1: Bearer <uuid>.<hexsecret> (antigo)
+      // Caminho 1 — Bearer <uuid>.<secret>
       const parts = splitIdSecret(raw);
       if (parts) {
         const { id: tokenId, secret: presentedSecret } = parts;
-
         const { rows } = await pool.query(
           `SELECT id, secret_hash, is_default, status
              FROM public.tenant_tokens
@@ -84,26 +75,21 @@ export function requireTenantBearerDb() {
 
         req.tokenId = rec.id;
         req.tokenIsDefault = !!rec.is_default;
-
-        // não bloqueante
-        pool.query('SELECT public.touch_token_usage($1)', [rec.id]).catch(() => {});
+        pool.query('SELECT public.touch_token_usage($1)', [rec.id]).catch(()=>{});
         return;
       }
 
-      // Caminho 2: Bearer <jwt-assert> (defaultAssert emitido pelo AUTH)
+      // Caminho 2 — Bearer <jwt-assert> (defaultAssert)
       let payload;
       try {
         payload = jwt.verify(raw, process.env.JWT_SECRET || 'dev-secret');
-      } catch (e) {
+      } catch {
         return reply.code(401).send({ error: 'invalid_bearer', detail: 'jwt_verify_failed' });
       }
-
-      // Espera payload mínimo: typ=default-assert, tokenId e (opcionalmente) tenant
       if (payload.typ !== 'default-assert' || !payload.tokenId) {
         return reply.code(401).send({ error: 'invalid_bearer', detail: 'bad_payload' });
       }
 
-      // Garante que o tokenId pertence ao tenant e é o default ativo
       const { rows } = await pool.query(
         `SELECT id, is_default, status
            FROM public.tenant_tokens
@@ -118,8 +104,7 @@ export function requireTenantBearerDb() {
 
       req.tokenId = rec.id;
       req.tokenIsDefault = true;
-
-      pool.query('SELECT public.touch_token_usage($1)', [rec.id]).catch(() => {});
+      pool.query('SELECT public.touch_token_usage($1)', [rec.id]).catch(()=>{});
       // autorizado
     } catch (err) {
       req.log?.error({ err }, 'tenantBearerDb error');
