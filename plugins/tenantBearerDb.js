@@ -99,17 +99,48 @@ export function requireTenantBearerDb() {
       // 1) Se não for "<uuid>.<secret>", tratamos como JWT "assert" do default
       const parts = splitIdSecret(raw);
       if (!parts) {
+        req.log?.info({
+          tokenType: 'JWT',
+          tokenPreview: raw.substring(0, 30) + '...',
+          path: req.url
+        }, 'Processing JWT token');
+
         // JWT assert do cookie defaultAssert
         let payload;
         try {
           payload = jwt.verify(raw, JWT_SECRET); // HS256
+          req.log?.info({
+            jwtValid: true,
+            payload: payload,
+            path: req.url
+          }, 'JWT verification successful');
         } catch (e) {
-          return reply.code(401).send({ error: 'invalid_bearer' });
+          req.log?.error({
+            jwtValid: false,
+            error: e.message,
+            jwtSecret: JWT_SECRET,
+            tokenPreview: raw.substring(0, 50) + '...',
+            path: req.url
+          }, 'JWT verification failed');
+          return reply.code(401).send({ error: 'invalid_bearer', detail: e.message });
         }
 
         if (payload?.typ !== 'default-assert' || !payload?.tokenId) {
-          return reply.code(401).send({ error: 'invalid_bearer' });
+          req.log?.error({
+            payloadValid: false,
+            typ: payload?.typ,
+            tokenId: payload?.tokenId,
+            fullPayload: payload,
+            path: req.url
+          }, 'JWT payload validation failed');
+          return reply.code(401).send({ error: 'invalid_bearer', detail: 'Invalid payload' });
         }
+
+        req.log?.info({
+          lookingForToken: payload.tokenId,
+          inTenant: tenantId,
+          path: req.url
+        }, 'Looking up token in database');
 
         // Confere se tokenId existe, é do tenant e é default + ativo
         const { rows } = await pool.query(
@@ -120,9 +151,41 @@ export function requireTenantBearerDb() {
           [payload.tokenId, tenantId]
         );
         const rec = rows[0];
-        if (!rec) return reply.code(401).send({ error: 'invalid_token' });
-        if (rec.status !== 'active') return reply.code(401).send({ error: 'token_revoked' });
-        if (!rec.is_default) return reply.code(401).send({ error: 'not_default_token' });
+
+        if (!rec) {
+          req.log?.error({
+            tokenFound: false,
+            tokenId: payload.tokenId,
+            tenantId: tenantId,
+            path: req.url
+          }, 'Token not found in database');
+          return reply.code(401).send({ error: 'invalid_token', detail: 'Token not found' });
+        }
+
+        if (rec.status !== 'active') {
+          req.log?.error({
+            tokenStatus: rec.status,
+            tokenId: payload.tokenId,
+            path: req.url
+          }, 'Token is not active');
+          return reply.code(401).send({ error: 'token_revoked', detail: `Status: ${rec.status}` });
+        }
+
+        if (!rec.is_default) {
+          req.log?.error({
+            isDefault: rec.is_default,
+            tokenId: payload.tokenId,
+            path: req.url
+          }, 'Token is not default');
+          return reply.code(401).send({ error: 'not_default_token', detail: 'Token is not default' });
+        }
+
+        req.log?.info({
+          tokenValid: true,
+          tokenId: rec.id,
+          isDefault: rec.is_default,
+          path: req.url
+        }, 'Token validation successful');
 
         req.tokenId = rec.id;
         req.tokenIsDefault = true;
