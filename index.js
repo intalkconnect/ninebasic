@@ -1,35 +1,37 @@
-// endpoints.js (ENDPOINTS)
+// endpoints.js
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
-import dotenv from 'dotenv';
 import cookie from '@fastify/cookie';
+import dotenv from 'dotenv';
 
 import tenantPlugin from './plugins/tenant.js';
-import authCookieToBearer from './plugins/authCookieToBearer.js';
 import { requireTenantBearerDb } from './plugins/tenantBearerDb.js';
+import authCookieToBearer from './plugins/authCookieToBearer.js';
 
 // rotas...
-import messagesRoutes     from './routes/messages.js';
-import flowsRoutes        from './routes/flows.js';
-import storageRoutes      from './routes/storage.js';
-import customersRoutes    from './routes/customers.js';
-import settingsRoutes     from './routes/settings.js';
-import ticketsRoutes      from './routes/tickets.js';
+import messagesRoutes      from './routes/messages.js';
+import flowsRoutes         from './routes/flows.js';
+import storageRoutes       from './routes/storage.js';
+import customersRoutes     from './routes/customers.js';
+import settingsRoutes      from './routes/settings.js';
+import ticketsRoutes       from './routes/tickets.js';
 import conversationsRoutes from './routes/conversations.js';
-import queuesRoutes       from './routes/queues.js';
-import agentsRoutes       from './routes/agents.js';
-import quickRepliesRoutes from './routes/quickReplies.js';
-import analyticsRoutes    from './routes/analytics.js';
-import breaksRoutes       from './routes/breaks.js';
-import queueHoursRoutes   from './routes/queueHoursRoutes.js';
-import templatesRoutes    from './routes/templates.js';
-import usersRoutes        from './routes/users.js';
-import campaignsRoutes    from './routes/campaigns.js';
-import billingRoutes      from './routes/billing.js';
-import waProfileRoutes    from './routes/waProfile.js';
-import waEmbeddedRoutes   from './routes/waEmbedded.js';
-import telegramRoutes     from './routes/telegram.js';
+import queuesRoutes        from './routes/queues.js';
+import agentsRoutes        from './routes/agents.js';
+import quickRepliesRoutes  from './routes/quickReplies.js';
+import analyticsRoutes     from './routes/analytics.js';
+import breaksRoutes        from './routes/breaks.js';
+import queueHoursRoutes    from './routes/queueHoursRoutes.js';
+import templatesRoutes     from './routes/templates.js';
+import usersRoutes         from './routes/users.js';
+import campaignsRoutes     from './routes/campaigns.js';
+import billingRoutes       from './routes/billing.js';
+
+// novos
+import waProfileRoutes     from './routes/waProfile.js';
+import waEmbeddedRoutes    from './routes/waEmbedded.js';
+import telegramRoutes      from './routes/telegram.js';
 
 dotenv.config();
 
@@ -37,33 +39,33 @@ async function buildServer() {
   const fastify = Fastify({ logger: true });
 
   await fastify.register(cors, {
-    origin: '*',
+    origin: true,                 // deixa o browser refletir a Origin
+    credentials: true,            // permite cookies
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    exposedHeaders: []
   });
 
   await fastify.register(multipart);
 
-  // cookie PRIMEIRO (para req.cookies)
-  await fastify.register(cookie, { secret: process.env.COOKIE_SECRET, hook: 'onRequest' });
+  // cookie: sem secret (não precisamos assinar)
+  await fastify.register(cookie, { hook: 'onRequest' });
 
-  // promove cookie -> Authorization (se header ausente)
+  // promove cookie -> Authorization
   await fastify.register(authCookieToBearer);
 
   // rotas públicas
   fastify.get('/healthz', async () => ({ ok: true }));
+  fastify.get('/api/debug/auth', async (req) => ({
+    host: req.headers.host,
+    authorization: req.headers.authorization || null,
+    cookieNames: Object.keys(req.cookies || {})
+  }));
 
-  // debug (ver o header e decodificar o JWT de assert)
-  fastify.get('/api/debug/auth', async (req, reply) => {
-    const hdr = req.headers.authorization || req.raw.headers['authorization'] || null;
-    let cookieNames = [];
-    try { cookieNames = Object.keys(req.cookies || {}); } catch {}
-    return { host: req.headers.host, authorization: hdr, cookieNames };
-  });
-
-  // resolve tenant pelo host/subdomínio
+  // resolve tenant por subdomínio
   await fastify.register(tenantPlugin);
 
-  // escopo protegido
+  // 🔒 escopo protegido /api/v1/*
   await fastify.register(async (api) => {
     api.addHook('preHandler', requireTenantBearerDb());
 
@@ -85,9 +87,10 @@ async function buildServer() {
     api.register(campaignsRoutes,     { prefix: '/api/v1/campaigns' });
     api.register(billingRoutes,       { prefix: '/api/v1/billing' });
 
-    api.register(waProfileRoutes,     { prefix: '/api/v1/whatsapp/profile' });
-    api.register(waEmbeddedRoutes,    { prefix: '/api/v1/whatsapp/embedded' });
-    api.register(telegramRoutes,      { prefix: '/api/v1/telegram' });
+    // novos
+    api.register(waProfileRoutes, { prefix: '/api/v1/whatsapp/profile' });
+    api.register(waEmbeddedRoutes,{ prefix: '/api/v1/whatsapp/embedded' });
+    api.register(telegramRoutes,  { prefix: '/api/v1/telegram' });
   });
 
   return fastify;
@@ -105,4 +108,5 @@ async function start() {
     process.exit(1);
   }
 }
+
 start();
