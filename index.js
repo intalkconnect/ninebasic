@@ -39,8 +39,8 @@ async function buildServer() {
   const fastify = Fastify({ logger: true });
 
   await fastify.register(cors, {
-    origin: true,                 // deixa o browser refletir a Origin
-    credentials: true,            // permite cookies
+    origin: true,
+    credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     exposedHeaders: []
@@ -48,22 +48,30 @@ async function buildServer() {
 
   await fastify.register(multipart);
 
-  // cookie: sem secret (não precisamos assinar)
-  await fastify.register(cookie, { hook: 'onRequest' });
+  // 1. Primeiro registra o cookie plugin
+  await fastify.register(cookie, { 
+    secret: false, // não precisamos assinar cookies
+    hook: 'onRequest' 
+  });
 
-  // promove cookie -> Authorization
+  // 2. Depois registra o tenant plugin (resolve subdomain)
+  await fastify.register(tenantPlugin);
+
+  // 3. Por último, o authCookieToBearer (depende do cookie estar processado)
   await fastify.register(authCookieToBearer);
 
   // rotas públicas
   fastify.get('/healthz', async () => ({ ok: true }));
+  
+  // Debug route melhorada
   fastify.get('/api/debug/auth', async (req) => ({
     host: req.headers.host,
     authorization: req.headers.authorization || null,
-    cookieNames: Object.keys(req.cookies || {})
+    cookies: req.cookies || {},
+    cookieNames: Object.keys(req.cookies || {}),
+    tenant: req.tenant || null,
+    rawCookieHeader: req.headers.cookie || null
   }));
-
-  // resolve tenant por subdomínio
-  await fastify.register(tenantPlugin);
 
   // 🔒 escopo protegido /api/v1/*
   await fastify.register(async (api) => {
@@ -110,3 +118,4 @@ async function start() {
 }
 
 start();
+
