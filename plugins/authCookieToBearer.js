@@ -1,26 +1,30 @@
-// /app/plugins/authCookieToBearer.js
-import cookie from 'cookie'; // fallback caso req.cookies não exista
+// plugins/authCookieToBearer.js
+import cookie from 'cookie';
 
 export default async function authCookieToBearer(fastify) {
   fastify.addHook('onRequest', async (req) => {
-    // Se já veio Authorization, não altera
-    if (req.headers.authorization || req.raw.headers['authorization']) return;
+    // já tem Authorization? respeita
+    const already = req.headers.authorization || req.raw.headers['authorization'];
+    if (already) return;
 
-    // Usa @fastify/cookie se tiver; senão faz parse do header Cookie
-    const cookies = req.cookies ?? cookie.parse(req.headers.cookie || '');
+    // garante req.cookies (fallback manual)
+    if (!req.cookies) {
+      try { req.cookies = cookie.parse(req.headers.cookie || ''); } catch { req.cookies = {}; }
+    }
 
-    // 1) defaultAssert (JWT curto emitido pelo AUTH)
-    if (cookies.defaultAssert) {
-      const v = `Bearer ${cookies.defaultAssert}`;
+    // 1) defaultAssert -> Bearer <jwt-assert>
+    const jwtAssert = req.cookies?.defaultAssert;
+    if (jwtAssert) {
+      const v = `Bearer ${jwtAssert}`;
       req.headers.authorization = v;
-      req.raw.headers['authorization'] = v; // Fastify 4
+      req.raw.headers['authorization'] = v;
       return;
     }
 
-    // 2) Compat: <uuid>.<64hex> vira Bearer também
-    const t = cookies.authToken;
-    if (t && /^[0-9a-fA-F-]{36}\.[0-9a-fA-F]{64}$/.test(t)) {
-      const v = `Bearer ${t}`;
+    // 2) compat: se existir um cookie com padrão <uuid>.<64hex>, promove a Bearer
+    const maybeBearer = req.cookies?.authToken;
+    if (maybeBearer && /^[0-9a-fA-F-]{36}\.[0-9a-fA-F]{64}$/.test(maybeBearer)) {
+      const v = `Bearer ${maybeBearer}`;
       req.headers.authorization = v;
       req.raw.headers['authorization'] = v;
     }
