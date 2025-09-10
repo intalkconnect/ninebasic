@@ -38,9 +38,9 @@ dotenv.config();
 async function buildServer() {
   const fastify = Fastify({ logger: true });
 
-  // CORS — habilita Authorization e cookies cross-site quando necessário
+  // CORS: autoriza Authorization e cookies quando precisar (cross-site)
   await fastify.register(cors, {
-    origin: true, // reflete a origem do request (evita problema com credenciais + '*')
+    origin: true, // reflete a origem do request (melhor que '*')
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization'],
@@ -55,13 +55,26 @@ async function buildServer() {
   });
   await fastify.register(authCookieToBearer);
 
+  // rotas públicas
   fastify.get('/healthz', async () => ({ ok: true }));
 
-  // rota de debug (fora do guard), útil para ver o Authorization montado
-  fastify.get('/api/debug/auth', async (req) => ({
-    host: req.headers.host,
-    auth: req.headers.authorization || null
-  }));
+  // rota de debug: ver Authorization e payload
+  fastify.get('/api/debug/auth', async (req) => {
+    const hdr = req.headers.authorization || null;
+    let decoded = null;
+    if (hdr?.toLowerCase().startsWith('bearer ')) {
+      const raw = hdr.slice(7);
+      // decode sem verificar assinatura (só para inspeção)
+      const [, b64] = raw.split('.');
+      try { decoded = JSON.parse(Buffer.from(b64, 'base64url').toString('utf8')); } catch {}
+    }
+    return {
+      host: req.headers.host,
+      cookies: Object.keys(req.cookies || {}),
+      authorization: hdr,
+      jwtDecoded: decoded
+    };
+  });
 
   await fastify.register(tenantPlugin);
 
