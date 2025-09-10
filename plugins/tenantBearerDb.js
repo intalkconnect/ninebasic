@@ -7,7 +7,6 @@ function parseAuth(h = '') {
   const m = /^(Bearer|Default)\s+(.+)$/i.exec(h || '');
   return m ? { scheme: m[1], value: m[2] } : null;
 }
-
 function splitIdSecret(raw) {
   const m = /^(?<id>[0-9a-fA-F-]{36})\.(?<secret>[0-9a-fA-F]{64})$/.exec(raw || '');
   return m?.groups || null;
@@ -26,15 +25,18 @@ export function requireTenantBearerDb() {
 
       const auth = parseAuth(req.headers.authorization || req.raw.headers['authorization'] || '');
       if (!auth) {
-        return reply.code(401).send({ error: 'missing_token', message: 'Use Authorization: Bearer <id>.<secret> ou Default <jwt>' });
+        return reply.code(401).send({
+          error: 'missing_token',
+          message: 'Use Authorization: Bearer <uuid>.<secret> ou Default <jwt>'
+        });
       }
 
-      // ===== NOVO: caminho "Default" (usa token default sem expor secret) =====
+      // ===== NOVO: caminho "Default" (usa token default sem expor segredo) =====
       if (auth.scheme.toLowerCase() === 'default') {
         let payload;
         try {
           payload = jwt.verify(auth.value, process.env.JWT_SECRET || 'dev-secret'); // HS256
-        } catch {
+        } catch (e) {
           return reply.code(401).send({ error: 'invalid_default_assert' });
         }
         if (payload.typ !== 'default-assert') {
@@ -52,7 +54,7 @@ export function requireTenantBearerDb() {
           req.tenant.id = tenantId;
         }
 
-        // checar se o tokenId do payload é mesmo DEFAULT & ACTIVE para este tenant
+        // checar se o tokenId do payload é DEFAULT & ACTIVE para este tenant
         const { rows } = await pool.query(
           `SELECT id, is_default, status
              FROM public.tenant_tokens
@@ -65,15 +67,14 @@ export function requireTenantBearerDb() {
         if (rec.status !== 'active') return reply.code(401).send({ error: 'token_revoked' });
         if (!rec.is_default) return reply.code(401).send({ error: 'not_default_token' });
 
-        // sucesso
         req.tokenId = rec.id;
         req.tokenIsDefault = true;
         pool.query('SELECT public.touch_token_usage($1)', [rec.id]).catch(()=>{});
-        return;
+        return; // autorizado
       }
-      // ===== FIM do "Default" =====
+      // ===== FIM "Default" =====
 
-      // ===== Caminho ANTIGO (mantido): Bearer <uuid>.<hexsecret> =====
+      // ===== Caminho existente: Bearer <uuid>.<hexsecret> =====
       const parts = splitIdSecret(auth.value);
       if (!parts) {
         return reply.code(401).send({ error: 'bad_token_format' });
@@ -81,11 +82,11 @@ export function requireTenantBearerDb() {
       const { id: tokenId, secret: presentedSecret } = parts;
 
       if (!tenantId) {
-        const q = await pool.query(
+        const t = await pool.query(
           'SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1',
           [subdomain]
         );
-        tenantId = q.rows[0]?.id;
+        tenantId = t.rows[0]?.id;
         if (!tenantId) return reply.code(404).send({ error: 'tenant_not_found' });
         req.tenant.id = tenantId;
       }
