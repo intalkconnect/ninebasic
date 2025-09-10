@@ -35,26 +35,32 @@ export default async function securityTokensRoutes(fastify) {
     return { ok: true, items };
   });
 
-  // Cria um novo token e retorna o valor COMPLETO UMA VEZ
-  fastify.post('/tokens', async (req, reply) => {
-    const tenantId = req.tenant?.id;
-    if (!tenantId) return reply.code(400).send({ ok: false, error: 'missing_tenant' });
+ // POST /security/tokens
+fastify.post('/tokens', async (req, reply) => {
+  const tenantId = req.tenant?.id;
+  if (!tenantId) return reply.code(400).send({ ok: false, error: 'missing_tenant' });
 
-    const { name, is_default } = req.body || {};
+  const rawName = req.body?.name;
+  const name = String(rawName ?? '').trim();
+  if (!name) {
+    return reply.code(400).send({ ok: false, error: 'name_required', message: 'Informe o nome do token.' });
+  }
+  if (name.length > 64) {
+    return reply.code(400).send({ ok: false, error: 'name_too_long', message: 'Nome do token deve ter até 64 caracteres.' });
+  }
 
-    const { rows } = await pool.query(
-      `SELECT token, token_id
-         FROM public.issue_tenant_token_id_secret($1, $2, $3)`,
-      [tenantId, name ?? null, !!is_default]
-    );
+  const isDefault = !!req.body?.is_default;
 
-    const out = rows?.[0];
-    return {
-      ok: true,
-      id: out?.token_id,
-      token: out?.token, // ← copie e guarde; não será mostrado novamente
-    };
-  });
+  const { rows } = await pool.query(
+    `SELECT token, token_id
+       FROM public.issue_tenant_token_id_secret($1, $2, $3)`,
+    [tenantId, name, isDefault]
+  );
+
+  const out = rows?.[0];
+  return { ok: true, id: out?.token_id, token: out?.token };
+});
+
 
   // Revoga (não permite revogar o default)
   fastify.post('/tokens/:id/revoke', async (req, reply) => {
