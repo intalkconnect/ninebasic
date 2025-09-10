@@ -64,20 +64,35 @@ export function requireTenantBearerDb() {
 
       const raw = parseBearer(req.headers);
       if (!raw) {
-        req.log?.info(
-          {
-            hasCookieHeader: !!req.headers.cookie,
-            cookieNames: req.headers.cookie
-              ? Object.keys((req.cookies || {}))
-              : [],
-            path: req.url,
-            host: req.headers.host,
-          },
-          'missing_token_debug'
-        );
+        req.log?.warn({
+          // Headers
+          authHeader: req.headers.authorization || 'MISSING',
+          host: req.headers.host,
+          path: req.url,
+          method: req.method,
+          // Cookies
+          hasCookieHeader: !!req.headers.cookie,
+          rawCookieHeader: req.headers.cookie || 'MISSING',
+          parsedCookies: req.cookies || {},
+          cookieNames: Object.keys(req.cookies || {}),
+          hasDefaultAssert: !!(req.cookies?.defaultAssert),
+          // Tenant
+          tenant: req.tenant,
+          subdomain: subdomain,
+          tenantId: tenantId
+        }, 'MISSING_TOKEN_401_DEBUG');
+        
         return reply.code(401).send({
           error: 'missing_token',
-          message: 'Use Authorization: Bearer <uuid>.<secret> (ou Bearer <jwt-assert>)'
+          message: 'Use Authorization: Bearer <uuid>.<secret> (ou Bearer <jwt-assert>)',
+          debug: {
+            hasCookies: Object.keys(req.cookies || {}).length > 0,
+            cookieNames: Object.keys(req.cookies || {}),
+            hasAuthHeader: !!req.headers.authorization,
+            path: req.url,
+            tenant: !!tenantId,
+            host: req.headers.host
+          }
         });
       }
 
