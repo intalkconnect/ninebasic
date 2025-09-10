@@ -499,4 +499,4 @@ fastify.post('/embedded/es/pick-number', async (req, reply) => {
   });
 }
 
-export default waProfileRoutes;
+export default whatsappRoutes;
