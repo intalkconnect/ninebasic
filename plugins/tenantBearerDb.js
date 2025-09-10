@@ -14,14 +14,19 @@ function splitIdSecret(raw) {
 
 async function resolveTenantIdBySubdomain(subdomain) {
   if (!subdomain) return null;
+
+  // tenta tenants.subdomain
   try {
     const r = await pool.query('SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1', [subdomain]);
     if (r.rows[0]?.id) return r.rows[0].id;
   } catch {}
+
+  // fallback para companies.slug (se sua estrutura for essa)
   try {
     const r = await pool.query('SELECT id FROM public.companies WHERE slug = $1 LIMIT 1', [subdomain]);
     if (r.rows[0]?.id) return r.rows[0].id;
   } catch {}
+
   return null;
 }
 
@@ -38,9 +43,20 @@ export function requireTenantBearerDb() {
         req.tenant = { id: tenantId, subdomain };
       }
 
-      const raw = parseBearer(req.headers.authorization || req.raw.headers['authorization'] || '');
+      // 1) tenta pegar do header
+      let raw = parseBearer(req.headers.authorization || req.raw.headers['authorization'] || '');
+
+      // 2) FALLBACK: se header não veio, tenta direto dos cookies
       if (!raw) {
-        // 🔎 LOG ÚTIL: mostra se o cookie veio e por que não transformou
+        const cookies = req.cookies || {};
+        if (cookies.defaultAssert) {
+          raw = cookies.defaultAssert; // JWT do token default
+        } else if (cookies.authToken && /^[0-9a-fA-F-]{36}\.[0-9a-fA-F]{64}$/.test(cookies.authToken)) {
+          raw = cookies.authToken;     // <uuid>.<secret>
+        }
+      }
+
+      if (!raw) {
         req.log?.warn({
           hasCookieHeader: !!req.headers.cookie,
           cookieNames: Object.keys(req.cookies || {}),
@@ -53,10 +69,11 @@ export function requireTenantBearerDb() {
         });
       }
 
-      // Caminho 1 — <uuid>.<secret>
+      // Caminho A — token de integração: <uuid>.<secret>
       const parts = splitIdSecret(raw);
       if (parts) {
         const { id: tokenId, secret: presentedSecret } = parts;
+
         const { rows } = await pool.query(
           `SELECT id, secret_hash, is_default, status
              FROM public.tenant_tokens
@@ -77,10 +94,10 @@ export function requireTenantBearerDb() {
         return;
       }
 
-      // Caminho 2 — JWT do defaultAssert
+      // Caminho B — JWT do defaultAssert (não expõe segredo)
       let payload;
       try {
-        payload = jwt.verify(raw, process.env.JWT_SECRET || 'dev-secret');
+        payload = jwt.verify(raw, process.env.JWT_SECRET || 'dev-secret'); // o AUTH e o API devem compartilhar esse segredo
       } catch {
         return reply.code(401).send({ error: 'invalid_bearer', detail: 'jwt_verify_failed' });
       }
