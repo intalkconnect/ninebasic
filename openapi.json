@@ -1,0 +1,1974 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Ninebasic API",
+    "version": "1.0.0",
+    "description": "Especificação gerada automaticamente a partir das rotas encontradas no código. **Revise e complemente** com schemas, parâmetros e exemplos."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Dev"
+    }
+  ],
+  "paths": {
+    "/api/v1/agents": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "routes/atendentes.js",
+        "description": "routes/atendentes.js\n------------ Rotas principais ------------\n🔄 Listar todos os atendentes",
+        "operationId": "get_api_v1_agents",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/breaks/{email}": {
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "⏸️ Pausar atendimento",
+        "description": "⏸️ Pausar atendimento",
+        "operationId": "put_api_v1_agents_breaks_email",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/heartbeat": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/v1/agents/heartbeat",
+        "description": "Rota detectada em `ninebasic-main/routes/agents.js`.",
+        "operationId": "post_api_v1_agents_heartbeat",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/v1/agents/heartbeat",
+        "description": "Rota detectada em `ninebasic-main/routes/agents.js`.",
+        "operationId": "put_api_v1_agents_heartbeat",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/presence/{email}": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/v1/agents/presence/{email}",
+        "description": "Rota detectada em `ninebasic-main/routes/agents.js`.",
+        "operationId": "post_api_v1_agents_presence_email",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/v1/agents/presence/{email}",
+        "description": "Rota detectada em `ninebasic-main/routes/agents.js`.",
+        "operationId": "put_api_v1_agents_presence_email",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/resume/{email}": {
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "▶️ Retomar da pausa",
+        "description": "▶️ Retomar da pausa",
+        "operationId": "put_api_v1_agents_resume_email",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/session/{email}": {
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "🔐 Abrir/atualizar sessão",
+        "description": "🔐 Abrir/atualizar sessão",
+        "operationId": "put_api_v1_agents_session_email",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/status/{email}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/v1/agents/status/{email}",
+        "description": "Rota detectada em `ninebasic-main/routes/agents.js`.",
+        "operationId": "get_api_v1_agents_status_email",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/status/{session}": {
+      "patch": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PATCH /api/v1/agents/status/{session}",
+        "description": "Rota detectada em `ninebasic-main/routes/agents.js`.",
+        "operationId": "patch_api_v1_agents_status_session",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/v1/agents/status/{session}",
+        "description": "Rota detectada em `ninebasic-main/routes/agents.js`.",
+        "operationId": "post_api_v1_agents_status_session",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/v1/agents/status/{session}",
+        "description": "Rota detectada em `ninebasic-main/routes/agents.js`.",
+        "operationId": "put_api_v1_agents_status_session",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{email}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "🔍 Buscar atendente por email",
+        "description": "🔍 Buscar atendente por email",
+        "operationId": "get_api_v1_agents_email",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{id}": {
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "🗑️ Excluir atendente",
+        "description": "🗑️ Excluir atendente",
+        "operationId": "delete_api_v1_agents_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/agents/realtime": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "* ==========================",
+        "description": "* ==========================\n *  Realtime - Somente agentes\n * ==========================\n * GET /analytics/agents/realtime\n * Retorna todos os atendentes (online, pause, offline, inativo),\n * com motivo/duração da pausa e # de tickets abertos por agente.",
+        "operationId": "get_api_v1_analytics_agents_realtime",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/metrics/abandonment": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "* ==================================",
+        "description": "* ==================================\n   *  Métricas - Abandono (sem 1ª resposta até threshold)\n   * ==================================\n   * GET /analytics/metrics/abandonment?from&to&fila&canal&threshold_min=15",
+        "operationId": "get_api_v1_analytics_metrics_abandonment",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/metrics/agents/art": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "* ==================================",
+        "description": "* ==================================\n   *  Métricas - ART por agente\n   * ==================================\n   * GET /analytics/metrics/agents/art?from&to&fila&canal&agent",
+        "operationId": "get_api_v1_analytics_metrics_agents_art",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/metrics/aging-by-queue": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "* ==================================",
+        "description": "* ==================================\n   *  Métricas - Aging do backlog (snapshot atual)\n   * ==================================\n   * GET /analytics/metrics/aging-by-queue",
+        "operationId": "get_api_v1_analytics_metrics_aging-by-queue",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/metrics/duration-by-queue": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "* ==================================",
+        "description": "* ==================================\n   *  Métricas - Duração por fila\n   * ==================================\n   * GET /analytics/metrics/duration-by-queue?from&to&fila&canal",
+        "operationId": "get_api_v1_analytics_metrics_duration-by-queue",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/metrics/feedback": {
+      "post": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "POST /metrics/feedback  -> salva NPS/CSAT",
+        "description": "POST /metrics/feedback  -> salva NPS/CSAT",
+        "operationId": "post_api_v1_analytics_metrics_feedback",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/metrics/feedback/responses": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "GET /api/v1/analytics/metrics/feedback/responses",
+        "description": "Rota detectada em `ninebasic-main/routes/analytics.js`.",
+        "operationId": "get_api_v1_analytics_metrics_feedback_responses",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/metrics/frt": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "* ==================================",
+        "description": "* ==================================\n   *  Métricas - FRT (First Response Time)\n   * ==================================\n   * GET /analytics/metrics/frt?group=channel|fila|day&from&to&fila&canal&agent",
+        "operationId": "get_api_v1_analytics_metrics_frt",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/metrics/new-clients": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "GET /analytics/metrics/new-clients?group=day&from&to",
+        "description": "GET /analytics/metrics/new-clients?group=day&from&to",
+        "operationId": "get_api_v1_analytics_metrics_new-clients",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/metrics/queues": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "* ==================================",
+        "description": "* ==================================\n   *  Métricas - Por fila (snapshot ou período)\n   * ==================================\n   * GET /analytics/metrics/queues?from&to",
+        "operationId": "get_api_v1_analytics_metrics_queues",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/metrics/series/csat": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "GET /metrics/series/csat -> série temporal para gráficos (com distribuição e gauge)",
+        "description": "GET /metrics/series/csat -> série temporal para gráficos (com distribuição e gauge)",
+        "operationId": "get_api_v1_analytics_metrics_series_csat",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/metrics/series/nps": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "GET /metrics/series/nps  -> série temporal para gráficos (com NPS e distribuição)",
+        "description": "GET /metrics/series/nps  -> série temporal para gráficos (com NPS e distribuição)",
+        "operationId": "get_api_v1_analytics_metrics_series_nps",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/metrics/summary": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "GET /api/v1/analytics/metrics/summary",
+        "description": "Rota detectada em `ninebasic-main/routes/analytics.js`.",
+        "operationId": "get_api_v1_analytics_metrics_summary",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/analytics/realtime": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "* ==========================",
+        "description": "* ==========================\n   *  Realtime (estado atual)\n   * ==========================\n   * GET /analytics/realtime\n   * (id, cliente, canal, agente, tempoEspera[min], status, prioridade, fila, posicaoFila, inicioConversa)",
+        "operationId": "get_api_v1_analytics_realtime",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/billing/pricing": {
+      "get": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "========== PRICING (public.billing_pricing) ==========",
+        "description": "========== PRICING (public.billing_pricing) ==========\nListar preços",
+        "operationId": "get_api_v1_billing_pricing",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "UPSERT de preço (por channel)",
+        "description": "UPSERT de preço (por channel)",
+        "operationId": "post_api_v1_billing_pricing",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/billing/pricing/{channel}": {
+      "delete": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "DELETE preço",
+        "description": "DELETE preço",
+        "operationId": "delete_api_v1_billing_pricing_channel",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "Buscar preço de um canal",
+        "description": "Buscar preço de um canal",
+        "operationId": "get_api_v1_billing_pricing_channel",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "PATCH preço",
+        "description": "PATCH preço",
+        "operationId": "patch_api_v1_billing_pricing_channel",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "PUT preço",
+        "description": "PUT preço",
+        "operationId": "put_api_v1_billing_pricing_channel",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/billing/statement": {
+      "get": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "========== EXTRATO AGREGADO (Geral por user_id+channel) ==========",
+        "description": "========== EXTRATO AGREGADO (Geral por user_id+channel) ==========\nGET /billing/statement?from=...&to=...&mode=start&channel=...",
+        "operationId": "get_api_v1_billing_statement",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/billing/statement/daily": {
+      "get": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "========== EXTRATO DIÁRIO (Geral por dia+canal) ==========",
+        "description": "========== EXTRATO DIÁRIO (Geral por dia+canal) ==========\nGET /billing/statement/daily?from=...&to=...&mode=start|activity&channel=...",
+        "operationId": "get_api_v1_billing_statement_daily",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/billing/statement/detail": {
+      "get": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "========== DETALHE (lista cada sessão com preço) ==========",
+        "description": "========== DETALHE (lista cada sessão com preço) ==========\nGET /billing/statement/detail?from=...&to=...&mode=start&channel=...&limit=100&offset=0",
+        "operationId": "get_api_v1_billing_statement_detail",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/breaks": {
+      "get": {
+        "tags": [
+          "breaks"
+        ],
+        "summary": "routes/pausas.js",
+        "description": "routes/pausas.js\n========== CRUD: MOTIVOS (pause_reasons) ==========\nListar motivos (opcional ?active=true|false)",
+        "operationId": "get_api_v1_breaks",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "breaks"
+        ],
+        "summary": "Criar motivo",
+        "description": "Criar motivo",
+        "operationId": "post_api_v1_breaks",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/breaks/agents/{email}/current": {
+      "get": {
+        "tags": [
+          "breaks"
+        ],
+        "summary": "========== SESSÕES DE PAUSA DO ATENDENTE ==========",
+        "description": "========== SESSÕES DE PAUSA DO ATENDENTE ==========\nSessão ativa do atendente",
+        "operationId": "get_api_v1_breaks_agents_email_current",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/breaks/agents/{email}/history": {
+      "get": {
+        "tags": [
+          "breaks"
+        ],
+        "summary": "Histórico do atendente",
+        "description": "Histórico do atendente",
+        "operationId": "get_api_v1_breaks_agents_email_history",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/breaks/agents/{email}/start": {
+      "post": {
+        "tags": [
+          "breaks"
+        ],
+        "summary": "Iniciar pausa",
+        "description": "Iniciar pausa",
+        "operationId": "post_api_v1_breaks_agents_email_start",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/breaks/agents/{email}/{id}/end": {
+      "patch": {
+        "tags": [
+          "breaks"
+        ],
+        "summary": "Encerrar pausa",
+        "description": "Encerrar pausa",
+        "operationId": "patch_api_v1_breaks_agents_email_id_end",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/breaks/{id}": {
+      "delete": {
+        "tags": [
+          "breaks"
+        ],
+        "summary": "Remover motivo (só se não houver sessões vinculadas)",
+        "description": "Remover motivo (só se não houver sessões vinculadas)",
+        "operationId": "delete_api_v1_breaks_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "breaks"
+        ],
+        "summary": "Buscar um motivo",
+        "description": "Buscar um motivo",
+        "operationId": "get_api_v1_breaks_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "breaks"
+        ],
+        "summary": "Atualizar motivo (PATCH)",
+        "description": "Atualizar motivo (PATCH)",
+        "operationId": "patch_api_v1_breaks_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "breaks"
+        ],
+        "summary": "Atualizar motivo (PUT)",
+        "description": "Atualizar motivo (PUT)",
+        "operationId": "put_api_v1_breaks_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/breaks/{id}/toggle": {
+      "patch": {
+        "tags": [
+          "breaks"
+        ],
+        "summary": "Alternar ativo/inativo",
+        "description": "Alternar ativo/inativo",
+        "operationId": "patch_api_v1_breaks_id_toggle",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/campaigns": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Retorna também agregados de campaign_items para progresso.",
+        "description": "Retorna também agregados de campaign_items para progresso.\n=============================================================================\nGET /api/v1/campaigns?tab=(all|active|finished|failed)&q=texto",
+        "operationId": "get_api_v1_campaigns",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "status inicial: 'queued' (imediata) ou 'scheduled' (agendada)",
+        "description": "status inicial: 'queued' (imediata) ou 'scheduled' (agendada)\nquem dispara o envio é o scheduler (DB) já existente\n=============================================================================",
+        "operationId": "post_api_v1_campaigns",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/campaigns/{id}": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "=============================================================================",
+        "description": "=============================================================================\nGET /api/v1/campaigns/:id  → detalhes + agregados\n=============================================================================",
+        "operationId": "get_api_v1_campaigns_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/campaigns/{id}/items": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Para inspecionar itens; deixe comentado se não precisar agora.",
+        "description": "Para inspecionar itens; deixe comentado se não precisar agora.\n-----------------------------------------------------------------------------",
+        "operationId": "get_api_v1_campaigns_id_items",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/conversations": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "routes/chatsRoutes.js",
+        "description": "routes/chatsRoutes.js",
+        "operationId": "get_api_v1_conversations",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/queues": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "GET /api/v1/conversations/queues",
+        "description": "Rota detectada em `ninebasic-main/routes/conversations.js`.",
+        "operationId": "get_api_v1_conversations_queues",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/queues/next": {
+      "put": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "PUT /api/v1/conversations/queues/next",
+        "description": "Rota detectada em `ninebasic-main/routes/conversations.js`.",
+        "operationId": "put_api_v1_conversations_queues_next",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/customers": {
+      "get": {
+        "tags": [
+          "customers"
+        ],
+        "summary": "GET /clientes?page=&page_size=&q=",
+        "description": "GET /clientes?page=&page_size=&q=",
+        "operationId": "get_api_v1_customers",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/customers/{user_id}": {
+      "delete": {
+        "tags": [
+          "customers"
+        ],
+        "summary": "DELETE /clientes/:user_id",
+        "description": "DELETE /clientes/:user_id",
+        "operationId": "delete_api_v1_customers_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "customers"
+        ],
+        "summary": "GET /clientes/:user_id",
+        "description": "GET /clientes/:user_id",
+        "operationId": "get_api_v1_customers_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "customers"
+        ],
+        "summary": "PATCH /clientes/:user_id",
+        "description": "PATCH /clientes/:user_id",
+        "operationId": "patch_api_v1_customers_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "customers"
+        ],
+        "summary": "PUT /clientes/:user_id",
+        "description": "PUT /clientes/:user_id",
+        "operationId": "put_api_v1_customers_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/flows/activate": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "POST /api/v1/flows/activate",
+        "description": "Rota detectada em `ninebasic-main/routes/flows.js`.",
+        "operationId": "post_api_v1_flows_activate",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/flows/data/{id}": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "GET /api/v1/flows/data/{id}",
+        "description": "Rota detectada em `ninebasic-main/routes/flows.js`.",
+        "operationId": "get_api_v1_flows_data_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/flows/history": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "GET /api/v1/flows/history",
+        "description": "Rota detectada em `ninebasic-main/routes/flows.js`.",
+        "operationId": "get_api_v1_flows_history",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/flows/latest": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "GET /api/v1/flows/latest",
+        "description": "Rota detectada em `ninebasic-main/routes/flows.js`.",
+        "operationId": "get_api_v1_flows_latest",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/flows/publish": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "POST /api/v1/flows/publish",
+        "description": "Rota detectada em `ninebasic-main/routes/flows.js`.",
+        "operationId": "post_api_v1_flows_publish",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/flows/sessions/{user_id}": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "GET /api/v1/flows/sessions/{user_id}",
+        "description": "Rota detectada em `ninebasic-main/routes/flows.js`.",
+        "operationId": "get_api_v1_flows_sessions_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "POST /api/v1/flows/sessions/{user_id}",
+        "description": "Rota detectada em `ninebasic-main/routes/flows.js`.",
+        "operationId": "post_api_v1_flows_sessions_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/messages/check-24h/{user_id}": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "===================== STATUS / CONTAGEM =====================",
+        "description": "===================== STATUS / CONTAGEM =====================\nGET /api/v1/messages/check-24h/:user_id",
+        "operationId": "get_api_v1_messages_check-24h_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/messages/read-status": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "GET /api/v1/messages/read-status",
+        "description": "GET /api/v1/messages/read-status",
+        "operationId": "get_api_v1_messages_read-status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/messages/read-status/{user_id}": {
+      "put": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "PUT /api/v1/messages/read-status/:user_id",
+        "description": "PUT /api/v1/messages/read-status/:user_id",
+        "operationId": "put_api_v1_messages_read-status_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/messages/send": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "===================== ENVIO =====================",
+        "description": "===================== ENVIO =====================\nPOST /api/v1/messages/send",
+        "operationId": "post_api_v1_messages_send",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/messages/send/template": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "POST /api/v1/messages/send/template",
+        "description": "POST /api/v1/messages/send/template",
+        "operationId": "post_api_v1_messages_send_template",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/messages/unread-counts": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "GET /api/v1/messages/unread-counts",
+        "description": "GET /api/v1/messages/unread-counts",
+        "operationId": "get_api_v1_messages_unread-counts",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/messages/{user_id}": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "===================== LISTAGEM =====================",
+        "description": "===================== LISTAGEM =====================\nGET /api/v1/messages/:user_id",
+        "operationId": "get_api_v1_messages_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/queue-hours/{queue}/hours": {
+      "get": {
+        "tags": [
+          "queue-hours"
+        ],
+        "summary": "GET /queues/:queue/hours",
+        "description": "GET /queues/:queue/hours",
+        "operationId": "get_api_v1_queue-hours_queue_hours",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "queue-hours"
+        ],
+        "summary": "POST /queues/:queue/hours  (upsert)",
+        "description": "POST /queues/:queue/hours  (upsert)",
+        "operationId": "post_api_v1_queue-hours_queue_hours",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "queue-hours"
+        ],
+        "summary": "PUT /queues/:queue/hours  (upsert — aceita weekly **ou** windows)",
+        "description": "PUT /queues/:queue/hours  (upsert — aceita weekly **ou** windows)",
+        "operationId": "put_api_v1_queue-hours_queue_hours",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/queue-hours/{queue}/hours/test": {
+      "post": {
+        "tags": [
+          "queue-hours"
+        ],
+        "summary": "POST /queues/:queue/hours/test",
+        "description": "POST /queues/:queue/hours/test",
+        "operationId": "post_api_v1_queue-hours_queue_hours_test",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/queues": {
+      "get": {
+        "tags": [
+          "queues"
+        ],
+        "summary": "📥 Listar filas",
+        "description": "📥 Listar filas",
+        "operationId": "get_api_v1_queues",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "queues"
+        ],
+        "summary": "➕ Criar nova fila (ativa sempre TRUE; descricao/color opcionais)",
+        "description": "➕ Criar nova fila (ativa sempre TRUE; descricao/color opcionais)",
+        "operationId": "post_api_v1_queues",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/queues/agents/{queue_name}": {
+      "get": {
+        "tags": [
+          "queues"
+        ],
+        "summary": "👥 Atendentes online da fila",
+        "description": "👥 Atendentes online da fila",
+        "operationId": "get_api_v1_queues_agents_queue_name",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/queues/queues-permission": {
+      "post": {
+        "tags": [
+          "queues"
+        ],
+        "summary": "🔄 Definir permissão de transferência",
+        "description": "🔄 Definir permissão de transferência",
+        "operationId": "post_api_v1_queues_queues-permission",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/queues/queues-permission/{email}": {
+      "get": {
+        "tags": [
+          "queues"
+        ],
+        "summary": "👀 Obter filas que o usuário pode transferir",
+        "description": "👀 Obter filas que o usuário pode transferir",
+        "operationId": "get_api_v1_queues_queues-permission_email",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/quick-replies": {
+      "get": {
+        "tags": [
+          "quick-replies"
+        ],
+        "summary": "📄 Listar todas as respostas rápidas",
+        "description": "📄 Listar todas as respostas rápidas",
+        "operationId": "get_api_v1_quick-replies",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "quick-replies"
+        ],
+        "summary": "routes/quickReplies.js",
+        "description": "routes/quickReplies.js\n➕ Criar nova resposta rápida",
+        "operationId": "post_api_v1_quick-replies",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/quick-replies/{id}": {
+      "delete": {
+        "tags": [
+          "quick-replies"
+        ],
+        "summary": "🗑️ Remover uma resposta rápida",
+        "description": "🗑️ Remover uma resposta rápida",
+        "operationId": "delete_api_v1_quick-replies_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/security/tokens": {
+      "get": {
+        "tags": [
+          "security"
+        ],
+        "summary": "Lista tokens do tenant (mascarados; sem segredo)",
+        "description": "Lista tokens do tenant (mascarados; sem segredo)",
+        "operationId": "get_api_v1_security_tokens",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "security"
+        ],
+        "summary": "POST /security/tokens",
+        "description": "POST /security/tokens",
+        "operationId": "post_api_v1_security_tokens",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/security/tokens/{id}/revoke": {
+      "post": {
+        "tags": [
+          "security"
+        ],
+        "summary": "Revoga (não permite revogar o default)",
+        "description": "Revoga (não permite revogar o default)",
+        "operationId": "post_api_v1_security_tokens_id_revoke",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/settings": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Rota GET /settings - Retorna todas as configurações",
+        "description": "Rota GET /settings - Retorna todas as configurações",
+        "operationId": "get_api_v1_settings",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Rota POST /settings - Cria ou atualiza uma configuração",
+        "description": "Rota POST /settings - Cria ou atualiza uma configuração",
+        "operationId": "post_api_v1_settings",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/storage/presigned-url": {
+      "get": {
+        "tags": [
+          "storage"
+        ],
+        "summary": "routes/uploadPresignedRoutes.js",
+        "description": "routes/uploadPresignedRoutes.js",
+        "operationId": "get_api_v1_storage_presigned-url",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/telegram/connect": {
+      "post": {
+        "tags": [
+          "telegram"
+        ],
+        "summary": "routes/telegram.js",
+        "description": "routes/telegram.js",
+        "operationId": "post_api_v1_telegram_connect",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/telegram/status": {
+      "get": {
+        "tags": [
+          "telegram"
+        ],
+        "summary": "GET /api/v1/telegram/status",
+        "description": "Rota detectada em `ninebasic-main/routes/telegram.js`.",
+        "operationId": "get_api_v1_telegram_status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/templates": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "===== Rotas locais (DB do tenant) =====",
+        "description": "===== Rotas locais (DB do tenant) =====\nGET / -> lista local com filtros opcionais ?status= & ?q=",
+        "operationId": "get_api_v1_templates",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "POST / -> cria rascunho local (serializa JSONs)",
+        "description": "POST / -> cria rascunho local (serializa JSONs)",
+        "operationId": "post_api_v1_templates",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/templates/provider": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "GET /provider -> lista direto da Graph (inclui quality_score)",
+        "description": "GET /provider -> lista direto da Graph (inclui quality_score)",
+        "operationId": "get_api_v1_templates_provider",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/templates/sync-all": {
+      "post": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "POST /sync-all -> importa/atualiza todos (serializa JSONs; sem ON CONFLICT duro)",
+        "description": "POST /sync-all -> importa/atualiza todos (serializa JSONs; sem ON CONFLICT duro)",
+        "operationId": "post_api_v1_templates_sync-all",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/templates/{id}": {
+      "delete": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "DELETE /:id -> remove local",
+        "description": "DELETE /:id -> remove local",
+        "operationId": "delete_api_v1_templates_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/templates/{id}/submit": {
+      "post": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "===== Rotas que falam com a Graph =====",
+        "description": "===== Rotas que falam com a Graph =====\nPOST /:id/submit -> submete na Graph",
+        "operationId": "post_api_v1_templates_id_submit",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/templates/{id}/sync": {
+      "post": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "POST /:id/sync -> sincroniza status e quality_score (se houver coluna)",
+        "description": "POST /:id/sync -> sincroniza status e quality_score (se houver coluna)",
+        "operationId": "post_api_v1_templates_id_sync",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/tickets/history": {
+      "get": {
+        "tags": [
+          "tickets"
+        ],
+        "summary": "nada de client.release(); // << NÃO existe nesse client",
+        "description": "nada de client.release(); // << NÃO existe nesse client\nGET /tickets/history → lista de tickets fechados (com busca e período)",
+        "operationId": "get_api_v1_tickets_history",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/tickets/history/{id}": {
+      "get": {
+        "tags": [
+          "tickets"
+        ],
+        "summary": "GET /api/v1/tickets/history/{id}",
+        "description": "Rota detectada em `ninebasic-main/routes/tickets.js`.",
+        "operationId": "get_api_v1_tickets_history_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/tickets/history/{id}/pdf": {
+      "get": {
+        "tags": [
+          "tickets"
+        ],
+        "summary": "Validação simples do formato do user_id",
+        "description": "Validação simples do formato do user_id",
+        "operationId": "get_api_v1_tickets_history_id_pdf",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/tickets/last/{user_id}": {
+      "get": {
+        "tags": [
+          "tickets"
+        ],
+        "summary": "GET /tickets/last/:user_id → retorna o ticket mais recente do usuário",
+        "description": "GET /tickets/last/:user_id → retorna o ticket mais recente do usuário",
+        "operationId": "get_api_v1_tickets_last_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/tickets/transferir": {
+      "post": {
+        "tags": [
+          "tickets"
+        ],
+        "summary": "POST /tickets/transferir → fecha atual e cria novo em outra fila",
+        "description": "POST /tickets/transferir → fecha atual e cria novo em outra fila\nPOST /tickets/transferir → fecha atual e cria novo em outra fila",
+        "operationId": "post_api_v1_tickets_transferir",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/tickets/user/{user_id}": {
+      "get": {
+        "tags": [
+          "tickets"
+        ],
+        "summary": "GET /tickets/user/:user_id → tickets fechados do usuário",
+        "description": "GET /tickets/user/:user_id → tickets fechados do usuário",
+        "operationId": "get_api_v1_tickets_user_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/tickets/{user_id}": {
+      "get": {
+        "tags": [
+          "tickets"
+        ],
+        "summary": "GET /tickets/:user_id → Consulta ticket aberto por user_id",
+        "description": "GET /tickets/:user_id → Consulta ticket aberto por user_id",
+        "operationId": "get_api_v1_tickets_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "tickets"
+        ],
+        "summary": "PUT /tickets/:user_id → fechar último ticket aberto do user_id e publicar evento",
+        "description": "PUT /tickets/:user_id → fechar último ticket aberto do user_id e publicar evento",
+        "operationId": "put_api_v1_tickets_user_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/users": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Listar",
+        "description": "Listar",
+        "operationId": "get_api_v1_users",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Criar (tenant + public + invite)",
+        "description": "Criar (tenant + public + invite)",
+        "operationId": "post_api_v1_users",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/users/{email}": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Buscar por email",
+        "description": "Buscar por email",
+        "operationId": "get_api_v1_users_email",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/users/{id}": {
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Excluir (tenant) + chamada externa para remover em public.users",
+        "description": "Excluir (tenant) + chamada externa para remover em public.users",
+        "operationId": "delete_api_v1_users_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Atualizar (sincroniza public.users: apenas profile)",
+        "description": "Atualizar (sincroniza public.users: apenas profile)",
+        "operationId": "put_api_v1_users_id",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/whatsapp/embedded/es/finalize": {
+      "post": {
+        "tags": [
+          "whatsapp"
+        ],
+        "summary": "============ FINALIZE (Embedded Signup) ============",
+        "description": "============ FINALIZE (Embedded Signup) ============\nPOST /api/v1/wa/es/finalize",
+        "operationId": "post_api_v1_whatsapp_embedded_es_finalize",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/whatsapp/embedded/es/pick-number": {
+      "post": {
+        "tags": [
+          "whatsapp"
+        ],
+        "summary": "routes/waEmbedded.js (trecho)",
+        "description": "routes/waEmbedded.js (trecho)",
+        "operationId": "post_api_v1_whatsapp_embedded_es_pick-number",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/whatsapp/number": {
+      "get": {
+        "tags": [
+          "whatsapp"
+        ],
+        "summary": "GET /wa/number -> metadados do número (UI)",
+        "description": "GET /wa/number -> metadados do número (UI)",
+        "operationId": "get_api_v1_whatsapp_number",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/whatsapp/photo-from-url": {
+      "post": {
+        "tags": [
+          "whatsapp"
+        ],
+        "summary": "POST /wa/profile/photo-from-url -> upload + aplicar foto",
+        "description": "POST /wa/profile/photo-from-url -> upload + aplicar foto\nbody: { file_url: string, type?: 'image/jpeg'|'image/png' }",
+        "operationId": "post_api_v1_whatsapp_photo-from-url",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/whatsapp/profile": {
+      "get": {
+        "tags": [
+          "whatsapp"
+        ],
+        "summary": "---------- ENDPOINTS ----------",
+        "description": "---------- ENDPOINTS ----------\nGET /wa/profile -> phone + business profile",
+        "operationId": "get_api_v1_whatsapp_profile",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "whatsapp"
+        ],
+        "summary": "POST /wa/profile -> update about/address/description/email/vertical/websites",
+        "description": "POST /wa/profile -> update about/address/description/email/vertical/websites",
+        "operationId": "post_api_v1_whatsapp_profile",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/whatsapp/profile/photo": {
+      "delete": {
+        "tags": [
+          "whatsapp"
+        ],
+        "summary": "DELETE /wa/profile/photo -> remove foto",
+        "description": "DELETE /wa/profile/photo -> remove foto",
+        "operationId": "delete_api_v1_whatsapp_profile_photo",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/whatsapp/status": {
+      "get": {
+        "tags": [
+          "whatsapp"
+        ],
+        "summary": "GET /api/v1/whatsapp/status",
+        "description": "Rota detectada em `ninebasic-main/routes/whatsapp.js`.",
+        "operationId": "get_api_v1_whatsapp_status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "agents"
+    },
+    {
+      "name": "analytics"
+    },
+    {
+      "name": "billing"
+    },
+    {
+      "name": "breaks"
+    },
+    {
+      "name": "campaigns"
+    },
+    {
+      "name": "conversations"
+    },
+    {
+      "name": "customers"
+    },
+    {
+      "name": "flows"
+    },
+    {
+      "name": "messages"
+    },
+    {
+      "name": "queue-hours"
+    },
+    {
+      "name": "queues"
+    },
+    {
+      "name": "quick-replies"
+    },
+    {
+      "name": "security"
+    },
+    {
+      "name": "settings"
+    },
+    {
+      "name": "storage"
+    },
+    {
+      "name": "telegram"
+    },
+    {
+      "name": "templates"
+    },
+    {
+      "name": "tickets"
+    },
+    {
+      "name": "users"
+    },
+    {
+      "name": "whatsapp"
+    }
+  ]
+}
