@@ -100,8 +100,8 @@ ORDER BY t.created_at DESC;
   fastify.put('/queues/next', async (req, reply) => {
   const { email, queues } = req.body;
 
-  if (!email || !filas || !Array.isArray(filas)) {
-    return reply.code(400).send({ error: 'email e filas[] são obrigatórios' });
+  if (!email || !queues || !Array.isArray(queues)) {
+    return reply.code(400).send({ error: 'email e queues[] são obrigatórios' });
   }
 
   try {
