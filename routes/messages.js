@@ -254,16 +254,52 @@ fastify.post('/send/template', async (req, reply) => {
   // ===================== LISTAGEM =====================
 
   // GET /api/v1/messages/:user_id
-  fastify.get('/:user_id', async (req) => {
-    const userId = decode(req.params.user_id);
-    const { rows } = await req.db.query(
-      `SELECT * FROM messages
-        WHERE user_id = $1
-        ORDER BY "timestamp" ASC;`,
-      [userId]
-    );
-    return rows;
-  });
+fastify.get('/:user_id', async (req) => {
+  const userId = decode(req.params.user_id);
+  const { limit = '100', before_ts, sort = 'asc' } = req.query || {};
+
+  const lim = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+  const wantAsc = String(sort).toLowerCase() === 'asc';
+
+  // Monta SQL: sempre consulta em DESC (índice ajuda), e depois ajusta a ordem para o cliente
+  let sql, params;
+  if (before_ts) {
+    sql = `
+      SELECT *
+        FROM messages
+       WHERE user_id = $1
+         AND "timestamp" < $2
+       ORDER BY "timestamp" DESC
+       LIMIT $3
+    `;
+    params = [userId, new Date(before_ts).toISOString(), lim];
+  } else {
+    // primeira página: últimas N
+    sql = `
+      SELECT *
+        FROM messages
+       WHERE user_id = $1
+       ORDER BY "timestamp" DESC
+       LIMIT $2
+    `;
+    params = [userId, lim];
+  }
+
+  const { rows } = await req.db.query(sql, params);
+
+  // Ajusta a ordem para o cliente
+  const result = wantAsc ? rows.slice().reverse() : rows;
+
+  // cursor para próxima página (pegar mais antigas)
+  const oldest = result.length ? (result[0].timestamp || result[0].created_at) : before_ts || null;
+
+  return {
+    data: result,
+    has_more: rows.length === lim,     // se veio cheio, provavelmente há mais
+    next_before_ts: oldest             // passe isso no próximo before_ts
+  };
+});
 }
+
 
 
