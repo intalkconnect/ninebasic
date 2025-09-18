@@ -100,7 +100,7 @@ async function tracertRoutes(fastify, options) {
           SELECT bt.block_label
           FROM hmg.bot_transitions bt
           WHERE bt.user_id = v.user_id
-          ORDER BY bt.occurred_at DESC
+          ORDER BY bt.entered_at DESC
           LIMIT 1
         ) t ON true
         ${whereSql}
@@ -155,7 +155,7 @@ async function tracertRoutes(fastify, options) {
           SELECT bt.block_label
           FROM hmg.bot_transitions bt
           WHERE bt.user_id = v.user_id
-          ORDER BY bt.occurred_at DESC
+          ORDER BY bt.entered_at DESC
           LIMIT 1
         ) t ON true
         WHERE v.user_id = $1
@@ -310,7 +310,7 @@ async function tracertRoutes(fastify, options) {
           SELECT bt.block_label
           FROM hmg.bot_transitions bt
           WHERE bt.user_id = v.user_id
-          ORDER BY bt.occurred_at DESC
+          ORDER BY bt.entered_at DESC
           LIMIT 1
         ) t ON true
         WHERE v.current_stage IS NOT NULL
