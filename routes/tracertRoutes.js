@@ -1,7 +1,7 @@
 // routes/botTracertRoutes.js
 // Endpoints para o "trace" do BOT (onde está no fluxo, tempo no estágio, loops, gargalos)
 
-async function botTracertRoutes(fastify, options) {
+async function tracertRoutes(fastify, options) {
   /**
    * GET /bot/tracert/customers
    * Lista paginada dos clientes com posição no bot.
@@ -276,4 +276,4 @@ async function botTracertRoutes(fastify, options) {
   });
 }
 
-export default botTracertRoutes;
+export default tracertRoutes;
