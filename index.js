@@ -27,6 +27,7 @@ import templatesRoutes     from './routes/templates.js';
 import usersRoutes         from './routes/users.js';
 import campaignsRoutes     from './routes/campaigns.js';
 import billingRoutes       from './routes/billing.js';
+import tracertRoutes       from './routes/tracertRoutes.js';
 
 // novos
 import whatsappRoutes      from './routes/whatsapp.js';
@@ -131,6 +132,7 @@ async function buildServer() {
     api.register(whatsappRoutes, { prefix: '/api/v1/whatsapp' });
     api.register(telegramRoutes,  { prefix: '/api/v1/telegram' });
     api.register(securityTokensRoutes, { prefix: '/api/v1/security' });
+    api.register(tracertRoutes, { prefix: '/api/v1/tracert' });
   });
 
   return fastify;
@@ -150,6 +152,7 @@ async function start() {
 }
 
 start();
+
 
 
 
