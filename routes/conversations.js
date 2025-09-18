@@ -2,19 +2,19 @@
 // routes/chatsRoutes.js
 async function conversationsRoutes(fastify, options) {
   fastify.get('/', async (req, reply) => {
-    const { assigned_to, filas } = req.query;
+  const { assigned_to, filas } = req.query;
 
-    if (!assigned_to || !filas) {
-      return reply.code(400).send({
-        error: 'Parâmetros obrigatórios: assigned_to (email) e filas (CSV)',
-      });
-    }
+  if (!assigned_to || !filas) {
+    return reply.code(400).send({
+      error: 'Parâmetros obrigatórios: assigned_to (email) e filas (CSV)',
+    });
+  }
 
-    const filaList = filas.split(',').map((f) => f.trim());
+  const filaList = filas.split(',').map((f) => f.trim());
 
-    try {
-      const { rows } = await req.db.query(
-        `
+  try {
+    const { rows } = await req.db.query(
+      `
 SELECT 
   t.user_id,
   t.ticket_number,
@@ -26,36 +26,56 @@ SELECT
   c.channel,
   c.phone,
   c.atendido,
-  m.type AS type,
-  m.content AS content,
-  m.timestamp AS timestamp
-FROM tickets t
-JOIN clientes c ON t.user_id = c.user_id
-JOIN filas f ON f.nome = t.fila
+
+  -- novos campos denormalizados
+  lm.type                 AS type,               -- tipo da ÚLTIMA msg (não-system)
+  lm.last_message         AS last_message,       -- string já pronta p/ snippet
+  lm.last_message_at      AS last_message_at     -- timestamp da última msg
+
+FROM hmg.tickets t
+JOIN hmg.clientes c ON c.user_id = t.user_id
+JOIN hmg.filas    f ON f.nome    = t.fila
+
 LEFT JOIN LATERAL (
-  SELECT type, content, timestamp
-  FROM messages
-  WHERE user_id = t.user_id
-  ORDER BY timestamp DESC
+  SELECT
+    m."type"        AS type,
+    m."timestamp"   AS last_message_at,
+    CASE
+      WHEN m."type" = 'text'                   THEN m."content"
+      WHEN m."type" IN ('image','photo')       THEN '🖼️ Imagem'
+      WHEN m."type" IN ('file','document')     THEN '📄 Documento'
+      WHEN m."type" IN ('audio','voice')       THEN '🎙️ Áudio'
+      WHEN m."type" = 'video'                  THEN '🎬 Vídeo'
+      WHEN m."type" = 'template'               THEN '📋 Template'
+      WHEN m."type" = 'location'               THEN '📍 Localização'
+      ELSE '[mensagem]'
+    END AS last_message
+  FROM hmg.messages m
+  WHERE m.user_id = t.user_id
+    AND m."type" <> 'system'               -- ⚠️ ignora mensagens de sistema
+  ORDER BY m."timestamp" DESC
   LIMIT 1
-) m ON true
+) lm ON TRUE
+
 WHERE t.status = 'open'
   AND t.assigned_to = $1
   AND t.fila = ANY($2)
-ORDER BY t.created_at DESC;
-        `,
-        [assigned_to, filaList]
-      );
 
-      return reply.send(rows);
-    } catch (error) {
-      fastify.log.error('Erro ao buscar chats:', error);
-      return reply.code(500).send({
-        error: 'Erro interno ao buscar chats',
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined,
-      });
-    }
-  });
+ORDER BY COALESCE(lm.last_message_at, t.created_at) DESC;
+      `,
+      [assigned_to, filaList]
+    );
+
+    return reply.send(rows);
+  } catch (error) {
+    fastify.log.error('Erro ao buscar chats:', error);
+    return reply.code(500).send({
+      error: 'Erro interno ao buscar chats',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined,
+    });
+  }
+});
+
 
   fastify.get('/queues', async (req, reply) => {
   const { filas } = req.query;
