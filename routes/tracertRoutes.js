@@ -335,9 +335,6 @@ const { rows } = await req.db.query(stagesSql);
 const labelsAndTypes = (rows || []).filter(r => r.label).map(r => ({ label: r.label, type: r.type || null }));
 return reply.send(labelsAndTypes);
 
-      const { rows } = await req.db.query(stagesSql);
-      const labels = (rows || []).map(r => r.label).filter(Boolean);
-      return reply.send(labels);
     } catch (error) {
       fastify.log.error('Erro ao listar estágios do bot:', error);
       return reply.code(500).send({
