@@ -1,11 +1,11 @@
 // routes/botTracertRoutes.js
-// Endpoints para o "trace" do BOT com controle de visibilidade
+// Endpoints para o "trace" do BOT com escape de caracteres especiais
 
 async function tracertRoutes(fastify, options) {
   
   /**
    * GET /tracert/customers
-   * Lista paginada - mostra apenas usuários com registros visíveis
+   * Lista paginada - tratamento seguro para user_id com @
    */
   fastify.get('/customers', async (req, reply) => {
     try {
@@ -31,10 +31,12 @@ async function tracertRoutes(fastify, options) {
       let whereConditions = [];
       let queryParams = [];
 
-      // Filtro de busca
+      // Filtro de busca - tratamento seguro para user_id com @
       if (q && String(q).trim() !== '') {
-        queryParams.push(`%${String(q).trim().toLowerCase()}%`);
-        whereConditions.push(`(lower(v.name) LIKE $${queryParams.length} OR lower(v.user_id) LIKE $${queryParams.length})`);
+        const searchTerm = String(q).trim();
+        queryParams.push(`%${searchTerm.toLowerCase()}%`);
+        queryParams.push(`%${searchTerm}%`); // Segundo parâmetro para user_id sem lower
+        whereConditions.push(`(lower(v.name) LIKE $${queryParams.length - 1} OR v.user_id LIKE $${queryParams.length})`);
       }
 
       // Filtro de loops mínimos
@@ -65,12 +67,6 @@ async function tracertRoutes(fastify, options) {
         t.block_label
       ) != 'início'`);
 
-      // Apenas usuários com registros visíveis
-      whereConditions.push(`EXISTS (
-        SELECT 1 FROM hmg.bot_transitions bt 
-        WHERE bt.user_id = v.user_id AND bt.visible = true
-      )`);
-
       const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
 
       // Query de count
@@ -82,7 +78,7 @@ async function tracertRoutes(fastify, options) {
         LEFT JOIN LATERAL (
           SELECT bt.block_label, bt.block_type
           FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id AND bt.visible = true
+          WHERE bt.user_id = v.user_id
           ORDER BY bt.entered_at DESC
           LIMIT 1
         ) t ON true
@@ -112,21 +108,14 @@ async function tracertRoutes(fastify, options) {
           ) AS current_stage_type,
           v.stage_entered_at,
           v.time_in_stage_sec,
-          -- Loops considerando apenas registros visíveis
-          (
-            SELECT COUNT(*)::int 
-            FROM hmg.bot_transitions bt
-            WHERE bt.user_id = v.user_id 
-              AND bt.block_id = v.current_stage 
-              AND bt.visible = true
-          ) AS loops_in_stage
+          v.loops_in_stage
         FROM hmg.v_bot_customer_list v
         LEFT JOIN hmg.flows f ON f.active = true
         LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
         LEFT JOIN LATERAL (
           SELECT bt.block_label, bt.block_type
           FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id AND bt.visible = true
+          WHERE bt.user_id = v.user_id
           ORDER BY bt.entered_at DESC
           LIMIT 1
         ) t ON true
@@ -153,11 +142,14 @@ async function tracertRoutes(fastify, options) {
 
   /**
    * GET /tracert/customers/:userId
-   * Detalhes do cliente - mostra apenas registros com visible = true
+   * Detalhes do cliente - tratamento seguro para user_id com @
    */
   fastify.get('/customers/:userId', async (req, reply) => {
     try {
       const { userId } = req.params;
+      
+      // Decodificar userId caso venha URL encoded
+      const decodedUserId = decodeURIComponent(userId);
 
       // Informações base do usuário
       const baseSql = `
@@ -179,19 +171,14 @@ async function tracertRoutes(fastify, options) {
           ) AS current_stage_type,
           v.stage_entered_at,
           v.time_in_stage_sec,
-          v.loops_in_stage,
-          (
-            SELECT MAX(bt.entered_at)
-            FROM hmg.bot_transitions bt
-            WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset') AND bt.visible = true
-          ) AS last_reset_at
+          v.loops_in_stage
         FROM hmg.v_bot_customer_list v
         LEFT JOIN hmg.flows f ON f.active = true
         LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
         LEFT JOIN LATERAL (
           SELECT bt.block_label, bt.block_type
           FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id AND bt.visible = true
+          WHERE bt.user_id = v.user_id
           ORDER BY bt.entered_at DESC
           LIMIT 1
         ) t ON true
@@ -199,7 +186,7 @@ async function tracertRoutes(fastify, options) {
         LIMIT 1
       `;
 
-      const baseResult = await req.db.query(baseSql, [userId]);
+      const baseResult = await req.db.query(baseSql, [decodedUserId]);
       
       if (!baseResult.rows.length) {
         return reply.code(404).send({ error: 'Cliente não encontrado' });
@@ -207,116 +194,64 @@ async function tracertRoutes(fastify, options) {
 
       const base = baseResult.rows[0];
 
-      // Journey - apenas registros visíveis
+      // Journey
       const journeySql = `
         SELECT
           stage,
           entered_at,
-          duration_sec,
-          (
-            SELECT COUNT(*)::int
-            FROM hmg.bot_transitions bt
-            WHERE bt.user_id = $1 
-              AND bt.block_id = j.stage 
-              AND bt.visible = true
-          ) AS visits
-        FROM hmg.v_bot_user_journey j
-        WHERE user_id = $1 AND visible = true
+          duration_sec
+        FROM hmg.v_bot_user_journey
+        WHERE user_id = $1
         ORDER BY entered_at
       `;
 
-      const journeyResult = await req.db.query(journeySql, [userId]);
+      const journeyResult = await req.db.query(journeySql, [decodedUserId]);
       const journey = journeyResult.rows;
 
-      // Dwell - apenas registros visíveis
+      // Dwell
       const dwellSql = `
         SELECT
           block,
           entered_at,
           left_at,
-          duration_sec,
-          bot_msgs,
-          user_msgs,
-          validation_fails,
-          max_user_response_gap_sec
+          duration_sec
         FROM hmg.v_bot_stage_dwells
-        WHERE user_id = $1 AND block = $2 AND visible = true
+        WHERE user_id = $1 AND block = $2
         ORDER BY entered_at DESC
         LIMIT 1
       `;
 
-      const dwellResult = await req.db.query(dwellSql, [userId, base.current_stage]);
+      const dwellResult = await req.db.query(dwellSql, [decodedUserId, base.current_stage]);
       const dwell = dwellResult.rows[0] || null;
-
-      // Recalcular loops considerando apenas visíveis
-      const loopsSql = `
-        SELECT COUNT(*)::int as loops_count
-        FROM hmg.bot_transitions bt
-        WHERE bt.user_id = $1 
-          AND bt.block_id = $2
-          AND bt.visible = true
-      `;
-
-      const loopsResult = await req.db.query(loopsSql, [userId, base.current_stage]);
-      const loopsInStage = loopsResult.rows[0]?.loops_count || 0;
 
       return reply.send({
         ...base,
-        loops_in_stage: loopsInStage,
         journey,
-        dwell,
-        reset_info: {
-          has_reset: !!base.last_reset_at,
-          last_reset_at: base.last_reset_at
-        }
+        dwell
       });
 
     } catch (error) {
-      fastify.log.error('Erro ao buscar detalhes:', error);
+      fastify.log.error('Erro ao buscar detalhes do usuário:', error);
       return reply.code(500).send({ error: 'Erro interno ao buscar detalhes' });
     }
   });
 
   /**
    * POST /tracert/customers/:userId/reset
-   * Reset - marca registros anteriores como invisible e cria novo reset
+   * Reset - tratamento seguro para user_id com @
    */
   fastify.post('/customers/:userId/reset', async (req, reply) => {
     try {
       const { userId } = req.params;
+      const decodedUserId = decodeURIComponent(userId);
       const now = new Date().toISOString();
 
-      // 1. Marcar todos os registros anteriores como invisible
-      const hideSql = `
-        UPDATE hmg.bot_transitions 
-        SET visible = false 
-        WHERE user_id = $1 AND visible = true
-      `;
-      await req.db.query(hideSql, [userId]);
-
-      // 2. Inserir registro de reset (visible)
-      const resetSql = `
-        INSERT INTO hmg.bot_transitions (
-          user_id, channel, flow_id, block_id, block_label, entered_at, vars, visible
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, true)
-        RETURNING *
-      `;
-      
-      await req.db.query(resetSql, [
-        userId,
-        null,
-        null,
-        'reset_to_start',
-        'RESET TO START',
-        now,
-        JSON.stringify({ reset_by: 'system' })
-      ]);
-
-      // 3. Atualizar sessão
+      // Buscar flow ativo
       const flowResult = await req.db.query('SELECT id, data FROM hmg.flows WHERE active = true LIMIT 1');
       const activeFlow = flowResult.rows[0];
       const startBlock = activeFlow?.data?.start || null;
 
+      // Atualizar sessão
       const sessionSql = `
         INSERT INTO hmg.sessions (user_id, current_block, last_flow_id, vars, updated_at)
         VALUES ($1, $2, $3, $4, NOW())
@@ -329,7 +264,7 @@ async function tracertRoutes(fastify, options) {
       `;
 
       await req.db.query(sessionSql, [
-        userId,
+        decodedUserId,
         startBlock,
         activeFlow?.id || null,
         JSON.stringify({})
@@ -349,59 +284,34 @@ async function tracertRoutes(fastify, options) {
 
   /**
    * GET /tracert/metrics
-   * Métricas considerando apenas registros visíveis
+   * Métricas
    */
   fastify.get('/metrics', async (req, reply) => {
     try {
-      // Total de usuários ativos (visíveis e não humanos)
+      // Total de usuários ativos
       const totalSql = `
         SELECT COUNT(*)::int AS total
         FROM hmg.v_bot_customer_list v
-        WHERE EXISTS (
-          SELECT 1 FROM hmg.bot_transitions bt 
-          WHERE bt.user_id = v.user_id AND bt.visible = true
-        )
-        AND NOT (
-          COALESCE(
-            ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
-            s.vars->>'current_block_type',
-            t.block_type
-          ) = 'human'
-        )
-        AND COALESCE(
-          (f.data->'blocks'->>v.current_stage),
-          s.vars->>'current_block_label',
-          t.block_label
-        ) != 'início'
+        WHERE v.current_stage IS NOT NULL
       `;
       const totalResult = await req.db.query(totalSql);
       const total = totalResult.rows[0]?.total || 0;
 
-      // Loopers (apenas visíveis)
+      // Loopers
       const loopersSql = `
         SELECT COUNT(*)::int AS loopers
-        FROM hmg.v_bot_customer_list v
-        WHERE v.loops_in_stage > 1
-        AND EXISTS (
-          SELECT 1 FROM hmg.bot_transitions bt 
-          WHERE bt.user_id = v.user_id AND bt.visible = true
-        )
+        FROM hmg.v_bot_customer_list
+        WHERE loops_in_stage > 1
       `;
       const loopersResult = await req.db.query(loopersSql);
       const loopers = loopersResult.rows[0]?.loopers || 0;
 
-      // Distribuição por estágio (apenas visíveis)
+      // Distribuição
       const distSql = `
-        SELECT 
-          v.current_stage AS block, 
-          COUNT(*)::int AS users
-        FROM hmg.v_bot_customer_list v
-        WHERE EXISTS (
-          SELECT 1 FROM hmg.bot_transitions bt 
-          WHERE bt.user_id = v.user_id AND bt.visible = true
-        )
-        AND v.current_stage IS NOT NULL
-        GROUP BY v.current_stage
+        SELECT current_stage AS block, COUNT(*)::int AS users
+        FROM hmg.v_bot_customer_list
+        WHERE current_stage IS NOT NULL
+        GROUP BY current_stage
         ORDER BY COUNT(*) DESC
         LIMIT 10
       `;
@@ -423,11 +333,12 @@ async function tracertRoutes(fastify, options) {
 
   /**
    * POST /tracert/customers/:userId/ticket
-   * Criar ticket - registro visível
+   * Criar ticket - tratamento seguro para user_id com @
    */
   fastify.post('/customers/:userId/ticket', async (req, reply) => {
     try {
       const { userId } = req.params;
+      const decodedUserId = decodeURIComponent(userId);
       const { queue } = req.body || {};
       const now = new Date().toISOString();
 
@@ -438,25 +349,10 @@ async function tracertRoutes(fastify, options) {
       `;
       
       const ticketResult = await req.db.query(ticketSql, [
-        userId,
+        decodedUserId,
         queue || 'Recepção',
         now,
         'system'
-      ]);
-
-      // Registrar transição visível
-      const transitionSql = `
-        INSERT INTO hmg.bot_transitions (
-          user_id, block_id, block_label, entered_at, vars, visible
-        ) VALUES ($1, $2, $3, $4, $5, true)
-      `;
-      
-      await req.db.query(transitionSql, [
-        userId,
-        'ticket_created',
-        'TICKET CREATED',
-        now,
-        JSON.stringify({ queue: queue || 'Recepção' })
       ]);
 
       return reply.send({ 
