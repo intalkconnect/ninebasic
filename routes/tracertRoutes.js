@@ -88,7 +88,7 @@ async function tracertRoutes(fastify, options) {
       const { rows: countRows } = await req.db.query(countSql, params);
       const total = countRows?.[0]?.total ?? 0;
 
-      // dados
+      // CORREÇÃO: Usar placeholders corretos ($1, $2, etc.)
       const dataSql = `
         SELECT
           v.cliente_id,
@@ -131,7 +131,9 @@ async function tracertRoutes(fastify, options) {
         LIMIT $${params.length + 1} OFFSET $${params.length + 2}
       `;
 
-      const { rows } = await req.db.query(dataSql, [...params, sizeNum, offset]);
+      // CORREÇÃO: Passar os parâmetros corretamente
+      const queryParams = [...params, sizeNum, offset];
+      const { rows } = await req.db.query(dataSql, queryParams);
 
       return reply.send({
         page: pageNum,
@@ -233,7 +235,7 @@ async function tracertRoutes(fastify, options) {
       const { rows: journeyRows } = await req.db.query(journeySql, [userId]);
       const journey = journeyRows?.[0]?.journey ?? [];
 
-      // dwell / diagnóstico atual (apenas visíveis)
+      // dwell / diagnóstico atual
       const dwellSql = `
         WITH current_dwell AS (
           SELECT d.*
