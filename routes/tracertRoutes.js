@@ -158,194 +158,206 @@ async function tracertRoutes(fastify, options) {
    * - journey é retornada SOMENTE após o último reset (excluindo o evento de reset).
    * - se não houve reset, retorna jornada desde o início do fluxo.
    */
+/**
+ * GET /tracert/customers/:userId
+ * Retorna base + jornada + dwell.
+ * - Se houve reset: journey mostra APENAS eventos APÓS o reset (excluindo reset_to_start e tudo anterior)
+ * - Se não houve reset: journey mostra TODOS os eventos desde o início
+ */
 fastify.get('/customers/:userId', async (req, reply) => {
-    const { userId } = req.params;
-    try {
-      // base info
-      const baseSql = `
-        SELECT
-          v.cliente_id,
-          v.user_id,
-          v.name,
-          v.channel,
-          v.current_stage,
-          COALESCE(
-            (f.data->'blocks'->>v.current_stage),
-            s.vars->>'current_block_label',
-            t.block_label
-          ) AS current_stage_label,
-          COALESCE(
-            ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
-            s.vars->>'current_block_type',
-            t.block_type
-          ) AS current_stage_type,
-          v.stage_entered_at,
-          v.time_in_stage_sec,
-          v.loops_in_stage,
-          f.data->>'start' AS flow_start_block,
-          (
-            SELECT MAX(bt.entered_at)
-            FROM hmg.bot_transitions bt
-            WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset')
-          ) AS last_reset_at
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
-        LEFT JOIN LATERAL (
-          SELECT bt.block_label, bt.block_type
+  const { userId } = req.params;
+  try {
+    // base info
+    const baseSql = `
+      SELECT
+        v.cliente_id,
+        v.user_id,
+        v.name,
+        v.channel,
+        v.current_stage,
+        COALESCE(
+          (f.data->'blocks'->>v.current_stage),
+          s.vars->>'current_block_label',
+          t.block_label
+        ) AS current_stage_label,
+        COALESCE(
+          ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
+          s.vars->>'current_block_type',
+          t.block_type
+        ) AS current_stage_type,
+        v.stage_entered_at,
+        v.time_in_stage_sec,
+        v.loops_in_stage,
+        f.data->>'start' AS flow_start_block,
+        (
+          SELECT MAX(bt.entered_at)
           FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id
-          ORDER BY bt.entered_at DESC
-          LIMIT 1
-        ) t ON true
-        WHERE v.user_id = $1
+          WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset')
+        ) AS last_reset_at
+      FROM hmg.v_bot_customer_list v
+      LEFT JOIN hmg.flows f ON f.active = true
+      LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+      LEFT JOIN LATERAL (
+        SELECT bt.block_label, bt.block_type
+        FROM hmg.bot_transitions bt
+        WHERE bt.user_id = v.user_id
+        ORDER BY bt.entered_at DESC
         LIMIT 1
-      `;
-      const { rows: baseRows } = await req.db.query(baseSql, [userId]);
-      
-      // REGRA 3: Se não encontrado OU está no bloco "início", retorna 404
-      if (!baseRows || baseRows.length === 0 || 
-          (baseRows[0].current_stage_label === 'início' && !baseRows[0].last_reset_at)) {
-        return reply.code(404).send({ error: 'Cliente não encontrado no tracert do bot' });
-      }
-      
-      const base = baseRows[0];
-
-      // Journey - lógica diferenciada para com/sem reset
-      let journey = [];
-      let journeyParams = [userId];
-
-      if (base.last_reset_at) {
-        // REGRA 1: Com reset - mostrar apenas eventos APÓS o reset
-        const journeySql = `
-          SELECT COALESCE(
-            jsonb_agg(
-              jsonb_build_object(
-                'stage', j.stage,
-                'timestamp', j.entered_at,
-                'duration', j.duration_sec,
-                'visits', (
-                  SELECT count(*)::int
-                  FROM hmg.v_bot_user_journey j2
-                  WHERE j2.user_id = $1 
-                    AND j2.stage = j.stage 
-                    AND j2.entered_at > $2
-                )
-              )
-              ORDER BY j.entered_at
-            ) FILTER (WHERE j.entered_at > $2),
-            '[]'::jsonb
-          ) AS journey
-          FROM hmg.v_bot_user_journey j
-          WHERE j.user_id = $1 AND j.entered_at > $2
-        `;
-        
-        const { rows: journeyRows } = await req.db.query(journeySql, [userId, base.last_reset_at]);
-        journey = journeyRows?.[0]?.journey ?? [];
-      } else {
-        // REGRA 2: Sem reset - mostrar TODOS os eventos
-        const journeySql = `
-          SELECT COALESCE(
-            jsonb_agg(
-              jsonb_build_object(
-                'stage', j.stage,
-                'timestamp', j.entered_at,
-                'duration', j.duration_sec,
-                'visits', (
-                  SELECT count(*)::int
-                  FROM hmg.v_bot_user_journey j2
-                  WHERE j2.user_id = $1 
-                    AND j2.stage = j.stage
-                )
-              )
-              ORDER BY j.entered_at
-            ),
-            '[]'::jsonb
-          ) AS journey
-          FROM hmg.v_bot_user_journey j
-          WHERE j.user_id = $1
-        `;
-        
-        const { rows: journeyRows } = await req.db.query(journeySql, [userId]);
-        journey = journeyRows?.[0]?.journey ?? [];
-      }
-
-      // dwell / diagnóstico atual
-      const dwellSql = `
-        WITH current_dwell AS (
-          SELECT d.*
-          FROM hmg.v_bot_stage_dwells d
-          WHERE d.user_id = $1 AND d.block = $2
-          ORDER BY d.entered_at DESC
-          LIMIT 1
-        )
-        SELECT
-          cd.user_id,
-          cd.block,
-          cd.entered_at,
-          cd.left_at,
-          cd.duration_sec,
-          dd.bot_msgs,
-          dd.user_msgs,
-          dd.validation_fails,
-          dd.max_user_response_gap_sec
-        FROM current_dwell cd
-        LEFT JOIN hmg.v_bot_dwell_diagnostics dd
-          ON dd.user_id = cd.user_id
-          AND dd.block = cd.block
-          AND dd.entered_at = cd.entered_at
-      `;
-      
-      const { rows: dwellRows } = await req.db.query(dwellSql, [userId, base.current_stage]);
-      const dwell = dwellRows?.[0] || null;
-
-      // Ajustar métricas se houve reset
-      let timeInStageSec = base.time_in_stage_sec;
-      let loopsInStage = base.loops_in_stage;
-
-      if (base.last_reset_at) {
-        // Recalcular time_in_stage_sec considerando apenas após o reset
-        if (base.stage_entered_at && new Date(base.stage_entered_at) <= new Date(base.last_reset_at)) {
-          const now = new Date();
-          const resetTime = new Date(base.last_reset_at);
-          timeInStageSec = Math.floor((now - resetTime) / 1000);
-        }
-
-        // Recalcular loops_in_stage considerando apenas após o reset
-        const loopsSql = `
-          SELECT COUNT(*)::int as loops_count
-          FROM hmg.v_bot_user_journey j
-          WHERE j.user_id = $1 
-            AND j.stage = $2
-            AND j.entered_at > $3
-        `;
-        const { rows: loopsRows } = await req.db.query(loopsSql, [
-          userId, 
-          base.current_stage, 
-          base.last_reset_at
-        ]);
-        loopsInStage = loopsRows?.[0]?.loops_count || 0;
-      }
-
-      return reply.send({
-        ...base,
-        time_in_stage_sec: timeInStageSec,
-        loops_in_stage: loopsInStage,
-        journey,
-        dwell,
-        reset_info: {
-          has_reset: !!base.last_reset_at,
-          last_reset_at: base.last_reset_at
-        }
-      });
-    } catch (error) {
-      fastify.log.error('Erro ao buscar detalhes do tracert do bot:', error);
-      return reply.code(500).send({
-        error: 'Erro interno ao buscar detalhes do tracert do bot',
-        details: process.env.NODE_ENV === 'development' ? String(error.stack || error.message || error) : undefined,
-      });
+      ) t ON true
+      WHERE v.user_id = $1
+      LIMIT 1
+    `;
+    const { rows: baseRows } = await req.db.query(baseSql, [userId]);
+    
+    // REGRA 3: Se não encontrado OU está no bloco "início", retorna 404
+    if (!baseRows || baseRows.length === 0 || 
+        (baseRows[0].current_stage_label === 'início' && !baseRows[0].last_reset_at)) {
+      return reply.code(404).send({ error: 'Cliente não encontrado no tracert do bot' });
     }
-  });
+    
+    const base = baseRows[0];
+
+    // Journey - lógica diferenciada para com/sem reset
+    let journey = [];
+
+    if (base.last_reset_at) {
+      // REGRA 1: Com reset - mostrar apenas eventos APÓS o reset (EXCLUINDO reset_to_start e tudo anterior)
+      const journeySql = `
+        SELECT COALESCE(
+          jsonb_agg(
+            jsonb_build_object(
+              'stage', j.stage,
+              'timestamp', j.entered_at,
+              'duration', j.duration_sec,
+              'visits', (
+                -- Contar visitas APENAS após o reset, excluindo eventos de reset
+                SELECT count(*)::int
+                FROM hmg.v_bot_user_journey j2
+                WHERE j2.user_id = $1 
+                  AND j2.stage = j.stage 
+                  AND j2.entered_at > $2
+                  AND j2.stage NOT IN ('reset_to_start', 'reset')
+              )
+            )
+            ORDER BY j.entered_at
+          ),
+          '[]'::jsonb
+        ) AS journey
+        FROM hmg.v_bot_user_journey j
+        WHERE j.user_id = $1 
+          AND j.entered_at > $2
+          AND j.stage NOT IN ('reset_to_start', 'reset')
+      `;
+      
+      const { rows: journeyRows } = await req.db.query(journeySql, [userId, base.last_reset_at]);
+      journey = journeyRows?.[0]?.journey ?? [];
+    } else {
+      // REGRA 2: Sem reset - mostrar TODOS os eventos (excluindo eventos de reset)
+      const journeySql = `
+        SELECT COALESCE(
+          jsonb_agg(
+            jsonb_build_object(
+              'stage', j.stage,
+              'timestamp', j.entered_at,
+              'duration', j.duration_sec,
+              'visits', (
+                SELECT count(*)::int
+                FROM hmg.v_bot_user_journey j2
+                WHERE j2.user_id = $1 
+                  AND j2.stage = j.stage
+                  AND j2.stage NOT IN ('reset_to_start', 'reset')
+              )
+            )
+            ORDER BY j.entered_at
+          ),
+          '[]'::jsonb
+        ) AS journey
+        FROM hmg.v_bot_user_journey j
+        WHERE j.user_id = $1 
+          AND j.stage NOT IN ('reset_to_start', 'reset')
+      `;
+      
+      const { rows: journeyRows } = await req.db.query(journeySql, [userId]);
+      journey = journeyRows?.[0]?.journey ?? [];
+    }
+
+    // dwell / diagnóstico atual
+    const dwellSql = `
+      WITH current_dwell AS (
+        SELECT d.*
+        FROM hmg.v_bot_stage_dwells d
+        WHERE d.user_id = $1 AND d.block = $2
+        ORDER BY d.entered_at DESC
+        LIMIT 1
+      )
+      SELECT
+        cd.user_id,
+        cd.block,
+        cd.entered_at,
+        cd.left_at,
+        cd.duration_sec,
+        dd.bot_msgs,
+        dd.user_msgs,
+        dd.validation_fails,
+        dd.max_user_response_gap_sec
+      FROM current_dwell cd
+      LEFT JOIN hmg.v_bot_dwell_diagnostics dd
+        ON dd.user_id = cd.user_id
+        AND dd.block = cd.block
+        AND dd.entered_at = cd.entered_at
+    `;
+    
+    const { rows: dwellRows } = await req.db.query(dwellSql, [userId, base.current_stage]);
+    const dwell = dwellRows?.[0] || null;
+
+    // Ajustar métricas se houve reset
+    let timeInStageSec = base.time_in_stage_sec;
+    let loopsInStage = base.loops_in_stage;
+
+    if (base.last_reset_at) {
+      // Recalcular time_in_stage_sec considerando apenas após o reset
+      if (base.stage_entered_at && new Date(base.stage_entered_at) <= new Date(base.last_reset_at)) {
+        const now = new Date();
+        const resetTime = new Date(base.last_reset_at);
+        timeInStageSec = Math.floor((now - resetTime) / 1000);
+      }
+
+      // Recalcular loops_in_stage considerando apenas após o reset
+      const loopsSql = `
+        SELECT COUNT(*)::int as loops_count
+        FROM hmg.v_bot_user_journey j
+        WHERE j.user_id = $1 
+          AND j.stage = $2
+          AND j.entered_at > $3
+          AND j.stage NOT IN ('reset_to_start', 'reset')
+      `;
+      const { rows: loopsRows } = await req.db.query(loopsSql, [
+        userId, 
+        base.current_stage, 
+        base.last_reset_at
+      ]);
+      loopsInStage = loopsRows?.[0]?.loops_count || 0;
+    }
+
+    return reply.send({
+      ...base,
+      time_in_stage_sec: timeInStageSec,
+      loops_in_stage: loopsInStage,
+      journey,
+      dwell,
+      reset_info: {
+        has_reset: !!base.last_reset_at,
+        last_reset_at: base.last_reset_at
+      }
+    });
+  } catch (error) {
+    fastify.log.error('Erro ao buscar detalhes do tracert do bot:', error);
+    return reply.code(500).send({
+      error: 'Erro interno ao buscar detalhes do tracert do bot',
+      details: process.env.NODE_ENV === 'development' ? String(error.stack || error.message || error) : undefined,
+    });
+  }
+});
 
   /**
    * POST /tracert/customers/:userId/reset
