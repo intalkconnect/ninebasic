@@ -63,11 +63,11 @@ async function tracertRoutes(fastify, options) {
       where.push(`(
         COALESCE(
           v.current_stage_type,
-          (SELECT bt.block_type FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.visible IS DISTINCT FROM false ORDER BY bt.entered_at DESC LIMIT 1)
+          (SELECT bt.block_type FROM bot_transitions bt WHERE bt.user_id = v.user_id AND bt.visible IS DISTINCT FROM false ORDER BY bt.entered_at DESC LIMIT 1)
         ) IS NULL
         OR COALESCE(
           v.current_stage_type,
-          (SELECT bt.block_type FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.visible IS DISTINCT FROM false ORDER BY bt.entered_at DESC LIMIT 1)
+          (SELECT bt.block_type FROM bot_transitions bt WHERE bt.user_id = v.user_id AND bt.visible IS DISTINCT FROM false ORDER BY bt.entered_at DESC LIMIT 1)
         ) <> 'human'
       )`);
     }
@@ -78,7 +78,7 @@ async function tracertRoutes(fastify, options) {
       // total
       const countSql = `
         SELECT count(*)::int AS total
-        FROM hmg.v_bot_customer_list v
+        FROM v_bot_customer_list v
         ${whereSql}
       `;
       const { rows: countRows } = await req.db.query(countSql, params);
@@ -106,12 +106,12 @@ async function tracertRoutes(fastify, options) {
           v.time_in_stage_sec,
           v.loops_in_stage,
           f.id AS flow_id
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+        FROM v_bot_customer_list v
+        LEFT JOIN flows f ON f.active = true
+        LEFT JOIN sessions s ON s.user_id = v.user_id
         LEFT JOIN LATERAL (
           SELECT bt.block_label, bt.block_type, bt.entered_at
-          FROM hmg.bot_transitions bt
+          FROM bot_transitions bt
           WHERE bt.user_id = v.user_id AND bt.visible IS DISTINCT FROM false
           ORDER BY bt.entered_at DESC
           LIMIT 1
@@ -170,12 +170,12 @@ async function tracertRoutes(fastify, options) {
           v.loops_in_stage,
           s.vars->>'last_reset_at' AS last_reset_at,
           f.id AS flow_id
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+        FROM v_bot_customer_list v
+        LEFT JOIN flows f ON f.active = true
+        LEFT JOIN sessions s ON s.user_id = v.user_id
         LEFT JOIN LATERAL (
           SELECT bt.block_label, bt.block_type
-          FROM hmg.bot_transitions bt
+          FROM bot_transitions bt
           WHERE bt.user_id = v.user_id AND bt.visible IS DISTINCT FROM false
           ORDER BY bt.entered_at DESC
           LIMIT 1
@@ -202,7 +202,7 @@ async function tracertRoutes(fastify, options) {
             ) ORDER BY bt.entered_at
           ), '[]'::jsonb
         ) AS journey
-        FROM hmg.bot_transitions bt
+        FROM bot_transitions bt
         WHERE bt.user_id = $1
           AND (bt.visible IS DISTINCT FROM false)
       `;
@@ -222,7 +222,7 @@ async function tracertRoutes(fastify, options) {
       const dwellSql = `
         WITH current_dwell AS (
           SELECT d.*
-          FROM hmg.v_bot_stage_dwells d
+          FROM v_bot_stage_dwells d
           WHERE d.user_id = $1 AND d.block = $2
           ORDER BY d.entered_at DESC
           LIMIT 1
@@ -237,7 +237,7 @@ async function tracertRoutes(fastify, options) {
           dd.validation_fails,
           dd.max_user_response_gap_sec
         FROM current_dwell cd
-        LEFT JOIN hmg.v_bot_dwell_diagnostics dd
+        LEFT JOIN v_bot_dwell_diagnostics dd
           ON dd.user_id = cd.user_id
          AND dd.block    = cd.block
          AND dd.entered_at = cd.entered_at
@@ -270,7 +270,7 @@ async function tracertRoutes(fastify, options) {
       await client.query('BEGIN');
 
       // pega flow ativo
-      const flowRow = await client.query(`SELECT id, data FROM hmg.flows WHERE active = true LIMIT 1`);
+      const flowRow = await client.query(`SELECT id, data FROM flows WHERE active = true LIMIT 1`);
       const flow = flowRow.rows?.[0] || null;
       const flowId = flow?.id || null;
       const flowStart = flow ? (flow.data?.start || (flow.data && flow.data.start)) : null;
@@ -280,7 +280,7 @@ async function tracertRoutes(fastify, options) {
 
       // 1) marcar transições anteriores como não-visíveis
       await client.query(
-        `UPDATE hmg.bot_transitions
+        `UPDATE bot_transitions
          SET visible = false
          WHERE user_id = $1 AND (visible IS DISTINCT FROM false)`,
         [userId]
@@ -288,7 +288,7 @@ async function tracertRoutes(fastify, options) {
 
       // 2) inserir nova transição
       const insertSql = `
-        INSERT INTO hmg.bot_transitions (user_id, channel, flow_id, block_id, block_label, block_type, entered_at, vars, visible)
+        INSERT INTO bot_transitions (user_id, channel, flow_id, block_id, block_label, block_type, entered_at, vars, visible)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
         RETURNING id, entered_at
       `;
@@ -316,7 +316,7 @@ async function tracertRoutes(fastify, options) {
 
       // 3) Atualiza sessions
       await client.query(
-        `INSERT INTO hmg.sessions (user_id, current_block, last_flow_id, vars, updated_at)
+        `INSERT INTO sessions (user_id, current_block, last_flow_id, vars, updated_at)
          VALUES ($1, $2, $3, $4, NOW())
          ON CONFLICT (user_id) DO UPDATE SET
            current_block = EXCLUDED.current_block,
@@ -349,7 +349,7 @@ async function tracertRoutes(fastify, options) {
     const { queueName } = req.body || {};
 
     try {
-      const selectSql = `SELECT vars FROM hmg.sessions WHERE user_id = $1 LIMIT 1`;
+      const selectSql = `SELECT vars FROM sessions WHERE user_id = $1 LIMIT 1`;
       const { rows: sel } = await req.db.query(selectSql, [userId]);
       const existingVars = sel?.[0]?.vars || {};
 
@@ -364,7 +364,7 @@ async function tracertRoutes(fastify, options) {
       };
 
       await req.db.query(
-        `INSERT INTO hmg.sessions (user_id, current_block, last_flow_id, vars, updated_at)
+        `INSERT INTO sessions (user_id, current_block, last_flow_id, vars, updated_at)
          VALUES ($1, $2, $3, $4, NOW())
          ON CONFLICT (user_id) DO UPDATE SET
            current_block = EXCLUDED.current_block,
@@ -396,7 +396,7 @@ async function tracertRoutes(fastify, options) {
           percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_sec) AS p95_sec,
           avg(duration_sec)::int AS avg_sec,
           count(*) AS samples
-        FROM hmg.v_bot_stage_dwells
+        FROM v_bot_stage_dwells
         GROUP BY block
         ORDER BY p95_sec DESC
         LIMIT $1
@@ -407,7 +407,7 @@ async function tracertRoutes(fastify, options) {
         SELECT
           block,
           avg(entries)::numeric(10,2) AS avg_loops
-        FROM hmg.v_bot_loops
+        FROM v_bot_loops
         GROUP BY block
         ORDER BY avg_loops DESC
         LIMIT $1
@@ -416,7 +416,7 @@ async function tracertRoutes(fastify, options) {
 
       const distSql = `
         SELECT current_stage AS block, count(*)::int AS users
-        FROM hmg.v_bot_customer_list
+        FROM v_bot_customer_list
         GROUP BY current_stage
         ORDER BY users DESC
       `;
@@ -453,12 +453,12 @@ async function tracertRoutes(fastify, options) {
             s.vars->>'current_block_type',
             t.block_type
           ) AS type
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+        FROM v_bot_customer_list v
+        LEFT JOIN flows f ON f.active = true
+        LEFT JOIN sessions s ON s.user_id = v.user_id
         LEFT JOIN LATERAL (
           SELECT bt.block_label, bt.block_type
-          FROM hmg.bot_transitions bt
+          FROM bot_transitions bt
           WHERE bt.user_id = v.user_id AND bt.visible IS DISTINCT FROM false
           ORDER BY bt.entered_at DESC
           LIMIT 1
