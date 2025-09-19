@@ -11,138 +11,141 @@ async function tracertRoutes(fastify, options) {
    *
    * SEMPRE oculta sessões humanas (não há mais opção de incluir).
    */
-  fastify.get('/customers', async (req, reply) => {
-    try {
-      const {
-        q,
-        min_loops,
-        min_time_sec,
-        order_by = 'time_in_stage_sec',
-        order_dir = 'desc',
-        page = '1',
-        pageSize = '20',
-      } = req.query;
+  // routes/botTracertRoutes.js
+// Corrigir a query SQL na rota GET /tracert/customers
 
-      const pageNum = Math.max(1, parseInt(page, 10) || 1);
-      const sizeNum = Math.min(200, Math.max(1, parseInt(pageSize, 10) || 20));
-      const offset = (pageNum - 1) * sizeNum;
+fastify.get('/customers', async (req, reply) => {
+  try {
+    const {
+      q,
+      min_loops,
+      min_time_sec,
+      order_by = 'time_in_stage_sec',
+      order_dir = 'desc',
+      page = '1',
+      pageSize = '20',
+    } = req.query;
 
-      const allowedOrderBy = new Set(['time_in_stage_sec', 'loops_in_stage', 'name', 'stage_entered_at']);
-      const orderByKey = allowedOrderBy.has(String(order_by)) ? String(order_by) : 'time_in_stage_sec';
-      const orderBySql = orderByKey === 'stage_entered_at' ? 'v.stage_entered_at' : `v.${orderByKey}`;
-      const orderDir = String(order_dir).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const sizeNum = Math.min(200, Math.max(1, parseInt(pageSize, 10) || 20));
+    const offset = (pageNum - 1) * sizeNum;
 
-      const where = [];
-      const params = [];
+    const allowedOrderBy = new Set(['time_in_stage_sec', 'loops_in_stage', 'name', 'stage_entered_at']);
+    const orderByKey = allowedOrderBy.has(String(order_by)) ? String(order_by) : 'time_in_stage_sec';
+    const orderBySql = orderByKey === 'stage_entered_at' ? 'v.stage_entered_at' : `v.${orderByKey}`;
+    const orderDir = String(order_dir).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
-      if (q && String(q).trim() !== '') {
-        params.push(`%${String(q).trim().toLowerCase()}%`);
-        where.push(`(lower(v.name) LIKE $${params.length} OR lower(v.user_id) LIKE $${params.length})`);
-      }
+    const where = [];
+    const params = [];
 
-      if (min_loops && Number.isFinite(Number(min_loops))) {
-        params.push(parseInt(min_loops, 10));
-        where.push(`v.loops_in_stage >= $${params.length}`);
-      }
+    if (q && String(q).trim() !== '') {
+      params.push(`%${String(q).trim().toLowerCase()}%`);
+      where.push(`(lower(v.name) LIKE $${params.length} OR lower(v.user_id) LIKE $${params.length})`);
+    }
 
-      if (min_time_sec && Number.isFinite(Number(min_time_sec))) {
-        params.push(parseInt(min_time_sec, 10));
-        where.push(`v.time_in_stage_sec >= $${params.length}`);
-      }
+    if (min_loops && Number.isFinite(Number(min_loops))) {
+      params.push(parseInt(min_loops, 10));
+      where.push(`v.loops_in_stage >= $${params.length}`);
+    }
 
-      // SEMPRE ocultar sessões humanas (removido include_human)
-      where.push(`NOT (
+    if (min_time_sec && Number.isFinite(Number(min_time_sec))) {
+      params.push(parseInt(min_time_sec, 10));
+      where.push(`v.time_in_stage_sec >= $${params.length}`);
+    }
+
+    // SEMPRE ocultar sessões humanas
+    where.push(`NOT (
+      COALESCE(
+        ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
+        s.vars->>'current_block_type',
+        t.block_type
+      ) = 'human'
+    )`);
+
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    // total
+    const countSql = `
+      SELECT count(*)::int AS total
+      FROM hmg.v_bot_customer_list v
+      LEFT JOIN hmg.flows f ON f.active = true
+      LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+      LEFT JOIN LATERAL (
+        SELECT bt.block_label, bt.block_type
+        FROM hmg.bot_transitions bt
+        WHERE bt.user_id = v.user_id
+        ORDER BY bt.entered_at DESC
+        LIMIT 1
+      ) t ON true
+      ${whereSql}
+    `;
+    const { rows: countRows } = await req.db.query(countSql, params);
+    const total = countRows?.[0]?.total ?? 0;
+
+    // CORREÇÃO: usar placeholders $n em vez de interpolação de string
+    const dataSql = `
+      SELECT
+        v.cliente_id,
+        v.user_id,
+        v.name,
+        v.channel,
+        v.current_stage,
+        COALESCE(
+          (f.data->'blocks'->>v.current_stage),
+          s.vars->>'current_block_label',
+          t.block_label
+        ) AS current_stage_label,
         COALESCE(
           ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
           s.vars->>'current_block_type',
           t.block_type
-        ) = 'human'
-      )`);
+        ) AS current_stage_type,
+        v.stage_entered_at,
+        v.time_in_stage_sec,
+        -- Calcula loops considerando apenas eventos após último reset
+        CASE 
+          WHEN (SELECT MAX(bt.entered_at) FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset')) IS NOT NULL
+          THEN (
+            SELECT count(*)::int 
+            FROM hmg.v_bot_user_journey j 
+            WHERE j.user_id = v.user_id 
+              AND j.stage = v.current_stage 
+              AND j.entered_at > (SELECT MAX(bt.entered_at) FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset'))
+          )
+          ELSE v.loops_in_stage
+        END AS loops_in_stage
+      FROM hmg.v_bot_customer_list v
+      LEFT JOIN hmg.flows f ON f.active = true
+      LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+      LEFT JOIN LATERAL (
+        SELECT bt.block_label, bt.block_type
+        FROM hmg.bot_transitions bt
+        WHERE bt.user_id = v.user_id
+        ORDER BY bt.entered_at DESC
+        LIMIT 1
+      ) t ON true
+      ${whereSql}
+      ORDER BY ${orderBySql} ${orderDir}, v.user_id ASC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `;
 
-      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    // CORREÇÃO: passar os parâmetros corretamente
+    const { rows } = await req.db.query(dataSql, [...params, sizeNum, offset]);
 
-      // total
-      const countSql = `
-        SELECT count(*)::int AS total
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
-        LEFT JOIN LATERAL (
-          SELECT bt.block_label, bt.block_type
-          FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id
-          ORDER BY bt.entered_at DESC
-          LIMIT 1
-        ) t ON true
-        ${whereSql}
-      `;
-      const { rows: countRows } = await req.db.query(countSql, params);
-      const total = countRows?.[0]?.total ?? 0;
-
-      // dados (com fallback de label/type e loops pós-reset)
-      const dataSql = `
-        SELECT
-          v.cliente_id,
-          v.user_id,
-          v.name,
-          v.channel,
-          v.current_stage,
-          COALESCE(
-            (f.data->'blocks'->>v.current_stage),
-            s.vars->>'current_block_label',
-            t.block_label
-          ) AS current_stage_label,
-          COALESCE(
-            ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
-            s.vars->>'current_block_type',
-            t.block_type
-          ) AS current_stage_type,
-          v.stage_entered_at,
-          v.time_in_stage_sec,
-          -- Calcula loops considerando apenas eventos após último reset
-          CASE 
-            WHEN (SELECT MAX(bt.entered_at) FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset')) IS NOT NULL
-            THEN (
-              SELECT count(*)::int 
-              FROM hmg.v_bot_user_journey j 
-              WHERE j.user_id = v.user_id 
-                AND j.stage = v.current_stage 
-                AND j.entered_at > (SELECT MAX(bt.entered_at) FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset'))
-            )
-            ELSE v.loops_in_stage
-          END AS loops_in_stage
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
-        LEFT JOIN LATERAL (
-          SELECT bt.block_label, bt.block_type
-          FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id
-          ORDER BY bt.entered_at DESC
-          LIMIT 1
-        ) t ON true
-        ${whereSql}
-        ORDER BY ${orderBySql} ${orderDir}, v.user_id ASC
-        LIMIT ${params.length + 1} OFFSET ${params.length + 2}
-      `;
-
-      const { rows } = await req.db.query(dataSql, [...params, sizeNum, offset]);
-
-      return reply.send({
-        page: pageNum,
-        pageSize: sizeNum,
-        total,
-        rows,
-      });
-    } catch (error) {
-      fastify.log.error('Erro ao listar tracert do bot:', error);
-      return reply.code(500).send({
-        error: 'Erro interno ao listar tracert do bot',
-        details: process.env.NODE_ENV === 'development' ? String(error.stack || error.message || error) : undefined,
-      });
-    }
-  });
-
+    return reply.send({
+      page: pageNum,
+      pageSize: sizeNum,
+      total,
+      rows,
+    });
+  } catch (error) {
+    fastify.log.error('Erro ao listar tracert do bot:', error);
+    return reply.code(500).send({
+      error: 'Erro interno ao listar tracert do bot',
+      details: process.env.NODE_ENV === 'development' ? String(error.stack || error.message || error) : undefined,
+    });
+  }
+});
   /**
    * GET /tracert/customers/:userId
    * Retorna base + jornada + dwell.
