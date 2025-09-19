@@ -113,8 +113,6 @@ async function tracertRoutes(fastify, options) {
   LIMIT $${params.length + 1} OFFSET $${params.length + 2}
 `;
 
-      const { rows } = await req.db.query(dataSql, [...params, sizeNum, offset]);
-
       return reply.send({
         page: pageNum,
         pageSize: sizeNum,
