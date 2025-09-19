@@ -79,7 +79,7 @@ async function tracertRoutes(fastify, options) {
       const { rows: countRows } = await req.db.query(countSql, params);
       const total = countRows?.[0]?.total ?? 0;
 
-      // dados (com fallback de label/type)
+      // dados (com fallback de label/type e loops pós-reset)
       const dataSql = `
         SELECT
           v.cliente_id,
@@ -99,7 +99,18 @@ async function tracertRoutes(fastify, options) {
           ) AS current_stage_type,
           v.stage_entered_at,
           v.time_in_stage_sec,
-          v.loops_in_stage
+          -- Calcula loops considerando apenas eventos após último reset
+          CASE 
+            WHEN (SELECT MAX(bt.entered_at) FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset')) IS NOT NULL
+            THEN (
+              SELECT count(*)::int 
+              FROM hmg.v_bot_user_journey j 
+              WHERE j.user_id = v.user_id 
+                AND j.stage = v.current_stage 
+                AND j.entered_at > (SELECT MAX(bt.entered_at) FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset'))
+            )
+            ELSE v.loops_in_stage
+          END AS loops_in_stage
         FROM hmg.v_bot_customer_list v
         LEFT JOIN hmg.flows f ON f.active = true
         LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
@@ -112,7 +123,7 @@ async function tracertRoutes(fastify, options) {
         ) t ON true
         ${whereSql}
         ORDER BY ${orderBySql} ${orderDir}, v.user_id ASC
-        LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+        LIMIT ${params.length + 1} OFFSET ${params.length + 2}
       `;
 
       const { rows } = await req.db.query(dataSql, [...params, sizeNum, offset]);
