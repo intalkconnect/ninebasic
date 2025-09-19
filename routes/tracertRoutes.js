@@ -79,34 +79,40 @@ async function tracertRoutes(fastify, options) {
       // 2) sessions.vars->>'current_block_label'
       // 3) ultima transição em hmg.bot_transitions (subselect lateral)
       const dataSql = `
-        SELECT
-          v.cliente_id,
-          v.user_id,
-          v.name,
-          v.channel,
-          v.current_stage,
-          COALESCE(
-            (f.data->'blocks'->>v.current_stage),
-            s.vars->>'current_block_label',
-            t.block_label
-          ) AS current_stage_label,
-          v.stage_entered_at,
-          v.time_in_stage_sec,
-          v.loops_in_stage
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
-        LEFT JOIN LATERAL (
-          SELECT bt.block_label
-          FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id
-          ORDER BY bt.entered_at DESC
-          LIMIT 1
-        ) t ON true
-        ${whereSql}
-        ORDER BY ${orderBySql} ${orderDir}, v.user_id ASC
-        LIMIT $${params.length + 1} OFFSET $${params.length + 2}
-      `;
+  SELECT
+    v.cliente_id,
+    v.user_id,
+    v.name,
+    v.channel,
+    v.current_stage,
+    COALESCE(
+      (f.data->'blocks'->>v.current_stage),
+      s.vars->>'current_block_label',
+      t.block_label
+    ) AS current_stage_label,
+    COALESCE(
+      (f.data->'blocks'-> (v.current_stage) ->> 'type'),
+      s.vars->>'current_block_type',
+      t.block_type
+    ) AS current_stage_type,
+    v.stage_entered_at,
+    v.time_in_stage_sec,
+    v.loops_in_stage
+  FROM hmg.v_bot_customer_list v
+  LEFT JOIN hmg.flows f ON f.active = true
+  LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+  LEFT JOIN LATERAL (
+    SELECT bt.block_label, bt.block_type
+    FROM hmg.bot_transitions bt
+    WHERE bt.user_id = v.user_id
+    ORDER BY bt.entered_at DESC
+    LIMIT 1
+  ) t ON true
+  ${whereSql}
+  ORDER BY ${orderBySql} ${orderDir}, v.user_id ASC
+  LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+`;
+
       const { rows } = await req.db.query(dataSql, [...params, sizeNum, offset]);
 
       return reply.send({
@@ -133,34 +139,40 @@ async function tracertRoutes(fastify, options) {
 
     try {
       // Info base (linha do grid) para este user
-      const baseSql = `
-        SELECT
-          v.cliente_id,
-          v.user_id,
-          v.name,
-          v.channel,
-          v.current_stage,
-          COALESCE(
-            (f.data->'blocks'->>v.current_stage),
-            s.vars->>'current_block_label',
-            t.block_label
-          ) AS current_stage_label,
-          v.stage_entered_at,
-          v.time_in_stage_sec,
-          v.loops_in_stage
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
-        LEFT JOIN LATERAL (
-          SELECT bt.block_label
-          FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id
-          ORDER BY bt.entered_at DESC
-          LIMIT 1
-        ) t ON true
-        WHERE v.user_id = $1
-        LIMIT 1
-      `;
+     const baseSql = `
+  SELECT
+    v.cliente_id,
+    v.user_id,
+    v.name,
+    v.channel,
+    v.current_stage,
+    COALESCE(
+      (f.data->'blocks'->>v.current_stage),
+      s.vars->>'current_block_label',
+      t.block_label
+    ) AS current_stage_label,
+    COALESCE(
+      (f.data->'blocks'-> (v.current_stage) ->> 'type'),
+      s.vars->>'current_block_type',
+      t.block_type
+    ) AS current_stage_type,
+    v.stage_entered_at,
+    v.time_in_stage_sec,
+    v.loops_in_stage
+  FROM hmg.v_bot_customer_list v
+  LEFT JOIN hmg.flows f ON f.active = true
+  LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+  LEFT JOIN LATERAL (
+    SELECT bt.block_label, bt.block_type
+    FROM hmg.bot_transitions bt
+    WHERE bt.user_id = v.user_id
+    ORDER BY bt.entered_at DESC
+    LIMIT 1
+  ) t ON true
+  WHERE v.user_id = $1
+  LIMIT 1
+`;
+
       const { rows: baseRows } = await req.db.query(baseSql, [userId]);
       if (baseRows.length === 0) {
         return reply.code(404).send({ error: 'Cliente não encontrado no tracert do bot' });
@@ -297,25 +309,34 @@ async function tracertRoutes(fastify, options) {
   fastify.get('/stages', async (req, reply) => {
     try {
       const stagesSql = `
-        SELECT DISTINCT
-          COALESCE(
-            (f.data->'blocks'->>v.current_stage),
-            s.vars->>'current_block_label',
-            t.block_label
-          ) AS label
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
-        LEFT JOIN LATERAL (
-          SELECT bt.block_label
-          FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id
-          ORDER BY bt.entered_at DESC
-          LIMIT 1
-        ) t ON true
-        WHERE v.current_stage IS NOT NULL
-        ORDER BY label ASC
-      `;
+  SELECT DISTINCT
+    COALESCE(
+      (f.data->'blocks'->>v.current_stage),
+      s.vars->>'current_block_label',
+      t.block_label
+    ) AS label,
+    COALESCE(
+      (f.data->'blocks'-> (v.current_stage) ->> 'type'),
+      s.vars->>'current_block_type',
+      t.block_type
+    ) AS type
+  FROM hmg.v_bot_customer_list v
+  LEFT JOIN hmg.flows f ON f.active = true
+  LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+  LEFT JOIN LATERAL (
+    SELECT bt.block_label, bt.block_type
+    FROM hmg.bot_transitions bt
+    WHERE bt.user_id = v.user_id
+    ORDER BY bt.entered_at DESC
+    LIMIT 1
+  ) t ON true
+  WHERE v.current_stage IS NOT NULL
+  ORDER BY label ASC
+`;
+const { rows } = await req.db.query(stagesSql);
+const labelsAndTypes = (rows || []).filter(r => r.label).map(r => ({ label: r.label, type: r.type || null }));
+return reply.send(labelsAndTypes);
+
       const { rows } = await req.db.query(stagesSql);
       const labels = (rows || []).map(r => r.label).filter(Boolean);
       return reply.send(labels);
