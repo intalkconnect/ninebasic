@@ -9,6 +9,7 @@ async function tracertRoutes(fastify, options) {
    */
   fastify.get('/customers', async (req, reply) => {
     try {
+      fastify.log.info('Iniciando busca de customers tracert');
       const {
         q,
         min_loops,
@@ -70,6 +71,8 @@ async function tracertRoutes(fastify, options) {
 
       const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
+      fastify.log.info('Query parameters:', { params, whereSql });
+
       // total
       const countSql = `
         SELECT count(*)::int AS total
@@ -87,6 +90,8 @@ async function tracertRoutes(fastify, options) {
       `;
       const { rows: countRows } = await req.db.query(countSql, params);
       const total = countRows?.[0]?.total ?? 0;
+      
+      fastify.log.info('Count query executed successfully, total:', total);
 
       // CORREÇÃO: Construir a query com os parâmetros corretos
       const limitParam = params.length + 1;
@@ -136,7 +141,15 @@ async function tracertRoutes(fastify, options) {
 
       // CORREÇÃO: Passar os parâmetros corretamente
       const queryParams = [...params, sizeNum, offset];
+      
+      fastify.log.info('Executing data query with params:', { 
+        queryParams, 
+        sqlPreview: dataSql.substring(0, 200) + '...' 
+      });
+      
       const { rows } = await req.db.query(dataSql, queryParams);
+      
+      fastify.log.info('Data query executed successfully, rows count:', rows.length);
 
       return reply.send({
         page: pageNum,
@@ -145,7 +158,12 @@ async function tracertRoutes(fastify, options) {
         rows,
       });
     } catch (error) {
-      fastify.log.error('Erro ao listar tracert do bot:', error);
+      fastify.log.error('Erro ao listar tracert do bot:', {
+        error: error.message,
+        stack: error.stack,
+        query: error.query || 'No query info',
+        params: error.parameters || 'No params info'
+      });
       return reply.code(500).send({
         error: 'Erro interno ao listar tracert do bot',
         details: process.env.NODE_ENV === 'development' ? String(error.stack || error.message || error) : undefined,
