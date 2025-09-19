@@ -203,7 +203,27 @@ async function tracertRoutes(fastify, options) {
       // caso contrário, retornar desde startEnteredAt
       const journeyFromTs = lastResetAt || startEnteredAt;
 
-      // Journey - filtra eventos após reset e exclui eventos de reset
+      // Journey - se há reset, mostra APENAS eventos após o timestamp do reset
+      // se não há reset, mostra desde o início do fluxo
+      let journeyCondition;
+      let journeyParams = [userId];
+
+      if (lastResetAt) {
+        // Se houve reset, pega APENAS eventos após o reset (não inclui o próprio reset)
+        journeyCondition = `j.entered_at > $2`;
+        journeyParams.push(lastResetAt);
+      } else {
+        // Se não houve reset, pega desde o início do fluxo (se existir)
+        if (startEnteredAt) {
+          journeyCondition = `j.entered_at >= $2`;
+          journeyParams.push(startEnteredAt);
+        } else {
+          // Fallback: pega tudo
+          journeyCondition = `j.entered_at >= $2`;
+          journeyParams.push('1970-01-01T00:00:00Z');
+        }
+      }
+
       const journeySql = `
         SELECT COALESCE(
           jsonb_agg(
@@ -214,13 +234,13 @@ async function tracertRoutes(fastify, options) {
               'visits', (SELECT l.entries FROM hmg.v_bot_loops l WHERE l.user_id = $1 AND l.block = j.stage)
             )
             ORDER BY j.entered_at
-          ) FILTER (WHERE j.entered_at ${lastResetAt ? '>' : '>='} $2 AND j.stage NOT IN ('RESET TO START', 'reset_to_start', 'reset')),
+          ) FILTER (WHERE ${journeyCondition}),
           '[]'::jsonb
         ) AS journey
         FROM hmg.v_bot_user_journey j
         WHERE j.user_id = $1
       `;
-      const { rows: journeyRows } = await req.db.query(journeySql, [userId, journeyFromTs || '1970-01-01T00:00:00Z']);
+      const { rows: journeyRows } = await req.db.query(journeySql, journeyParams);
       const journey = journeyRows?.[0]?.journey ?? [];
 
       // dwell / diagnóstico atual (último dwell para o bloco atual)
