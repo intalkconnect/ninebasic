@@ -15,118 +15,117 @@ async function tracertRoutes(fastify, options) {
    *  - page (default 1), pageSize (default 20)
    */
   fastify.get('/customers', async (req, reply) => {
-    const {
-      q,
-      stage,
-      min_loops,
-      min_time_sec,
-      order_by = 'time_in_stage_sec',
-      order_dir = 'desc',
-      page = '1',
-      pageSize = '20',
-    } = req.query;
+  const {
+    q,
+    stage,
+    min_loops,
+    min_time_sec,
+    order_by = 'time_in_stage_sec',
+    order_dir = 'desc',
+    page = '1',
+    pageSize = '20',
+  } = req.query;
 
-    // validações simples
-    const pageNum = Math.max(1, parseInt(page, 10) || 1);
-    const sizeNum = Math.min(200, Math.max(1, parseInt(pageSize, 10) || 20));
-    const offset = (pageNum - 1) * sizeNum;
+  const pageNum = Math.max(1, parseInt(page, 10) || 1);
+  const sizeNum = Math.min(200, Math.max(1, parseInt(pageSize, 10) || 20));
+  const offset = (pageNum - 1) * sizeNum;
 
-    // permite apenas essas colunas para ordering (protege contra SQL injection)
-    const allowedOrderBy = new Set(['time_in_stage_sec', 'loops_in_stage', 'name', 'stage_entered_at']);
-    const orderByKey = allowedOrderBy.has(String(order_by)) ? String(order_by) : 'time_in_stage_sec';
-    // qualificar com alias da view
-    const orderBySql = orderByKey === 'stage_entered_at' ? 'v.stage_entered_at' : `v.${orderByKey}`;
-    const orderDir = String(order_dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  const allowedOrderBy = new Set(['time_in_stage_sec', 'loops_in_stage', 'name', 'stage_entered_at']);
+  const orderByKey = allowedOrderBy.has(String(order_by)) ? String(order_by) : 'time_in_stage_sec';
+  const orderBySql = orderByKey === 'stage_entered_at' ? 'v.stage_entered_at' : `v.${orderByKey}`;
+  const orderDir = String(order_dir).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
-    const where = [];
-    const params = [];
+  const where = [];
+  const params = [];
 
-    if (q && String(q).trim() !== '') {
-      params.push(`%${String(q).trim().toLowerCase()}%`);
-      where.push(`(lower(v.name) LIKE $${params.length} OR lower(v.user_id) LIKE $${params.length})`);
-    }
+  if (q && String(q).trim() !== '') {
+    params.push(`%${String(q).trim().toLowerCase()}%`);
+    where.push(`(lower(v.name) LIKE $${params.length} OR lower(v.user_id) LIKE $${params.length})`);
+  }
 
-    if (stage && String(stage).trim() !== '') {
-      params.push(String(stage).trim());
-      where.push(`v.current_stage = $${params.length}`);
-    }
+  if (stage && String(stage).trim() !== '') {
+    params.push(String(stage).trim());
+    // se você filtra por label (texto) em vez do id do bloco, troque a condição conforme explicado abaixo.
+    where.push(`v.current_stage = $${params.length}`);
+  }
 
-    if (min_loops && Number.isFinite(Number(min_loops))) {
-      params.push(parseInt(min_loops, 10));
-      where.push(`v.loops_in_stage >= $${params.length}`);
-    }
+  if (min_loops && Number.isFinite(Number(min_loops))) {
+    params.push(parseInt(min_loops, 10));
+    where.push(`v.loops_in_stage >= $${params.length}`);
+  }
 
-    if (min_time_sec && Number.isFinite(Number(min_time_sec))) {
-      params.push(parseInt(min_time_sec, 10));
-      where.push(`v.time_in_stage_sec >= $${params.length}`);
-    }
+  if (min_time_sec && Number.isFinite(Number(min_time_sec))) {
+    params.push(parseInt(min_time_sec, 10));
+    where.push(`v.time_in_stage_sec >= $${params.length}`);
+  }
 
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    try {
-      // total
-      const countSql = `
-        SELECT count(*)::int AS total
-        FROM hmg.v_bot_customer_list v
-        ${whereSql}
-      `;
-      const { rows: countRows } = await req.db.query(countSql, params);
-      const total = countRows?.[0]?.total ?? 0;
+  try {
+    // total
+    const countSql = `
+      SELECT count(*)::int AS total
+      FROM hmg.v_bot_customer_list v
+      ${whereSql}
+    `;
+    const { rows: countRows } = await req.db.query(countSql, params);
+    const total = countRows?.[0]?.total ?? 0;
 
-      // dados
-      // incluí fallback de label:
-      // 1) label do fluxo ativo: f.data->'blocks'->>v.current_stage
-      // 2) sessions.vars->>'current_block_label'
-      // 3) ultima transição em hmg.bot_transitions (subselect lateral)
-      const dataSql = `
-  SELECT
-    v.cliente_id,
-    v.user_id,
-    v.name,
-    v.channel,
-    v.current_stage,
-    COALESCE(
-      (f.data->'blocks'->>v.current_stage),
-      s.vars->>'current_block_label',
-      t.block_label
-    ) AS current_stage_label,
-    COALESCE(
-      (f.data->'blocks'-> (v.current_stage) ->> 'type'),
-      s.vars->>'current_block_type',
-      t.block_type
-    ) AS current_stage_type,
-    v.stage_entered_at,
-    v.time_in_stage_sec,
-    v.loops_in_stage
-  FROM hmg.v_bot_customer_list v
-  LEFT JOIN hmg.flows f ON f.active = true
-  LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
-  LEFT JOIN LATERAL (
-    SELECT bt.block_label, bt.block_type
-    FROM hmg.bot_transitions bt
-    WHERE bt.user_id = v.user_id
-    ORDER BY bt.entered_at DESC
-    LIMIT 1
-  ) t ON true
-  ${whereSql}
-  ORDER BY ${orderBySql} ${orderDir}, v.user_id ASC
-  LIMIT $${params.length + 1} OFFSET $${params.length + 2}
-`;
+    // dados — note o uso correto do operador JSON para chave dinâmica:
+    const dataSql = `
+      SELECT
+        v.cliente_id,
+        v.user_id,
+        v.name,
+        v.channel,
+        v.current_stage,
+        COALESCE(
+          (f.data->'blocks'->>v.current_stage),
+          s.vars->>'current_block_label',
+          t.block_label
+        ) AS current_stage_label,
+        COALESCE(
+          ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
+          s.vars->>'current_block_type',
+          t.block_type
+        ) AS current_stage_type,
+        v.stage_entered_at,
+        v.time_in_stage_sec,
+        v.loops_in_stage
+      FROM hmg.v_bot_customer_list v
+      LEFT JOIN hmg.flows f ON f.active = true
+      LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+      LEFT JOIN LATERAL (
+        SELECT bt.block_label, bt.block_type
+        FROM hmg.bot_transitions bt
+        WHERE bt.user_id = v.user_id
+        ORDER BY bt.entered_at DESC
+        LIMIT 1
+      ) t ON true
+      ${whereSql}
+      ORDER BY ${orderBySql} ${orderDir}, v.user_id ASC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `;
 
-      return reply.send({
-        page: pageNum,
-        pageSize: sizeNum,
-        total,
-        rows,
-      });
-    } catch (error) {
-      fastify.log.error('Erro ao listar tracert do bot:', error);
-      return reply.code(500).send({
-        error: 'Erro interno ao listar tracert do bot',
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined,
-      });
-    }
-  });
+    // **AQUI** executamos a query (isso estava faltando)
+    const { rows } = await req.db.query(dataSql, [...params, sizeNum, offset]);
+
+    return reply.send({
+      page: pageNum,
+      pageSize: sizeNum,
+      total,
+      rows,
+    });
+  } catch (error) {
+    fastify.log.error('Erro ao listar tracert do bot:', error);
+    // mais detalhe no log durante dev
+    return reply.code(500).send({
+      error: 'Erro interno ao listar tracert do bot',
+      details: process.env.NODE_ENV === 'development' ? String(error.stack || error.message || error) : undefined,
+    });
+  }
+});
+
 
   /**
    * GET /bot/tracert/customers/:userId
