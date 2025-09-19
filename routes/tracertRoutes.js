@@ -61,11 +61,11 @@ async function tracertRoutes(fastify, options) {
         whereConditions.push(`(
           COALESCE(
             v.current_stage_type,
-            (SELECT bt.block_type FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id ORDER BY bt.entered_at DESC LIMIT 1)
+            (SELECT bt.block_type FROM bot_transitions bt WHERE bt.user_id = v.user_id ORDER BY bt.entered_at DESC LIMIT 1)
           ) IS NULL
           OR COALESCE(
             v.current_stage_type,
-            (SELECT bt.block_type FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id ORDER BY bt.entered_at DESC LIMIT 1)
+            (SELECT bt.block_type FROM bot_transitions bt WHERE bt.user_id = v.user_id ORDER BY bt.entered_at DESC LIMIT 1)
           ) <> 'human'
         )`);
       }
@@ -75,7 +75,7 @@ async function tracertRoutes(fastify, options) {
       // Query de count
       const countSql = `
         SELECT COUNT(*)::int AS total
-        FROM hmg.v_bot_customer_list v
+        FROM v_bot_customer_list v
         ${whereSql}
       `;
       
@@ -104,12 +104,12 @@ async function tracertRoutes(fastify, options) {
           v.time_in_stage_sec,
           v.loops_in_stage,
           f.id AS flow_id
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+        FROM v_bot_customer_list v
+        LEFT JOIN flows f ON f.active = true
+        LEFT JOIN sessions s ON s.user_id = v.user_id
         LEFT JOIN LATERAL (
           SELECT bt.block_label, bt.block_type, bt.entered_at
-          FROM hmg.bot_transitions bt
+          FROM bot_transitions bt
           WHERE bt.user_id = v.user_id
           ORDER BY bt.entered_at DESC
           LIMIT 1
@@ -167,12 +167,12 @@ async function tracertRoutes(fastify, options) {
           v.loops_in_stage,
           s.vars->>'last_reset_at' AS last_reset_at,
           f.id AS flow_id
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+        FROM v_bot_customer_list v
+        LEFT JOIN flows f ON f.active = true
+        LEFT JOIN sessions s ON s.user_id = v.user_id
         LEFT JOIN LATERAL (
           SELECT bt.block_label, bt.block_type
-          FROM hmg.bot_transitions bt
+          FROM bot_transitions bt
           WHERE bt.user_id = v.user_id
           ORDER BY bt.entered_at DESC
           LIMIT 1
@@ -195,7 +195,7 @@ async function tracertRoutes(fastify, options) {
           stage,
           entered_at,
           duration_sec
-        FROM hmg.v_bot_user_journey
+        FROM v_bot_user_journey
         WHERE user_id = $1
         ORDER BY entered_at
       `;
@@ -210,7 +210,7 @@ async function tracertRoutes(fastify, options) {
           entered_at,
           left_at,
           duration_sec
-        FROM hmg.v_bot_stage_dwells
+        FROM v_bot_stage_dwells
         WHERE user_id = $1 AND block = $2
         ORDER BY entered_at DESC
         LIMIT 1
@@ -242,13 +242,13 @@ async function tracertRoutes(fastify, options) {
       const now = new Date().toISOString();
 
       // Buscar flow ativo
-      const flowResult = await req.db.query('SELECT id, data FROM hmg.flows WHERE active = true LIMIT 1');
+      const flowResult = await req.db.query('SELECT id, data FROM flows WHERE active = true LIMIT 1');
       const activeFlow = flowResult.rows[0];
       const startBlock = activeFlow?.data?.start || null;
 
       // Atualizar sessão
       const sessionSql = `
-        INSERT INTO hmg.sessions (user_id, current_block, last_flow_id, vars, updated_at)
+        INSERT INTO sessions (user_id, current_block, last_flow_id, vars, updated_at)
         VALUES ($1, $2, $3, $4, NOW())
         ON CONFLICT (user_id)
         DO UPDATE SET 
@@ -286,7 +286,7 @@ async function tracertRoutes(fastify, options) {
       // Total de usuários ativos
       const totalSql = `
         SELECT COUNT(*)::int AS total
-        FROM hmg.v_bot_customer_list v
+        FROM v_bot_customer_list v
         WHERE v.current_stage IS NOT NULL
       `;
       const totalResult = await req.db.query(totalSql);
@@ -295,7 +295,7 @@ async function tracertRoutes(fastify, options) {
       // Loopers
       const loopersSql = `
         SELECT COUNT(*)::int AS loopers
-        FROM hmg.v_bot_customer_list
+        FROM v_bot_customer_list
         WHERE loops_in_stage > 1
       `;
       const loopersResult = await req.db.query(loopersSql);
@@ -304,7 +304,7 @@ async function tracertRoutes(fastify, options) {
       // Distribuição
       const distSql = `
         SELECT current_stage AS block, COUNT(*)::int AS users
-        FROM hmg.v_bot_customer_list
+        FROM v_bot_customer_list
         WHERE current_stage IS NOT NULL
         GROUP BY current_stage
         ORDER BY COUNT(*) DESC
@@ -338,7 +338,7 @@ async function tracertRoutes(fastify, options) {
       const now = new Date().toISOString();
 
       const ticketSql = `
-        INSERT INTO hmg.tickets (user_id, queue, status, created_at, created_by)
+        INSERT INTO tickets (user_id, queue, status, created_at, created_by)
         VALUES ($1, $2, 'open', $3, $4)
         RETURNING ticket_number
       `;
