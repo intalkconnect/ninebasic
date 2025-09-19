@@ -186,6 +186,11 @@ async function tracertRoutes(fastify, options) {
           v.time_in_stage_sec,
           v.loops_in_stage,
           f.data->>'start' AS flow_start_block
+          (
+          SELECT MAX(bt.entered_at)
+          FROM hmg.bot_transitions bt
+          WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset')
+          ) AS last_reset_a
         FROM hmg.v_bot_customer_list v
         LEFT JOIN hmg.flows f ON f.active = true
         LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
@@ -297,51 +302,59 @@ async function tracertRoutes(fastify, options) {
    * - opcional: limpa vars (set to {}), reseta ticket info
    */
   fastify.post('/customers/:userId/reset', async (req, reply) => {
-    const { userId } = req.params;
-    try {
-      // busca flow.start do fluxo ativo
-      const { rows: frows } = await req.db.query(`SELECT id, data->>'start' AS start_block FROM hmg.flows WHERE active = true LIMIT 1`);
-      if (!frows || frows.length === 0) {
-        return reply.code(400).send({ error: 'Flow ativo não encontrado' });
-      }
-      const flowId = frows[0].id;
-      const startBlock = frows[0].start_block;
+  const { userId } = req.params;
+  const now = new Date().toISOString();
 
-      // atualiza sessão
-      await req.db.query(`
-        INSERT INTO hmg.sessions (user_id, current_block, last_flow_id, vars, updated_at)
-        VALUES ($1,$2,$3,$4,NOW())
-        ON CONFLICT (user_id) DO UPDATE
-          SET current_block = EXCLUDED.current_block,
-              last_flow_id = EXCLUDED.last_flow_id,
-              vars = EXCLUDED.vars,
-              updated_at = EXCLUDED.updated_at
-      `, [userId, startBlock, flowId, JSON.stringify({})]);
+  // você pode obter flow_id ativo se quiser registrar também
+  try {
+    // 1) inserir transição de reset
+    const insertSql = `
+      INSERT INTO hmg.bot_transitions (
+        user_id, channel, flow_id, block_id, block_label, entered_at, vars, ticket_number
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *
+    `;
+    // se tiver channel/flow em sessões, buscar; simplificamos aqui usando nulls
+    await req.db.query(insertSql, [
+      userId,
+      null,
+      null,
+      'reset_to_start',
+      'RESET TO START',
+      now,
+      JSON.stringify({ reset_by: req.user?.email || 'system' }),
+      null
+    ]);
 
-      // registra transição para auditoria (entered_at = now)
-      await req.db.query(`
-        INSERT INTO hmg.bot_transitions (user_id, channel, flow_id, block_id, block_label, block_type, entered_at, vars, ticket_number)
-        VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7,$8)
-      `, [
-        userId,
-        null,
-        flowId,
-        startBlock,
-        'RESET TO START',
-        'system',
-        JSON.stringify({ reason: 'reset_by_operator' }),
-        null
-      ]);
+    // 2) atualizar sessão para flow.start
+    // pega id do flow ativo (se tiver)
+    const { rows: frows } = await req.db.query('SELECT id, data FROM hmg.flows WHERE active = true LIMIT 1');
+    const activeFlow = frows[0] || null;
+    const startBlock = activeFlow ? (activeFlow.data?.start || null) : null;
 
-      return reply.send({ ok: true, startBlock });
-    } catch (error) {
-      fastify.log.error('Erro ao resetar sessão do cliente:', error);
-      return reply.code(500).send({
-        error: 'Erro interno ao resetar sessão',
-        details: process.env.NODE_ENV === 'development' ? String(error.stack || error.message || error) : undefined,
-      });
-    }
-  });
+    // atualiza sessão: current_block = startBlock || null, limpa vars
+    const upSql = `
+      INSERT INTO hmg.sessions (user_id, current_block, last_flow_id, vars, updated_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT (user_id)
+      DO UPDATE SET current_block = EXCLUDED.current_block,
+                    last_flow_id = EXCLUDED.last_flow_id,
+                    vars = EXCLUDED.vars,
+                    updated_at = EXCLUDED.updated_at
+    `;
+    await req.db.query(upSql, [
+      userId,
+      startBlock || (activeFlow ? activeFlow.id : null),
+      activeFlow ? activeFlow.id : null,
+      JSON.stringify({}) // limpa variáveis de sessão
+    ]);
+
+    return reply.code(200).send({ ok: true, reset_at: now });
+  } catch (err) {
+    fastify.log.error('Erro ao resetar sessão do tracert:', err);
+    return reply.code(500).send({ error: 'Falha ao resetar sessão' });
+  }
+});
 
   /**
    * GET /tracert/metrics
