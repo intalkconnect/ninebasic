@@ -7,25 +7,20 @@ async function tracertRoutes(fastify, options) {
    * Lista paginada dos clientes com posição no bot.
    * Query params:
    *  - q: busca por name ou user_id (telefone)
-   *  - stage: filtra pelo bloco atual (id do bloco)
-   *  - stageLabel: filtra pelo label do estágio (comparação com label gerado)
    *  - min_loops, min_time_sec, order_by, order_dir, page, pageSize
    *
-   * Por padrão **oculta** sessões humanas. Para incluir humanos, adicione include_human=true.
+   * SEMPRE oculta sessões humanas (não há mais opção de incluir).
    */
   fastify.get('/customers', async (req, reply) => {
     try {
       const {
         q,
-        stage,
-        stageLabel,
         min_loops,
         min_time_sec,
         order_by = 'time_in_stage_sec',
         order_dir = 'desc',
         page = '1',
         pageSize = '20',
-        include_human = 'false',
       } = req.query;
 
       const pageNum = Math.max(1, parseInt(page, 10) || 1);
@@ -45,21 +40,6 @@ async function tracertRoutes(fastify, options) {
         where.push(`(lower(v.name) LIKE $${params.length} OR lower(v.user_id) LIKE $${params.length})`);
       }
 
-      if (stage && String(stage).trim() !== '') {
-        params.push(String(stage).trim());
-        where.push(`v.current_stage = $${params.length}`);
-      }
-
-      // filtro por label (opcional) - compara com o label resolvido
-      if (stageLabel && String(stageLabel).trim() !== '') {
-        params.push(String(stageLabel).trim());
-        where.push(`COALESCE(
-          (f.data->'blocks'->>v.current_stage),
-          s.vars->>'current_block_label',
-          t.block_label
-        ) = $${params.length}`);
-      }
-
       if (min_loops && Number.isFinite(Number(min_loops))) {
         params.push(parseInt(min_loops, 10));
         where.push(`v.loops_in_stage >= $${params.length}`);
@@ -70,16 +50,14 @@ async function tracertRoutes(fastify, options) {
         where.push(`v.time_in_stage_sec >= $${params.length}`);
       }
 
-      // por padrão, ocultar sessões humanas (a menos que include_human=true)
-      if (String(include_human).toLowerCase() !== 'true') {
-        where.push(`NOT (
-          COALESCE(
-            ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
-            s.vars->>'current_block_type',
-            t.block_type
-          ) = 'human'
-        )`);
-      }
+      // SEMPRE ocultar sessões humanas (removido include_human)
+      where.push(`NOT (
+        COALESCE(
+          ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
+          s.vars->>'current_block_type',
+          t.block_type
+        ) = 'human'
+      )`);
 
       const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
@@ -157,82 +135,75 @@ async function tracertRoutes(fastify, options) {
   /**
    * GET /tracert/customers/:userId
    * Retorna base + jornada + dwell.
-   * - journey é retornada a partir do `start` do fluxo por padrão (menor payload).
-   * - se houve uma entrada humana recente e o usuário já retornou do humano, a jornada é cortada
-   *   para começar a partir da última entrada humana (útil para ver apenas pós-handover).
+   * - journey é retornada SOMENTE após o último reset (excluindo o evento de reset).
+   * - se não houve reset, retorna jornada desde o início do fluxo.
    */
   fastify.get('/customers/:userId', async (req, reply) => {
     const { userId } = req.params;
     try {
       // base info
       const baseSql = `
-      SELECT
-        v.cliente_id,
-        v.user_id,
-        v.name,
-        v.channel,
-        v.current_stage,
-        COALESCE(
-          (f.data->'blocks'->>v.current_stage),
-          s.vars->>'current_block_label',
-          t.block_label
-        ) AS current_stage_label,
-        COALESCE(
-          ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
-          s.vars->>'current_block_type',
-          t.block_type
-        ) AS current_stage_type,
-        v.stage_entered_at,
-        v.time_in_stage_sec,
-        v.loops_in_stage,
-        f.data->>'start' AS flow_start_block, -- VÍRGULA ADICIONADA AQUI
-        (
-          SELECT MAX(bt.entered_at)
+        SELECT
+          v.cliente_id,
+          v.user_id,
+          v.name,
+          v.channel,
+          v.current_stage,
+          COALESCE(
+            (f.data->'blocks'->>v.current_stage),
+            s.vars->>'current_block_label',
+            t.block_label
+          ) AS current_stage_label,
+          COALESCE(
+            ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
+            s.vars->>'current_block_type',
+            t.block_type
+          ) AS current_stage_type,
+          v.stage_entered_at,
+          v.time_in_stage_sec,
+          v.loops_in_stage,
+          f.data->>'start' AS flow_start_block,
+          (
+            SELECT MAX(bt.entered_at)
+            FROM hmg.bot_transitions bt
+            WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset')
+          ) AS last_reset_at
+        FROM hmg.v_bot_customer_list v
+        LEFT JOIN hmg.flows f ON f.active = true
+        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+        LEFT JOIN LATERAL (
+          SELECT bt.block_label, bt.block_type
           FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset')
-        ) AS last_reset_at -- Nome corrigido de last_reset_a para last_reset_at
-      FROM hmg.v_bot_customer_list v
-      LEFT JOIN hmg.flows f ON f.active = true
-      LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
-      LEFT JOIN LATERAL (
-        SELECT bt.block_label, bt.block_type
-        FROM hmg.bot_transitions bt
-        WHERE bt.user_id = v.user_id
-        ORDER BY bt.entered_at DESC
+          WHERE bt.user_id = v.user_id
+          ORDER BY bt.entered_at DESC
+          LIMIT 1
+        ) t ON true
+        WHERE v.user_id = $1
         LIMIT 1
-      ) t ON true
-      WHERE v.user_id = $1
-      LIMIT 1
-    `;
+      `;
       const { rows: baseRows } = await req.db.query(baseSql, [userId]);
       if (!baseRows || baseRows.length === 0) {
         return reply.code(404).send({ error: 'Cliente não encontrado no tracert do bot' });
       }
       const base = baseRows[0];
 
-      // calcular timestamps de corte:
+      // calcular timestamp de corte:
       //  - start_entered_at: primeira vez que user entrou no bloco flow_start_block
-      //  - last_human_entered_at: ultima entrada em um bloco do tipo human (pela tabela bot_transitions)
+      //  - last_reset_at: último reset (já obtido acima)
       const cutSql = `
         SELECT
-          (SELECT min(j.entered_at) FROM hmg.v_bot_user_journey j WHERE j.user_id = $1 AND j.stage = $2) AS start_entered_at,
-          (SELECT bt.entered_at FROM hmg.bot_transitions bt WHERE bt.user_id = $1 AND bt.block_type = 'human' ORDER BY bt.entered_at DESC LIMIT 1) AS last_human_entered_at,
-          (SELECT s.current_block FROM hmg.sessions s WHERE s.user_id = $1 LIMIT 1) AS session_current_block
+          (SELECT min(j.entered_at) FROM hmg.v_bot_user_journey j WHERE j.user_id = $1 AND j.stage = $2) AS start_entered_at
       `;
       const { rows: cutRows } = await req.db.query(cutSql, [userId, base.flow_start_block]);
       const cut = (cutRows && cutRows[0]) || {};
       const startEnteredAt = cut.start_entered_at;
-      const lastHumanEnteredAt = cut.last_human_entered_at;
-      const sessionCurrentBlock = cut.session_current_block;
+      const lastResetAt = base.last_reset_at;
 
-      // lógica: se há lastHumanEnteredAt AND session_current_block !== 'human', então
-      // retornamos journey a partir do lastHumanEnteredAt (ou, se não existir, a partir do startEnteredAt).
-      // Caso contrário (sem human), retornamos a partir do startEnteredAt.
-      const journeyFromTs = (lastHumanEnteredAt && sessionCurrentBlock !== 'human')
-        ? lastHumanEnteredAt
-        : startEnteredAt;
+      // lógica: se há lastResetAt, retornar journey DEPOIS desse timestamp (excluindo reset)
+      // caso contrário, retornar desde startEnteredAt
+      const journeyFromTs = lastResetAt || startEnteredAt;
 
-      // Journey (aplicando limite de início)
+      // Journey - filtra eventos após reset e exclui eventos de reset
       const journeySql = `
         SELECT COALESCE(
           jsonb_agg(
@@ -243,7 +214,7 @@ async function tracertRoutes(fastify, options) {
               'visits', (SELECT l.entries FROM hmg.v_bot_loops l WHERE l.user_id = $1 AND l.block = j.stage)
             )
             ORDER BY j.entered_at
-          ) FILTER (WHERE j.entered_at >= $2),
+          ) FILTER (WHERE j.entered_at ${lastResetAt ? '>' : '>='} $2 AND j.stage NOT IN ('RESET TO START', 'reset_to_start', 'reset')),
           '[]'::jsonb
         ) AS journey
         FROM hmg.v_bot_user_journey j
@@ -302,68 +273,127 @@ async function tracertRoutes(fastify, options) {
    * - opcional: limpa vars (set to {}), reseta ticket info
    */
   fastify.post('/customers/:userId/reset', async (req, reply) => {
-  const { userId } = req.params;
-  const now = new Date().toISOString();
+    const { userId } = req.params;
+    const now = new Date().toISOString();
 
-  // você pode obter flow_id ativo se quiser registrar também
-  try {
-    // 1) inserir transição de reset
-    const insertSql = `
-      INSERT INTO hmg.bot_transitions (
-        user_id, channel, flow_id, block_id, block_label, entered_at, vars, ticket_number
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      RETURNING *
-    `;
-    // se tiver channel/flow em sessões, buscar; simplificamos aqui usando nulls
-    await req.db.query(insertSql, [
-      userId,
-      null,
-      null,
-      'reset_to_start',
-      'RESET TO START',
-      now,
-      JSON.stringify({ reset_by: req.user?.email || 'system' }),
-      null
-    ]);
+    try {
+      // 1) inserir transição de reset
+      const insertSql = `
+        INSERT INTO hmg.bot_transitions (
+          user_id, channel, flow_id, block_id, block_label, entered_at, vars, ticket_number
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING *
+      `;
+      await req.db.query(insertSql, [
+        userId,
+        null,
+        null,
+        'reset_to_start',
+        'RESET TO START',
+        now,
+        JSON.stringify({ reset_by: req.user?.email || 'system' }),
+        null
+      ]);
 
-    // 2) atualizar sessão para flow.start
-    // pega id do flow ativo (se tiver)
-    const { rows: frows } = await req.db.query('SELECT id, data FROM hmg.flows WHERE active = true LIMIT 1');
-    const activeFlow = frows[0] || null;
-    const startBlock = activeFlow ? (activeFlow.data?.start || null) : null;
+      // 2) atualizar sessão para flow.start
+      const { rows: frows } = await req.db.query('SELECT id, data FROM hmg.flows WHERE active = true LIMIT 1');
+      const activeFlow = frows[0] || null;
+      const startBlock = activeFlow ? (activeFlow.data?.start || null) : null;
 
-    // atualiza sessão: current_block = startBlock || null, limpa vars
-    const upSql = `
-      INSERT INTO hmg.sessions (user_id, current_block, last_flow_id, vars, updated_at)
-      VALUES ($1, $2, $3, $4, NOW())
-      ON CONFLICT (user_id)
-      DO UPDATE SET current_block = EXCLUDED.current_block,
-                    last_flow_id = EXCLUDED.last_flow_id,
-                    vars = EXCLUDED.vars,
-                    updated_at = EXCLUDED.updated_at
-    `;
-    await req.db.query(upSql, [
-      userId,
-      startBlock || (activeFlow ? activeFlow.id : null),
-      activeFlow ? activeFlow.id : null,
-      JSON.stringify({}) // limpa variáveis de sessão
-    ]);
+      // atualiza sessão: current_block = startBlock, limpa vars
+      const upSql = `
+        INSERT INTO hmg.sessions (user_id, current_block, last_flow_id, vars, updated_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (user_id)
+        DO UPDATE SET current_block = EXCLUDED.current_block,
+                      last_flow_id = EXCLUDED.last_flow_id,
+                      vars = EXCLUDED.vars,
+                      updated_at = EXCLUDED.updated_at
+      `;
+      await req.db.query(upSql, [
+        userId,
+        startBlock || (activeFlow ? activeFlow.id : null),
+        activeFlow ? activeFlow.id : null,
+        JSON.stringify({}) // limpa variáveis de sessão
+      ]);
 
-    return reply.code(200).send({ ok: true, reset_at: now });
-  } catch (err) {
-    fastify.log.error('Erro ao resetar sessão do tracert:', err);
-    return reply.code(500).send({ error: 'Falha ao resetar sessão' });
-  }
-});
+      return reply.code(200).send({ ok: true, reset_at: now });
+    } catch (err) {
+      fastify.log.error('Erro ao resetar sessão do tracert:', err);
+      return reply.code(500).send({ error: 'Falha ao resetar sessão' });
+    }
+  });
+
+  /**
+   * POST /tracert/customers/:userId/ticket
+   * Cria um ticket para o usuário (não transfere, apenas cria ticket).
+   */
+  fastify.post('/customers/:userId/ticket', async (req, reply) => {
+    const { userId } = req.params;
+    const { queue } = req.body || {};
+    const now = new Date().toISOString();
+
+    try {
+      // Aqui você implementaria a lógica de criação de ticket
+      // Este é apenas um exemplo - adapte conforme sua estrutura de tickets
+      const ticketSql = `
+        INSERT INTO hmg.tickets (
+          user_id, queue, status, created_at, created_by, priority
+        ) VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING ticket_id, ticket_number
+      `;
+      
+      const { rows: ticketRows } = await req.db.query(ticketSql, [
+        userId,
+        queue || 'Recepção',
+        'open',
+        now,
+        req.user?.email || 'system',
+        'normal'
+      ]);
+
+      const ticket = ticketRows?.[0];
+      
+      if (ticket) {
+        // Opcional: registrar a criação do ticket nas transições do bot
+        const transitionSql = `
+          INSERT INTO hmg.bot_transitions (
+            user_id, channel, flow_id, block_id, block_label, entered_at, vars, ticket_number
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `;
+        
+        await req.db.query(transitionSql, [
+          userId,
+          null,
+          null,
+          'ticket_created',
+          'TICKET CREATED',
+          now,
+          JSON.stringify({ created_by: req.user?.email || 'system', queue: queue || 'Recepção' }),
+          ticket.ticket_number
+        ]);
+      }
+
+      return reply.code(200).send({ 
+        ok: true, 
+        ticket_id: ticket?.ticket_id,
+        ticket_number: ticket?.ticket_number,
+        created_at: now 
+      });
+    } catch (err) {
+      fastify.log.error('Erro ao criar ticket:', err);
+      return reply.code(500).send({ error: 'Falha ao criar ticket' });
+    }
+  });
 
   /**
    * GET /tracert/metrics
    * Métricas de gargalo do bot
-   * - agora retorna total (excluindo human), loopers (users com loops_in_stage>1), bottlenecks, loops e distribuição
+   * - retorna total (excluindo human SEMPRE), loopers, bottlenecks, loops e distribuição
    */
   fastify.get('/metrics', async (req, reply) => {
     try {
-      // total (usuários visíveis, sem human)
+      // total (usuários visíveis, sem human - SEMPRE)
       const totalSql = `
         SELECT count(*)::int AS total
         FROM hmg.v_bot_customer_list v
@@ -387,7 +417,19 @@ async function tracertRoutes(fastify, options) {
       const loopersSql = `
         SELECT count(*)::int AS loopers
         FROM hmg.v_bot_customer_list v
+        LEFT JOIN hmg.flows f ON f.active = true
+        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+        LEFT JOIN LATERAL (
+          SELECT bt.block_type FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id ORDER BY bt.entered_at DESC LIMIT 1
+        ) t ON true
         WHERE v.loops_in_stage > 1
+        AND NOT (
+          COALESCE(
+            ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
+            s.vars->>'current_block_type',
+            t.block_type
+          ) = 'human'
+        )
       `;
       const { rows: loopRows } = await req.db.query(loopersSql);
       const loopers = loopRows?.[0]?.loopers ?? 0;
@@ -419,7 +461,7 @@ async function tracertRoutes(fastify, options) {
       `;
       const { rows: loops } = await req.db.query(loopsSql, [limit]);
 
-      // distribuição atual (quantos usuários por bloco no momento) — exclui human
+      // distribuição atual (quantos usuários por bloco no momento) — exclui human SEMPRE
       const distSql = `
         SELECT current_stage AS block, count(*)::int AS users
         FROM hmg.v_bot_customer_list v
@@ -455,49 +497,6 @@ async function tracertRoutes(fastify, options) {
       fastify.log.error('Erro ao calcular métricas do tracert do bot:', error);
       return reply.code(500).send({
         error: 'Erro interno ao calcular métricas',
-        details: process.env.NODE_ENV === 'development' ? String(error.stack || error.message || error) : undefined,
-      });
-    }
-  });
-
-  /**
-   * GET /tracert/stages
-   * Retorna labels + type (para popular filtro)
-   */
-  fastify.get('/stages', async (req, reply) => {
-    try {
-      const stagesSql = `
-        SELECT DISTINCT
-          COALESCE(
-            (f.data->'blocks'->>v.current_stage),
-            s.vars->>'current_block_label',
-            t.block_label
-          ) AS label,
-          COALESCE(
-            ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
-            s.vars->>'current_block_type',
-            t.block_type
-          ) AS type
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
-        LEFT JOIN LATERAL (
-          SELECT bt.block_label, bt.block_type
-          FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id
-          ORDER BY bt.entered_at DESC
-          LIMIT 1
-        ) t ON true
-        WHERE v.current_stage IS NOT NULL
-        ORDER BY label ASC
-      `;
-      const { rows } = await req.db.query(stagesSql);
-      const labelsAndTypes = (rows || []).filter(r => r.label).map(r => ({ label: r.label, type: r.type || null }));
-      return reply.send(labelsAndTypes);
-    } catch (error) {
-      fastify.log.error('Erro ao listar estágios do bot:', error);
-      return reply.code(500).send({
-        error: 'Erro interno ao listar estágios',
         details: process.env.NODE_ENV === 'development' ? String(error.stack || error.message || error) : undefined,
       });
     }
