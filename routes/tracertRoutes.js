@@ -88,7 +88,10 @@ async function tracertRoutes(fastify, options) {
       const { rows: countRows } = await req.db.query(countSql, params);
       const total = countRows?.[0]?.total ?? 0;
 
-      // CORREÇÃO: Usar placeholders corretos ($1, $2, etc.)
+      // CORREÇÃO: Construir a query com os parâmetros corretos
+      const limitParam = params.length + 1;
+      const offsetParam = params.length + 2;
+      
       const dataSql = `
         SELECT
           v.cliente_id,
@@ -128,7 +131,7 @@ async function tracertRoutes(fastify, options) {
         ) t ON true
         ${whereSql}
         ORDER BY ${orderBySql} ${orderDir}, v.user_id ASC
-        LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+        LIMIT $${limitParam} OFFSET $${offsetParam}
       `;
 
       // CORREÇÃO: Passar os parâmetros corretamente
