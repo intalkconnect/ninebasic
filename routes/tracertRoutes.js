@@ -166,44 +166,44 @@ async function tracertRoutes(fastify, options) {
     try {
       // base info
       const baseSql = `
-        SELECT
-          v.cliente_id,
-          v.user_id,
-          v.name,
-          v.channel,
-          v.current_stage,
-          COALESCE(
-            (f.data->'blocks'->>v.current_stage),
-            s.vars->>'current_block_label',
-            t.block_label
-          ) AS current_stage_label,
-          COALESCE(
-            ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
-            s.vars->>'current_block_type',
-            t.block_type
-          ) AS current_stage_type,
-          v.stage_entered_at,
-          v.time_in_stage_sec,
-          v.loops_in_stage,
-          f.data->>'start' AS flow_start_block
-          (
+      SELECT
+        v.cliente_id,
+        v.user_id,
+        v.name,
+        v.channel,
+        v.current_stage,
+        COALESCE(
+          (f.data->'blocks'->>v.current_stage),
+          s.vars->>'current_block_label',
+          t.block_label
+        ) AS current_stage_label,
+        COALESCE(
+          ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
+          s.vars->>'current_block_type',
+          t.block_type
+        ) AS current_stage_type,
+        v.stage_entered_at,
+        v.time_in_stage_sec,
+        v.loops_in_stage,
+        f.data->>'start' AS flow_start_block, -- VÍRGULA ADICIONADA AQUI
+        (
           SELECT MAX(bt.entered_at)
           FROM hmg.bot_transitions bt
           WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset')
-          ) AS last_reset_a
-        FROM hmg.v_bot_customer_list v
-        LEFT JOIN hmg.flows f ON f.active = true
-        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
-        LEFT JOIN LATERAL (
-          SELECT bt.block_label, bt.block_type
-          FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id
-          ORDER BY bt.entered_at DESC
-          LIMIT 1
-        ) t ON true
-        WHERE v.user_id = $1
+        ) AS last_reset_at -- Nome corrigido de last_reset_a para last_reset_at
+      FROM hmg.v_bot_customer_list v
+      LEFT JOIN hmg.flows f ON f.active = true
+      LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+      LEFT JOIN LATERAL (
+        SELECT bt.block_label, bt.block_type
+        FROM hmg.bot_transitions bt
+        WHERE bt.user_id = v.user_id
+        ORDER BY bt.entered_at DESC
         LIMIT 1
-      `;
+      ) t ON true
+      WHERE v.user_id = $1
+      LIMIT 1
+    `;
       const { rows: baseRows } = await req.db.query(baseSql, [userId]);
       if (!baseRows || baseRows.length === 0) {
         return reply.code(404).send({ error: 'Cliente não encontrado no tracert do bot' });
