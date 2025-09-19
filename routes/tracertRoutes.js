@@ -1,20 +1,13 @@
 // routes/botTracertRoutes.js
-// Endpoints para o "trace" do BOT (onde está no fluxo, tempo no estágio, loops, gargalos)
+// Endpoints para o "trace" do BOT com controle de visibilidade
 
 async function tracertRoutes(fastify, options) {
   /**
    * GET /tracert/customers
    * Lista paginada dos clientes com posição no bot.
-   * Query params:
-   *  - q: busca por name ou user_id (telefone)
-   *  - min_loops, min_time_sec, order_by, order_dir, page, pageSize
-   *
-   * SEMPRE oculta sessões humanas (não há mais opção de incluir).
+   * Mostra apenas usuários com registros visíveis e não está no bloco "início"
    */
-  // routes/botTracertRoutes.js
-// Corrigir a query SQL na rota GET /tracert/customers
-
- fastify.get('/customers', async (req, reply) => {
+  fastify.get('/customers', async (req, reply) => {
     try {
       const {
         q,
@@ -62,12 +55,18 @@ async function tracertRoutes(fastify, options) {
         ) = 'human'
       )`);
 
-      // REGRA 3: OCULTAR usuários no bloco "início" (fluxo concluído)
+      // OCULTAR usuários no bloco "início" (fluxo concluído)
       where.push(`COALESCE(
         (f.data->'blocks'->>v.current_stage),
         s.vars->>'current_block_label',
         t.block_label
       ) != 'início'`);
+
+      // MOSTRAR APENAS usuários com registros visíveis
+      where.push(`EXISTS (
+        SELECT 1 FROM hmg.bot_transitions bt 
+        WHERE bt.user_id = v.user_id AND bt.visible = true
+      )`);
 
       const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
@@ -80,7 +79,7 @@ async function tracertRoutes(fastify, options) {
         LEFT JOIN LATERAL (
           SELECT bt.block_label, bt.block_type
           FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id
+          WHERE bt.user_id = v.user_id AND bt.visible = true
           ORDER BY bt.entered_at DESC
           LIMIT 1
         ) t ON true
@@ -109,25 +108,21 @@ async function tracertRoutes(fastify, options) {
           ) AS current_stage_type,
           v.stage_entered_at,
           v.time_in_stage_sec,
-          -- Calcula loops considerando apenas eventos após último reset
-          CASE 
-            WHEN (SELECT MAX(bt.entered_at) FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset')) IS NOT NULL
-            THEN (
-              SELECT count(*)::int 
-              FROM hmg.v_bot_user_journey j 
-              WHERE j.user_id = v.user_id 
-                AND j.stage = v.current_stage 
-                AND j.entered_at > (SELECT MAX(bt.entered_at) FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset'))
-            )
-            ELSE v.loops_in_stage
-          END AS loops_in_stage
+          -- Calcula loops considerando apenas registros visíveis
+          (
+            SELECT count(*)::int 
+            FROM hmg.v_bot_user_journey j 
+            WHERE j.user_id = v.user_id 
+              AND j.stage = v.current_stage 
+              AND j.visible = true
+          ) AS loops_in_stage
         FROM hmg.v_bot_customer_list v
         LEFT JOIN hmg.flows f ON f.active = true
         LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
         LEFT JOIN LATERAL (
           SELECT bt.block_label, bt.block_type
           FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id
+          WHERE bt.user_id = v.user_id AND bt.visible = true
           ORDER BY bt.entered_at DESC
           LIMIT 1
         ) t ON true
@@ -152,76 +147,66 @@ async function tracertRoutes(fastify, options) {
       });
     }
   });
+
   /**
    * GET /tracert/customers/:userId
    * Retorna base + jornada + dwell.
-   * - journey é retornada SOMENTE após o último reset (excluindo o evento de reset).
-   * - se não houve reset, retorna jornada desde o início do fluxo.
+   * Mostra APENAS registros com visible = true (após último reset)
    */
-/**
- * GET /tracert/customers/:userId
- * Retorna base + jornada + dwell.
- * - Se houve reset: journey mostra APENAS eventos APÓS o reset (excluindo reset_to_start e tudo anterior)
- * - Se não houve reset: journey mostra TODOS os eventos desde o início
- */
-fastify.get('/customers/:userId', async (req, reply) => {
-  const { userId } = req.params;
-  try {
-    // base info
-    const baseSql = `
-      SELECT
-        v.cliente_id,
-        v.user_id,
-        v.name,
-        v.channel,
-        v.current_stage,
-        COALESCE(
-          (f.data->'blocks'->>v.current_stage),
-          s.vars->>'current_block_label',
-          t.block_label
-        ) AS current_stage_label,
-        COALESCE(
-          ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
-          s.vars->>'current_block_type',
-          t.block_type
-        ) AS current_stage_type,
-        v.stage_entered_at,
-        v.time_in_stage_sec,
-        v.loops_in_stage,
-        f.data->>'start' AS flow_start_block,
-        (
-          SELECT MAX(bt.entered_at)
+  fastify.get('/customers/:userId', async (req, reply) => {
+    const { userId } = req.params;
+    try {
+      // base info - busca apenas registros visíveis
+      const baseSql = `
+        SELECT
+          v.cliente_id,
+          v.user_id,
+          v.name,
+          v.channel,
+          v.current_stage,
+          COALESCE(
+            (f.data->'blocks'->>v.current_stage),
+            s.vars->>'current_block_label',
+            t.block_label
+          ) AS current_stage_label,
+          COALESCE(
+            ((f.data->'blocks'-> v.current_stage)::jsonb ->> 'type'),
+            s.vars->>'current_block_type',
+            t.block_type
+          ) AS current_stage_type,
+          v.stage_entered_at,
+          v.time_in_stage_sec,
+          v.loops_in_stage,
+          f.data->>'start' AS flow_start_block,
+          (
+            SELECT MAX(bt.entered_at)
+            FROM hmg.bot_transitions bt
+            WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset') AND bt.visible = true
+          ) AS last_reset_at
+        FROM hmg.v_bot_customer_list v
+        LEFT JOIN hmg.flows f ON f.active = true
+        LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
+        LEFT JOIN LATERAL (
+          SELECT bt.block_label, bt.block_type
           FROM hmg.bot_transitions bt
-          WHERE bt.user_id = v.user_id AND bt.block_id IN ('reset_to_start', 'reset')
-        ) AS last_reset_at
-      FROM hmg.v_bot_customer_list v
-      LEFT JOIN hmg.flows f ON f.active = true
-      LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
-      LEFT JOIN LATERAL (
-        SELECT bt.block_label, bt.block_type
-        FROM hmg.bot_transitions bt
-        WHERE bt.user_id = v.user_id
-        ORDER BY bt.entered_at DESC
+          WHERE bt.user_id = v.user_id AND bt.visible = true
+          ORDER BY bt.entered_at DESC
+          LIMIT 1
+        ) t ON true
+        WHERE v.user_id = $1
         LIMIT 1
-      ) t ON true
-      WHERE v.user_id = $1
-      LIMIT 1
-    `;
-    const { rows: baseRows } = await req.db.query(baseSql, [userId]);
-    
-    // REGRA 3: Se não encontrado OU está no bloco "início", retorna 404
-    if (!baseRows || baseRows.length === 0 || 
-        (baseRows[0].current_stage_label === 'início' && !baseRows[0].last_reset_at)) {
-      return reply.code(404).send({ error: 'Cliente não encontrado no tracert do bot' });
-    }
-    
-    const base = baseRows[0];
+      `;
+      const { rows: baseRows } = await req.db.query(baseSql, [userId]);
+      
+      // Se não encontrado OU está no bloco "início" sem reset, retorna 404
+      if (!baseRows || baseRows.length === 0 || 
+          (baseRows[0].current_stage_label === 'início' && !baseRows[0].last_reset_at)) {
+        return reply.code(404).send({ error: 'Cliente não encontrado no tracert do bot' });
+      }
+      
+      const base = baseRows[0];
 
-    // Journey - lógica diferenciada para com/sem reset
-    let journey = [];
-
-    if (base.last_reset_at) {
-      // REGRA 1: Com reset - mostrar apenas eventos APÓS o reset (EXCLUINDO reset_to_start e tudo anterior)
+      // Journey - mostra APENAS registros visíveis
       const journeySql = `
         SELECT COALESCE(
           jsonb_agg(
@@ -230,13 +215,11 @@ fastify.get('/customers/:userId', async (req, reply) => {
               'timestamp', j.entered_at,
               'duration', j.duration_sec,
               'visits', (
-                -- Contar visitas APENAS após o reset, excluindo eventos de reset
                 SELECT count(*)::int
                 FROM hmg.v_bot_user_journey j2
                 WHERE j2.user_id = $1 
                   AND j2.stage = j.stage 
-                  AND j2.entered_at > $2
-                  AND j2.stage NOT IN ('reset_to_start', 'reset')
+                  AND j2.visible = true
               )
             )
             ORDER BY j.entered_at
@@ -244,138 +227,94 @@ fastify.get('/customers/:userId', async (req, reply) => {
           '[]'::jsonb
         ) AS journey
         FROM hmg.v_bot_user_journey j
-        WHERE j.user_id = $1 
-          AND j.entered_at > $2
-          AND j.stage NOT IN ('reset_to_start', 'reset')
-      `;
-      
-      const { rows: journeyRows } = await req.db.query(journeySql, [userId, base.last_reset_at]);
-      journey = journeyRows?.[0]?.journey ?? [];
-    } else {
-      // REGRA 2: Sem reset - mostrar TODOS os eventos (excluindo eventos de reset)
-      const journeySql = `
-        SELECT COALESCE(
-          jsonb_agg(
-            jsonb_build_object(
-              'stage', j.stage,
-              'timestamp', j.entered_at,
-              'duration', j.duration_sec,
-              'visits', (
-                SELECT count(*)::int
-                FROM hmg.v_bot_user_journey j2
-                WHERE j2.user_id = $1 
-                  AND j2.stage = j.stage
-                  AND j2.stage NOT IN ('reset_to_start', 'reset')
-              )
-            )
-            ORDER BY j.entered_at
-          ),
-          '[]'::jsonb
-        ) AS journey
-        FROM hmg.v_bot_user_journey j
-        WHERE j.user_id = $1 
-          AND j.stage NOT IN ('reset_to_start', 'reset')
+        WHERE j.user_id = $1 AND j.visible = true
       `;
       
       const { rows: journeyRows } = await req.db.query(journeySql, [userId]);
-      journey = journeyRows?.[0]?.journey ?? [];
-    }
+      const journey = journeyRows?.[0]?.journey ?? [];
 
-    // dwell / diagnóstico atual
-    const dwellSql = `
-      WITH current_dwell AS (
-        SELECT d.*
-        FROM hmg.v_bot_stage_dwells d
-        WHERE d.user_id = $1 AND d.block = $2
-        ORDER BY d.entered_at DESC
-        LIMIT 1
-      )
-      SELECT
-        cd.user_id,
-        cd.block,
-        cd.entered_at,
-        cd.left_at,
-        cd.duration_sec,
-        dd.bot_msgs,
-        dd.user_msgs,
-        dd.validation_fails,
-        dd.max_user_response_gap_sec
-      FROM current_dwell cd
-      LEFT JOIN hmg.v_bot_dwell_diagnostics dd
-        ON dd.user_id = cd.user_id
-        AND dd.block = cd.block
-        AND dd.entered_at = cd.entered_at
-    `;
-    
-    const { rows: dwellRows } = await req.db.query(dwellSql, [userId, base.current_stage]);
-    const dwell = dwellRows?.[0] || null;
+      // dwell / diagnóstico atual (apenas visíveis)
+      const dwellSql = `
+        WITH current_dwell AS (
+          SELECT d.*
+          FROM hmg.v_bot_stage_dwells d
+          WHERE d.user_id = $1 AND d.block = $2
+          ORDER BY d.entered_at DESC
+          LIMIT 1
+        )
+        SELECT
+          cd.user_id,
+          cd.block,
+          cd.entered_at,
+          cd.left_at,
+          cd.duration_sec,
+          dd.bot_msgs,
+          dd.user_msgs,
+          dd.validation_fails,
+          dd.max_user_response_gap_sec
+        FROM current_dwell cd
+        LEFT JOIN hmg.v_bot_dwell_diagnostics dd
+          ON dd.user_id = cd.user_id
+          AND dd.block = cd.block
+          AND dd.entered_at = cd.entered_at
+      `;
+      
+      const { rows: dwellRows } = await req.db.query(dwellSql, [userId, base.current_stage]);
+      const dwell = dwellRows?.[0] || null;
 
-    // Ajustar métricas se houve reset
-    let timeInStageSec = base.time_in_stage_sec;
-    let loopsInStage = base.loops_in_stage;
-
-    if (base.last_reset_at) {
-      // Recalcular time_in_stage_sec considerando apenas após o reset
-      if (base.stage_entered_at && new Date(base.stage_entered_at) <= new Date(base.last_reset_at)) {
-        const now = new Date();
-        const resetTime = new Date(base.last_reset_at);
-        timeInStageSec = Math.floor((now - resetTime) / 1000);
-      }
-
-      // Recalcular loops_in_stage considerando apenas após o reset
+      // Recalcular loops_in_stage considerando apenas registros visíveis
       const loopsSql = `
         SELECT COUNT(*)::int as loops_count
         FROM hmg.v_bot_user_journey j
         WHERE j.user_id = $1 
           AND j.stage = $2
-          AND j.entered_at > $3
-          AND j.stage NOT IN ('reset_to_start', 'reset')
+          AND j.visible = true
       `;
-      const { rows: loopsRows } = await req.db.query(loopsSql, [
-        userId, 
-        base.current_stage, 
-        base.last_reset_at
-      ]);
-      loopsInStage = loopsRows?.[0]?.loops_count || 0;
-    }
+      const { rows: loopsRows } = await req.db.query(loopsSql, [userId, base.current_stage]);
+      const loopsInStage = loopsRows?.[0]?.loops_count || 0;
 
-    return reply.send({
-      ...base,
-      time_in_stage_sec: timeInStageSec,
-      loops_in_stage: loopsInStage,
-      journey,
-      dwell,
-      reset_info: {
-        has_reset: !!base.last_reset_at,
-        last_reset_at: base.last_reset_at
-      }
-    });
-  } catch (error) {
-    fastify.log.error('Erro ao buscar detalhes do tracert do bot:', error);
-    return reply.code(500).send({
-      error: 'Erro interno ao buscar detalhes do tracert do bot',
-      details: process.env.NODE_ENV === 'development' ? String(error.stack || error.message || error) : undefined,
-    });
-  }
-});
+      return reply.send({
+        ...base,
+        loops_in_stage: loopsInStage,
+        journey,
+        dwell,
+        reset_info: {
+          has_reset: !!base.last_reset_at,
+          last_reset_at: base.last_reset_at
+        }
+      });
+    } catch (error) {
+      fastify.log.error('Erro ao buscar detalhes do tracert do bot:', error);
+      return reply.code(500).send({
+        error: 'Erro interno ao buscar detalhes do tracert do bot',
+        details: process.env.NODE_ENV === 'development' ? String(error.stack || error.message || error) : undefined,
+      });
+    }
+  });
 
   /**
    * POST /tracert/customers/:userId/reset
-   * Força a sessão do user para o início do fluxo (flow.start).
-   * - atualiza hmg.sessions.current_block = flow.start
-   * - registra uma transição em hmg.bot_transitions (audit)
-   * - opcional: limpa vars (set to {}), reseta ticket info
+   * Força a sessão do user para o início do fluxo.
+   * Marca todos os registros anteriores como invisible e cria um novo reset visible
    */
   fastify.post('/customers/:userId/reset', async (req, reply) => {
     const { userId } = req.params;
     const now = new Date().toISOString();
 
     try {
-      // 1) inserir transição de reset
+      // 1) Marcar todos os registros anteriores como invisible
+      const hidePreviousSql = `
+        UPDATE hmg.bot_transitions 
+        SET visible = false 
+        WHERE user_id = $1 AND visible = true
+      `;
+      await req.db.query(hidePreviousSql, [userId]);
+
+      // 2) Inserir transição de reset (visible)
       const insertSql = `
         INSERT INTO hmg.bot_transitions (
-          user_id, channel, flow_id, block_id, block_label, entered_at, vars, ticket_number
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          user_id, channel, flow_id, block_id, block_label, entered_at, vars, ticket_number, visible
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
         RETURNING *
       `;
       await req.db.query(insertSql, [
@@ -389,12 +328,11 @@ fastify.get('/customers/:userId', async (req, reply) => {
         null
       ]);
 
-      // 2) atualizar sessão para flow.start
+      // 3) Atualizar sessão para flow.start
       const { rows: frows } = await req.db.query('SELECT id, data FROM hmg.flows WHERE active = true LIMIT 1');
       const activeFlow = frows[0] || null;
       const startBlock = activeFlow ? (activeFlow.data?.start || null) : null;
 
-      // atualiza sessão: current_block = startBlock, limpa vars
       const upSql = `
         INSERT INTO hmg.sessions (user_id, current_block, last_flow_id, vars, updated_at)
         VALUES ($1, $2, $3, $4, NOW())
@@ -408,7 +346,7 @@ fastify.get('/customers/:userId', async (req, reply) => {
         userId,
         startBlock || (activeFlow ? activeFlow.id : null),
         activeFlow ? activeFlow.id : null,
-        JSON.stringify({}) // limpa variáveis de sessão
+        JSON.stringify({})
       ]);
 
       return reply.code(200).send({ ok: true, reset_at: now });
@@ -420,7 +358,7 @@ fastify.get('/customers/:userId', async (req, reply) => {
 
   /**
    * POST /tracert/customers/:userId/ticket
-   * Cria um ticket para o usuário (não transfere, apenas cria ticket).
+   * Cria um ticket para o usuário
    */
   fastify.post('/customers/:userId/ticket', async (req, reply) => {
     const { userId } = req.params;
@@ -428,8 +366,6 @@ fastify.get('/customers/:userId', async (req, reply) => {
     const now = new Date().toISOString();
 
     try {
-      // Aqui você implementaria a lógica de criação de ticket
-      // Este é apenas um exemplo - adapte conforme sua estrutura de tickets
       const ticketSql = `
         INSERT INTO hmg.tickets (
           user_id, queue, status, created_at, created_by, priority
@@ -449,11 +385,10 @@ fastify.get('/customers/:userId', async (req, reply) => {
       const ticket = ticketRows?.[0];
       
       if (ticket) {
-        // Opcional: registrar a criação do ticket nas transições do bot
         const transitionSql = `
           INSERT INTO hmg.bot_transitions (
-            user_id, channel, flow_id, block_id, block_label, entered_at, vars, ticket_number
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            user_id, channel, flow_id, block_id, block_label, entered_at, vars, ticket_number, visible
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
         `;
         
         await req.db.query(transitionSql, [
@@ -483,18 +418,18 @@ fastify.get('/customers/:userId', async (req, reply) => {
   /**
    * GET /tracert/metrics
    * Métricas de gargalo do bot
-   * - retorna total (excluindo human SEMPRE), loopers, bottlenecks, loops e distribuição
+   * Considera apenas registros visíveis
    */
   fastify.get('/metrics', async (req, reply) => {
     try {
-      // total (usuários visíveis, sem human - SEMPRE, e sem "início")
+      // total (usuários visíveis, sem human, sem "início")
       const totalSql = `
         SELECT count(*)::int AS total
         FROM hmg.v_bot_customer_list v
         LEFT JOIN hmg.flows f ON f.active = true
         LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
         LEFT JOIN LATERAL (
-          SELECT bt.block_type FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id ORDER BY bt.entered_at DESC LIMIT 1
+          SELECT bt.block_type FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.visible = true ORDER BY bt.entered_at DESC LIMIT 1
         ) t ON true
         WHERE NOT (
           COALESCE(
@@ -508,18 +443,22 @@ fastify.get('/customers/:userId', async (req, reply) => {
           s.vars->>'current_block_label',
           t.block_label
         ) != 'início'
+        AND EXISTS (
+          SELECT 1 FROM hmg.bot_transitions bt 
+          WHERE bt.user_id = v.user_id AND bt.visible = true
+        )
       `;
       const { rows: totalR } = await req.db.query(totalSql);
       const total = totalR?.[0]?.total ?? 0;
 
-      // loopers (também exclui "início")
+      // loopers
       const loopersSql = `
         SELECT count(*)::int AS loopers
         FROM hmg.v_bot_customer_list v
         LEFT JOIN hmg.flows f ON f.active = true
         LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
         LEFT JOIN LATERAL (
-          SELECT bt.block_type FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id ORDER BY bt.entered_at DESC LIMIT 1
+          SELECT bt.block_type FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.visible = true ORDER BY bt.entered_at DESC LIMIT 1
         ) t ON true
         WHERE v.loops_in_stage > 1
         AND NOT (
@@ -538,7 +477,7 @@ fastify.get('/customers/:userId', async (req, reply) => {
       const { rows: loopRows } = await req.db.query(loopersSql);
       const loopers = loopRows?.[0]?.loopers ?? 0;
 
-      // bottlenecks (p95) — top N
+      // bottlenecks (p95)
       const limit = Math.max(1, Math.min(50, parseInt(req.query.limit || '10', 10)));
       const dwellAggSql = `
         SELECT
@@ -547,7 +486,9 @@ fastify.get('/customers/:userId', async (req, reply) => {
           avg(duration_sec)::int AS avg_sec,
           count(*) AS samples
         FROM hmg.v_bot_stage_dwells
+        WHERE duration_sec IS NOT NULL
         GROUP BY block
+        HAVING count(*) > 0
         ORDER BY p95_sec DESC
         LIMIT $1
       `;
@@ -559,20 +500,22 @@ fastify.get('/customers/:userId', async (req, reply) => {
           block,
           avg(entries)::numeric(10,2) AS avg_loops
         FROM hmg.v_bot_loops
+        WHERE entries IS NOT NULL
         GROUP BY block
+        HAVING count(*) > 0
         ORDER BY avg_loops DESC
         LIMIT $1
       `;
       const { rows: loops } = await req.db.query(loopsSql, [limit]);
 
-      // distribuição atual (exclui human SEMPRE e "início")
+      // distribuição atual
       const distSql = `
         SELECT current_stage AS block, count(*)::int AS users
         FROM hmg.v_bot_customer_list v
         LEFT JOIN hmg.flows f ON f.active = true
         LEFT JOIN hmg.sessions s ON s.user_id = v.user_id
         LEFT JOIN LATERAL (
-          SELECT bt.block_type FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id ORDER BY bt.entered_at DESC LIMIT 1
+          SELECT bt.block_type FROM hmg.bot_transitions bt WHERE bt.user_id = v.user_id AND bt.visible = true ORDER BY bt.entered_at DESC LIMIT 1
         ) t ON true
         WHERE NOT (
           COALESCE(
@@ -591,15 +534,14 @@ fastify.get('/customers/:userId', async (req, reply) => {
       `;
       const { rows: distribution } = await req.db.query(distSql);
 
-      // topStage (maior users)
       const topStage = distribution?.[0] || null;
 
       return reply.send({
         total,
         loopers,
-        bottlenecks,
-        loops,
-        distribution,
+        bottlenecks: bottlenecks || [],
+        loops: loops || [],
+        distribution: distribution || [],
         topStage,
       });
     } catch (error) {
