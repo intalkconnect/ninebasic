@@ -1,13 +1,20 @@
 // routes/botTracertRoutes.js
-// Endpoints para o "trace" do BOT - Versão Corrigida
+// Endpoints para o "trace" do BOT com logs detalhados
 
 async function tracertRoutes(fastify, options) {
+  
   /**
    * GET /tracert/customers
    * Lista paginada dos clientes com posição no bot.
    */
   fastify.get('/customers', async (req, reply) => {
+    let queryParams = [];
+    let whereConditions = [];
+    
     try {
+      console.log('=== INICIANDO /tracert/customers ===');
+      console.log('Query parameters:', req.query);
+
       const {
         q,
         stage,
@@ -24,104 +31,90 @@ async function tracertRoutes(fastify, options) {
       const sizeNum = Math.min(200, Math.max(1, parseInt(pageSize, 10) || 20));
       const offset = (pageNum - 1) * sizeNum;
 
+      console.log('Pagination - page:', pageNum, 'size:', sizeNum, 'offset:', offset);
+
       const allowedOrderBy = ['time_in_stage_sec', 'loops_in_stage', 'name', 'stage_entered_at'];
       const orderByKey = allowedOrderBy.includes(String(order_by)) ? String(order_by) : 'time_in_stage_sec';
-      const orderBySql = orderByKey === 'stage_entered_at' ? 'v.stage_entered_at' : `v.${orderByKey}`;
+      const orderBySql = orderByKey === 'stage_entered_at' ? 'stage_entered_at' : orderByKey;
       const orderDir = String(order_dir).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
-      let whereConditions = [];
-      let queryParams = [];
+      console.log('Order by:', orderBySql, orderDir);
 
       // Filtro de busca
       if (q && String(q).trim() !== '') {
         queryParams.push(`%${String(q).trim().toLowerCase()}%`);
-        whereConditions.push(`(lower(v.name) LIKE $${queryParams.length} OR v.user_id LIKE $${queryParams.length})`);
+        whereConditions.push(`(lower(name) LIKE $${queryParams.length} OR user_id LIKE $${queryParams.length})`);
+        console.log('Search filter added:', q);
       }
 
       // Filtro de stage
       if (stage && String(stage).trim() !== '') {
         queryParams.push(String(stage).trim());
-        whereConditions.push(`v.current_stage = $${queryParams.length}`);
+        whereConditions.push(`current_stage = $${queryParams.length}`);
+        console.log('Stage filter added:', stage);
       }
 
       // Filtro de loops mínimos
       if (min_loops && !isNaN(min_loops)) {
         queryParams.push(parseInt(min_loops));
-        whereConditions.push(`v.loops_in_stage >= $${queryParams.length}`);
+        whereConditions.push(`loops_in_stage >= $${queryParams.length}`);
+        console.log('Min loops filter added:', min_loops);
       }
 
       // Filtro de tempo mínimo
       if (min_time_sec && !isNaN(min_time_sec)) {
         queryParams.push(parseInt(min_time_sec));
-        whereConditions.push(`v.time_in_stage_sec >= $${queryParams.length}`);
+        whereConditions.push(`time_in_stage_sec >= $${queryParams.length}`);
+        console.log('Min time filter added:', min_time_sec);
       }
 
       // Excluir sessões humanas
       if (String(exclude_human).toLowerCase() === 'true') {
-        whereConditions.push(`(
-          COALESCE(
-            v.current_stage_type,
-            (SELECT bt.block_type FROM bot_transitions bt WHERE bt.user_id = v.user_id ORDER BY bt.entered_at DESC LIMIT 1)
-          ) IS NULL
-          OR COALESCE(
-            v.current_stage_type,
-            (SELECT bt.block_type FROM bot_transitions bt WHERE bt.user_id = v.user_id ORDER BY bt.entered_at DESC LIMIT 1)
-          ) <> 'human'
-        )`);
+        whereConditions.push(`current_stage_type != 'human'`);
+        console.log('Exclude human filter added');
       }
 
       const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+      console.log('Final WHERE clause:', whereSql);
+      console.log('Query parameters:', queryParams);
 
       // Query de count
       const countSql = `
         SELECT COUNT(*)::int AS total
-        FROM v_bot_customer_list v
+        FROM v_bot_customer_list
         ${whereSql}
       `;
       
+      console.log('Count SQL:', countSql);
       const countResult = await req.db.query(countSql, queryParams);
       const total = countResult.rows[0]?.total || 0;
+      console.log('Total count:', total);
 
-      // CORREÇÃO: Query principal com placeholders corretos
+      // Query principal
       const dataSql = `
         SELECT
-          v.cliente_id,
-          v.user_id,
-          v.name,
-          v.channel,
-          v.current_stage,
-          COALESCE(
-            (f.data->'blocks'->>v.current_stage),
-            s.vars->>'current_block_label',
-            t.block_label
-          ) AS current_stage_label,
-          COALESCE(
-            (f.data->'blocks'->v.current_stage->>'type'),
-            s.vars->>'current_block_type',
-            t.block_type
-          ) AS current_stage_type,
-          v.stage_entered_at,
-          v.time_in_stage_sec,
-          v.loops_in_stage,
-          f.id AS flow_id
-        FROM v_bot_customer_list v
-        LEFT JOIN flows f ON f.active = true
-        LEFT JOIN sessions s ON s.user_id = v.user_id
-        LEFT JOIN LATERAL (
-          SELECT bt.block_label, bt.block_type, bt.entered_at
-          FROM bot_transitions bt
-          WHERE bt.user_id = v.user_id
-          ORDER BY bt.entered_at DESC
-          LIMIT 1
-        ) t ON true
+          cliente_id,
+          user_id,
+          name,
+          channel,
+          current_stage,
+          current_stage_label,
+          current_stage_type,
+          stage_entered_at,
+          time_in_stage_sec,
+          loops_in_stage
+        FROM v_bot_customer_list
         ${whereSql}
-        ORDER BY ${orderBySql} ${orderDir}, v.user_id ASC
+        ORDER BY ${orderBySql} ${orderDir}
         LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}
       `;
 
-      // CORREÇÃO: Passar parâmetros corretamente
       const dataParams = [...queryParams, sizeNum, offset];
+      console.log('Data SQL:', dataSql);
+      console.log('Data parameters:', dataParams);
+
       const dataResult = await req.db.query(dataSql, dataParams);
+      console.log('Data result rows:', dataResult.rows.length);
 
       return reply.send({
         page: pageNum,
@@ -131,8 +124,18 @@ async function tracertRoutes(fastify, options) {
       });
 
     } catch (error) {
-      fastify.log.error('Erro ao listar tracert do bot:', error);
-      return reply.code(500).send({ error: 'Erro interno ao listar tracert do bot' });
+      console.error('=== ERRO DETALHADO ===');
+      console.error('Error message:', error.message);
+      console.error('Error stack:', error.stack);
+      console.error('Query parameters:', queryParams);
+      console.error('WHERE conditions:', whereConditions);
+      console.error('=== FIM DO ERRO ===');
+
+      fastify.log.error('Erro detalhado ao listar tracert:', error);
+      return reply.code(500).send({ 
+        error: 'Erro interno ao listar tracert do bot',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
     }
   });
 
@@ -142,52 +145,37 @@ async function tracertRoutes(fastify, options) {
    */
   fastify.get('/customers/:userId', async (req, reply) => {
     try {
+      console.log('=== INICIANDO /tracert/customers/:userId ===');
       const { userId } = req.params;
-      const decodedUserId = decodeURIComponent(userId);
+      console.log('User ID:', userId);
 
       const baseSql = `
         SELECT
-          v.cliente_id,
-          v.user_id,
-          v.name,
-          v.channel,
-          v.current_stage,
-          COALESCE(
-            (f.data->'blocks'->>v.current_stage),
-            s.vars->>'current_block_label',
-            t.block_label
-          ) AS current_stage_label,
-          COALESCE(
-            (f.data->'blocks'->v.current_stage->>'type'),
-            s.vars->>'current_block_type',
-            t.block_type
-          ) AS current_stage_type,
-          v.stage_entered_at,
-          v.time_in_stage_sec,
-          v.loops_in_stage,
-          s.vars->>'last_reset_at' AS last_reset_at,
-          f.id AS flow_id
-        FROM v_bot_customer_list v
-        LEFT JOIN flows f ON f.active = true
-        LEFT JOIN sessions s ON s.user_id = v.user_id
-        LEFT JOIN LATERAL (
-          SELECT bt.block_label, bt.block_type
-          FROM bot_transitions bt
-          WHERE bt.user_id = v.user_id
-          ORDER BY bt.entered_at DESC
-          LIMIT 1
-        ) t ON true
-        WHERE v.user_id = $1
+          cliente_id,
+          user_id,
+          name,
+          channel,
+          current_stage,
+          current_stage_label,
+          current_stage_type,
+          stage_entered_at,
+          time_in_stage_sec,
+          loops_in_stage
+        FROM v_bot_customer_list
+        WHERE user_id = $1
         LIMIT 1
       `;
 
-      const baseResult = await req.db.query(baseSql, [decodedUserId]);
+      console.log('Base SQL:', baseSql);
+      const baseResult = await req.db.query(baseSql, [userId]);
       
       if (!baseResult.rows.length) {
-        return reply.code(404).send({ error: 'Cliente não encontrado' });
+        console.log('Cliente não encontrado');
+        return reply.code(404).send({ error: 'Cliente não encontrado no tracert do bot' });
       }
 
       const base = baseResult.rows[0];
+      console.log('Base data found:', base);
 
       // Journey
       const journeySql = `
@@ -200,8 +188,10 @@ async function tracertRoutes(fastify, options) {
         ORDER BY entered_at
       `;
 
-      const journeyResult = await req.db.query(journeySql, [decodedUserId]);
+      console.log('Journey SQL:', journeySql);
+      const journeyResult = await req.db.query(journeySql, [userId]);
       const journey = journeyResult.rows;
+      console.log('Journey result:', journey.length, 'rows');
 
       // Dwell
       const dwellSql = `
@@ -216,8 +206,10 @@ async function tracertRoutes(fastify, options) {
         LIMIT 1
       `;
 
-      const dwellResult = await req.db.query(dwellSql, [decodedUserId, base.current_stage]);
+      console.log('Dwell SQL:', dwellSql);
+      const dwellResult = await req.db.query(dwellSql, [userId, base.current_stage]);
       const dwell = dwellResult.rows[0] || null;
+      console.log('Dwell result:', dwell);
 
       return reply.send({
         ...base,
@@ -226,8 +218,12 @@ async function tracertRoutes(fastify, options) {
       });
 
     } catch (error) {
+      console.error('Erro em /customers/:userId:', error);
       fastify.log.error('Erro ao buscar detalhes:', error);
-      return reply.code(500).send({ error: 'Erro interno ao buscar detalhes' });
+      return reply.code(500).send({ 
+        error: 'Erro interno ao buscar detalhes do tracert do bot',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
     }
   });
 
@@ -237,14 +233,17 @@ async function tracertRoutes(fastify, options) {
    */
   fastify.post('/customers/:userId/reset', async (req, reply) => {
     try {
+      console.log('=== INICIANDO POST /reset ===');
       const { userId } = req.params;
-      const decodedUserId = decodeURIComponent(userId);
+      console.log('Reset for user:', userId);
+
       const now = new Date().toISOString();
 
       // Buscar flow ativo
       const flowResult = await req.db.query('SELECT id, data FROM flows WHERE active = true LIMIT 1');
       const activeFlow = flowResult.rows[0];
       const startBlock = activeFlow?.data?.start || null;
+      console.log('Active flow:', activeFlow?.id, 'Start block:', startBlock);
 
       // Atualizar sessão
       const sessionSql = `
@@ -258,13 +257,15 @@ async function tracertRoutes(fastify, options) {
           updated_at = EXCLUDED.updated_at
       `;
 
+      console.log('Session SQL:', sessionSql);
       await req.db.query(sessionSql, [
-        decodedUserId,
+        userId,
         startBlock,
         activeFlow?.id || null,
         JSON.stringify({ last_reset_at: now })
       ]);
 
+      console.log('Reset completed successfully');
       return reply.send({ 
         ok: true, 
         reset_at: now,
@@ -272,8 +273,12 @@ async function tracertRoutes(fastify, options) {
       });
 
     } catch (error) {
+      console.error('Erro no reset:', error);
       fastify.log.error('Erro ao resetar:', error);
-      return reply.code(500).send({ error: 'Falha ao resetar sessão' });
+      return reply.code(500).send({ 
+        error: 'Falha ao resetar sessão',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
     }
   });
 
@@ -283,23 +288,21 @@ async function tracertRoutes(fastify, options) {
    */
   fastify.get('/metrics', async (req, reply) => {
     try {
+      console.log('=== INICIANDO /metrics ===');
+
       // Total de usuários ativos
-      const totalSql = `
-        SELECT COUNT(*)::int AS total
-        FROM v_bot_customer_list v
-        WHERE v.current_stage IS NOT NULL
-      `;
+      const totalSql = `SELECT COUNT(*)::int AS total FROM v_bot_customer_list WHERE current_stage IS NOT NULL`;
+      console.log('Total SQL:', totalSql);
       const totalResult = await req.db.query(totalSql);
       const total = totalResult.rows[0]?.total || 0;
+      console.log('Total users:', total);
 
       // Loopers
-      const loopersSql = `
-        SELECT COUNT(*)::int AS loopers
-        FROM v_bot_customer_list
-        WHERE loops_in_stage > 1
-      `;
+      const loopersSql = `SELECT COUNT(*)::int AS loopers FROM v_bot_customer_list WHERE loops_in_stage > 1`;
+      console.log('Loopers SQL:', loopersSql);
       const loopersResult = await req.db.query(loopersSql);
       const loopers = loopersResult.rows[0]?.loopers || 0;
+      console.log('Loopers:', loopers);
 
       // Distribuição
       const distSql = `
@@ -310,8 +313,10 @@ async function tracertRoutes(fastify, options) {
         ORDER BY COUNT(*) DESC
         LIMIT 10
       `;
+      console.log('Distribution SQL:', distSql);
       const distResult = await req.db.query(distSql);
       const distribution = distResult.rows;
+      console.log('Distribution:', distribution);
 
       return reply.send({
         total,
@@ -321,44 +326,45 @@ async function tracertRoutes(fastify, options) {
       });
 
     } catch (error) {
+      console.error('Erro nas métricas:', error);
       fastify.log.error('Erro nas métricas:', error);
-      return reply.code(500).send({ error: 'Erro interno nas métricas' });
+      return reply.code(500).send({ 
+        error: 'Erro interno nas métricas',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
     }
   });
 
   /**
-   * POST /tracert/customers/:userId/ticket
-   * Criar ticket
+   * GET /tracert/stages
+   * Lista de estágios disponíveis
    */
-  fastify.post('/customers/:userId/ticket', async (req, reply) => {
+  fastify.get('/stages', async (req, reply) => {
     try {
-      const { userId } = req.params;
-      const decodedUserId = decodeURIComponent(userId);
-      const { queue } = req.body || {};
-      const now = new Date().toISOString();
-
-      const ticketSql = `
-        INSERT INTO tickets (user_id, queue, status, created_at, created_by)
-        VALUES ($1, $2, 'open', $3, $4)
-        RETURNING ticket_number
+      console.log('=== INICIANDO /stages ===');
+      
+      const stagesSql = `
+        SELECT DISTINCT
+          current_stage_label as label,
+          current_stage_type as type
+        FROM v_bot_customer_list
+        WHERE current_stage_label IS NOT NULL
+        ORDER BY label ASC
       `;
       
-      const ticketResult = await req.db.query(ticketSql, [
-        decodedUserId,
-        queue || 'Recepção',
-        now,
-        'system'
-      ]);
-
-      return reply.send({ 
-        ok: true, 
-        ticket_number: ticketResult.rows[0]?.ticket_number,
-        created_at: now 
-      });
+      console.log('Stages SQL:', stagesSql);
+      const { rows } = await req.db.query(stagesSql);
+      console.log('Stages found:', rows.length);
+      
+      return reply.send(rows);
 
     } catch (error) {
-      fastify.log.error('Erro ao criar ticket:', error);
-      return reply.code(500).send({ error: 'Falha ao criar ticket' });
+      console.error('Erro em /stages:', error);
+      fastify.log.error('Erro ao listar estágios:', error);
+      return reply.code(500).send({ 
+        error: 'Erro interno ao listar estágios',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
     }
   });
 
