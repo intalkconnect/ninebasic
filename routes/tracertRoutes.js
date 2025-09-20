@@ -1,5 +1,5 @@
 // routes/botTracertRoutes.js
-// Endpoints para o "trace" do BOT com logs detalhados
+// Endpoints para o "trace" do BOT - Versão Corrigida
 
 async function tracertRoutes(fastify, options) {
   
@@ -68,10 +68,10 @@ async function tracertRoutes(fastify, options) {
         console.log('Min time filter added:', min_time_sec);
       }
 
-      // Excluir sessões humanas
+      // Excluir sessões humanas - CORREÇÃO: Removido filtro que não existe
+      // A view v_bot_customer_list não tem current_stage_type
       if (String(exclude_human).toLowerCase() === 'true') {
-        whereConditions.push(`current_stage_type != 'human'`);
-        console.log('Exclude human filter added');
+        console.log('Exclude human filter skipped - column not available');
       }
 
       const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
@@ -90,7 +90,7 @@ async function tracertRoutes(fastify, options) {
       const total = countResult.rows[0]?.total || 0;
       console.log('Total count:', total);
 
-      // Query principal
+      // Query principal - CORREÇÃO: Removidas colunas que não existem
       const dataSql = `
         SELECT
           cliente_id,
@@ -98,8 +98,6 @@ async function tracertRoutes(fastify, options) {
           name,
           channel,
           current_stage,
-          current_stage_label,
-          current_stage_type,
           stage_entered_at,
           time_in_stage_sec,
           loops_in_stage
@@ -149,6 +147,7 @@ async function tracertRoutes(fastify, options) {
       const { userId } = req.params;
       console.log('User ID:', userId);
 
+      // Base info - apenas colunas que existem na view
       const baseSql = `
         SELECT
           cliente_id,
@@ -156,8 +155,6 @@ async function tracertRoutes(fastify, options) {
           name,
           channel,
           current_stage,
-          current_stage_label,
-          current_stage_type,
           stage_entered_at,
           time_in_stage_sec,
           loops_in_stage
@@ -343,12 +340,13 @@ async function tracertRoutes(fastify, options) {
     try {
       console.log('=== INICIANDO /stages ===');
       
+      // CORREÇÃO: Usar apenas colunas que existem
       const stagesSql = `
         SELECT DISTINCT
-          current_stage_label as label,
-          current_stage_type as type
+          current_stage as label,
+          'bot' as type  -- Tipo padrão já que não temos essa informação
         FROM v_bot_customer_list
-        WHERE current_stage_label IS NOT NULL
+        WHERE current_stage IS NOT NULL
         ORDER BY label ASC
       `;
       
