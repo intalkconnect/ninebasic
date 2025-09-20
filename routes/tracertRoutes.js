@@ -195,7 +195,7 @@ async function tracertRoutes(fastify, options) {
           entered_at,
           duration_sec
         FROM v_bot_user_journey
-        WHERE user_id = $1
+        WHERE user_id = $1 and visible = true
         ORDER BY entered_at
       `;
 
