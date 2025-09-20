@@ -242,22 +242,7 @@ async function tracertRoutes(fastify, options) {
    * POST /tracert/customers/:userId/reset
    * Reset da sessão - com schema para permitir body vazio
    */
-  fastify.post('/customers/:userId/reset', {
-  config: {
-    bodyLimit: 1024
-  },
-  schema: {
-    body: {
-      type: ['object', 'null'],
-      properties: {
-        reason: { type: 'string' }
-      },
-      additionalProperties: true
-    }
-  }
-}, async (req, reply) => {
-  const client = await req.db.connect();
-  
+  fastify.post('/customers/:userId/reset', async (req, reply) => {
   try {
     console.log('=== INICIANDO POST /reset ===');
     const { userId } = req.params;
@@ -268,13 +253,11 @@ async function tracertRoutes(fastify, options) {
 
     const now = new Date().toISOString();
 
-    await client.query('BEGIN');
-
     // 1) Buscar flow ativo
-    const flowResult = await client.query('SELECT id, data FROM flows WHERE active = true LIMIT 1');
+    const flowResult = await req.db.query('SELECT id, data FROM flows WHERE active = true LIMIT 1');
     const activeFlow = flowResult.rows[0];
     if (!activeFlow) {
-      throw new Error('Nenhum flow ativo encontrado');
+      return reply.code(404).send({ error: 'Nenhum flow ativo encontrado' });
     }
 
     const startBlock = activeFlow.data?.start || 'onboarding';
@@ -296,8 +279,8 @@ async function tracertRoutes(fastify, options) {
       SET visible = false 
       WHERE user_id = $1 AND (visible IS NULL OR visible = true)
     `;
-    console.log('Hiding previous transitions:', hideSql);
-    await client.query(hideSql, [userId]);
+    console.log('Hiding previous transitions');
+    await req.db.query(hideSql, [userId]);
     console.log('Previous transitions hidden');
 
     // 4) Inserir nova transição de reset (visível)
@@ -310,9 +293,9 @@ async function tracertRoutes(fastify, options) {
     `;
     
     console.log('Inserting reset transition');
-    const transitionResult = await client.query(insertTransitionSql, [
+    const transitionResult = await req.db.query(insertTransitionSql, [
       userId,
-      null, // channel pode ser null
+      null,
       activeFlow.id,
       startBlock,
       startBlockLabel,
@@ -339,7 +322,7 @@ async function tracertRoutes(fastify, options) {
     `;
 
     console.log('Updating session');
-    await client.query(sessionSql, [
+    await req.db.query(sessionSql, [
       userId,
       startBlock,
       activeFlow.id,
@@ -351,7 +334,6 @@ async function tracertRoutes(fastify, options) {
       })
     ]);
 
-    await client.query('COMMIT');
     console.log('Reset completed successfully');
 
     return reply.send({ 
@@ -363,15 +345,12 @@ async function tracertRoutes(fastify, options) {
     });
 
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro no reset:', error);
     fastify.log.error('Erro ao resetar:', error);
     return reply.code(500).send({ 
       error: 'Falha ao resetar sessão',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
-  } finally {
-    client.release();
   }
 });
 
