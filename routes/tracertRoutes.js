@@ -3,6 +3,20 @@
 
 async function tracertRoutes(fastify, options) {
   
+  // Middleware para lidar com body vazio em POST
+  fastify.addHook('onRequest', async (request, reply) => {
+    if (request.method === 'POST' && request.headers['content-type'] === 'application/json') {
+      try {
+        request.body = await request.body;
+        if (request.body === undefined || request.body === null) {
+          request.body = {};
+        }
+      } catch (error) {
+        request.body = {};
+      }
+    }
+  });
+
   /**
    * GET /tracert/customers
    * Lista paginada dos clientes com posição no bot.
@@ -68,10 +82,10 @@ async function tracertRoutes(fastify, options) {
         console.log('Min time filter added:', min_time_sec);
       }
 
-      // Excluir sessões humanas - CORREÇÃO: Removido filtro que não existe
-      // A view v_bot_customer_list não tem current_stage_type
+      // CORREÇÃO: Excluir sessões humanas - usando current_stage ao invés de current_stage_type
       if (String(exclude_human).toLowerCase() === 'true') {
-        console.log('Exclude human filter skipped - column not available');
+        whereConditions.push(`current_stage != 'human'`);
+        console.log('Exclude human filter added: current_stage != human');
       }
 
       const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
@@ -90,7 +104,7 @@ async function tracertRoutes(fastify, options) {
       const total = countResult.rows[0]?.total || 0;
       console.log('Total count:', total);
 
-      // Query principal - CORREÇÃO: Removidas colunas que não existem
+      // Query principal
       const dataSql = `
         SELECT
           cliente_id,
@@ -226,9 +240,17 @@ async function tracertRoutes(fastify, options) {
 
   /**
    * POST /tracert/customers/:userId/reset
-   * Reset da sessão
+   * Reset da sessão - com schema para permitir body vazio
    */
-  fastify.post('/customers/:userId/reset', async (req, reply) => {
+  fastify.post('/customers/:userId/reset', {
+    schema: {
+      body: {
+        type: 'object',
+        properties: {},
+        additionalProperties: true
+      }
+    }
+  }, async (req, reply) => {
     try {
       console.log('=== INICIANDO POST /reset ===');
       const { userId } = req.params;
@@ -287,25 +309,25 @@ async function tracertRoutes(fastify, options) {
     try {
       console.log('=== INICIANDO /metrics ===');
 
-      // Total de usuários ativos
-      const totalSql = `SELECT COUNT(*)::int AS total FROM v_bot_customer_list WHERE current_stage IS NOT NULL`;
+      // Total de usuários ativos (excluindo humanos)
+      const totalSql = `SELECT COUNT(*)::int AS total FROM v_bot_customer_list WHERE current_stage IS NOT NULL AND current_stage != 'human'`;
       console.log('Total SQL:', totalSql);
       const totalResult = await req.db.query(totalSql);
       const total = totalResult.rows[0]?.total || 0;
       console.log('Total users:', total);
 
-      // Loopers
-      const loopersSql = `SELECT COUNT(*)::int AS loopers FROM v_bot_customer_list WHERE loops_in_stage > 1`;
+      // Loopers (excluindo humanos)
+      const loopersSql = `SELECT COUNT(*)::int AS loopers FROM v_bot_customer_list WHERE loops_in_stage > 1 AND current_stage != 'human'`;
       console.log('Loopers SQL:', loopersSql);
       const loopersResult = await req.db.query(loopersSql);
       const loopers = loopersResult.rows[0]?.loopers || 0;
       console.log('Loopers:', loopers);
 
-      // Distribuição
+      // Distribuição (excluindo humanos)
       const distSql = `
         SELECT current_stage AS block, COUNT(*)::int AS users
         FROM v_bot_customer_list
-        WHERE current_stage IS NOT NULL
+        WHERE current_stage IS NOT NULL AND current_stage != 'human'
         GROUP BY current_stage
         ORDER BY COUNT(*) DESC
         LIMIT 10
@@ -334,19 +356,18 @@ async function tracertRoutes(fastify, options) {
 
   /**
    * GET /tracert/stages
-   * Lista de estágios disponíveis
+   * Lista de estágios disponíveis (excluindo humanos)
    */
   fastify.get('/stages', async (req, reply) => {
     try {
       console.log('=== INICIANDO /stages ===');
       
-      // CORREÇÃO: Usar apenas colunas que existem
       const stagesSql = `
         SELECT DISTINCT
           current_stage as label,
-          'bot' as type  -- Tipo padrão já que não temos essa informação
+          'bot' as type
         FROM v_bot_customer_list
-        WHERE current_stage IS NOT NULL
+        WHERE current_stage IS NOT NULL AND current_stage != 'human'
         ORDER BY label ASC
       `;
       
