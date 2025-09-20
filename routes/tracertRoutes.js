@@ -243,67 +243,137 @@ async function tracertRoutes(fastify, options) {
    * Reset da sessão - com schema para permitir body vazio
    */
   fastify.post('/customers/:userId/reset', {
-    config: {
-      // Desabilita completamente o parsing de body para esta rota
-      bodyLimit: 1, // 1 byte apenas para evitar abuse
-      attachValidation: false
-    },
-    schema: {
-      body: {
-        type: ['object', 'null'],
-        additionalProperties: true
-      }
+  config: {
+    bodyLimit: 1024
+  },
+  schema: {
+    body: {
+      type: ['object', 'null'],
+      properties: {
+        reason: { type: 'string' }
+      },
+      additionalProperties: true
     }
-  }, async (req, reply) => {
+  }
+}, async (req, reply) => {
+  const client = await req.db.connect();
+  
+  try {
+    console.log('=== INICIANDO POST /reset ===');
+    const { userId } = req.params;
+    const { reason } = req.body || {};
+    
+    console.log('Reset for user:', userId);
+    console.log('Reset reason:', reason);
+
+    const now = new Date().toISOString();
+
+    await client.query('BEGIN');
+
+    // 1) Buscar flow ativo
+    const flowResult = await client.query('SELECT id, data FROM flows WHERE active = true LIMIT 1');
+    const activeFlow = flowResult.rows[0];
+    if (!activeFlow) {
+      throw new Error('Nenhum flow ativo encontrado');
+    }
+
+    const startBlock = activeFlow.data?.start || 'onboarding';
+    console.log('Active flow:', activeFlow.id, 'Start block:', startBlock);
+
+    // 2) Buscar label do bloco inicial do flow
+    let startBlockLabel = 'Início';
     try {
-      console.log('=== INICIANDO POST /reset ===');
-      const { userId } = req.params;
-      console.log('Reset for user:', userId);
-
-      const now = new Date().toISOString();
-
-      // Buscar flow ativo
-      const flowResult = await req.db.query('SELECT id, data FROM flows WHERE active = true LIMIT 1');
-      const activeFlow = flowResult.rows[0];
-      const startBlock = activeFlow?.data?.start || null;
-      console.log('Active flow:', activeFlow?.id, 'Start block:', startBlock);
-
-      // Atualizar sessão
-      const sessionSql = `
-        INSERT INTO sessions (user_id, current_block, last_flow_id, vars, updated_at)
-        VALUES ($1, $2, $3, $4, NOW())
-        ON CONFLICT (user_id)
-        DO UPDATE SET 
-          current_block = EXCLUDED.current_block,
-          last_flow_id = EXCLUDED.last_flow_id,
-          vars = EXCLUDED.vars,
-          updated_at = EXCLUDED.updated_at
-      `;
-
-      console.log('Session SQL:', sessionSql);
-      await req.db.query(sessionSql, [
-        userId,
-        startBlock,
-        activeFlow?.id || null,
-        JSON.stringify({ last_reset_at: now })
-      ]);
-
-      console.log('Reset completed successfully');
-      return reply.send({ 
-        ok: true, 
-        reset_at: now,
-        start_block: startBlock
-      });
-
-    } catch (error) {
-      console.error('Erro no reset:', error);
-      fastify.log.error('Erro ao resetar:', error);
-      return reply.code(500).send({ 
-        error: 'Falha ao resetar sessão',
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined
-      });
+      if (activeFlow.data?.blocks && activeFlow.data.blocks[startBlock]) {
+        startBlockLabel = activeFlow.data.blocks[startBlock].label || startBlock;
+      }
+    } catch (e) {
+      console.log('Erro ao buscar label do bloco inicial, usando padrão:', e.message);
     }
-  });
+
+    // 3) Marcar todas as transições anteriores como não visíveis
+    const hideSql = `
+      UPDATE bot_transitions 
+      SET visible = false 
+      WHERE user_id = $1 AND (visible IS NULL OR visible = true)
+    `;
+    console.log('Hiding previous transitions:', hideSql);
+    await client.query(hideSql, [userId]);
+    console.log('Previous transitions hidden');
+
+    // 4) Inserir nova transição de reset (visível)
+    const insertTransitionSql = `
+      INSERT INTO bot_transitions (
+        user_id, channel, flow_id, block_id, block_label, block_type, 
+        entered_at, vars, visible
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
+      RETURNING id
+    `;
+    
+    console.log('Inserting reset transition');
+    const transitionResult = await client.query(insertTransitionSql, [
+      userId,
+      null, // channel pode ser null
+      activeFlow.id,
+      startBlock,
+      startBlockLabel,
+      'system_reset',
+      now,
+      JSON.stringify({ 
+        reset_by: 'system',
+        reset_at: now,
+        reset_reason: reason || 'manual_reset'
+      })
+    ]);
+    console.log('Reset transition inserted:', transitionResult.rows[0]?.id);
+
+    // 5) Atualizar sessão para o bloco inicial
+    const sessionSql = `
+      INSERT INTO sessions (user_id, current_block, last_flow_id, vars, updated_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT (user_id)
+      DO UPDATE SET 
+        current_block = EXCLUDED.current_block,
+        last_flow_id = EXCLUDED.last_flow_id,
+        vars = EXCLUDED.vars,
+        updated_at = EXCLUDED.updated_at
+    `;
+
+    console.log('Updating session');
+    await client.query(sessionSql, [
+      userId,
+      startBlock,
+      activeFlow.id,
+      JSON.stringify({ 
+        last_reset_at: now,
+        current_block_label: startBlockLabel,
+        current_block_type: 'system_reset',
+        reset_reason: reason || 'manual_reset'
+      })
+    ]);
+
+    await client.query('COMMIT');
+    console.log('Reset completed successfully');
+
+    return reply.send({ 
+      ok: true, 
+      reset_at: now,
+      start_block: startBlock,
+      start_block_label: startBlockLabel,
+      reason: reason || 'manual_reset'
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro no reset:', error);
+    fastify.log.error('Erro ao resetar:', error);
+    return reply.code(500).send({ 
+      error: 'Falha ao resetar sessão',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    client.release();
+  }
+});
 
   /**
    * GET /tracert/metrics
