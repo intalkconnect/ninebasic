@@ -243,10 +243,14 @@ async function tracertRoutes(fastify, options) {
    * Reset da sessão - com schema para permitir body vazio
    */
   fastify.post('/customers/:userId/reset', {
+    config: {
+      // Desabilita completamente o parsing de body para esta rota
+      bodyLimit: 1, // 1 byte apenas para evitar abuse
+      attachValidation: false
+    },
     schema: {
       body: {
-        type: 'object',
-        properties: {},
+        type: ['object', 'null'],
         additionalProperties: true
       }
     }
