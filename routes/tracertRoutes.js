@@ -112,6 +112,7 @@ async function tracertRoutes(fastify, options) {
           name,
           channel,
           current_stage,
+          current_stage_type,
           stage_entered_at,
           time_in_stage_sec,
           loops_in_stage
