@@ -156,136 +156,131 @@ async function tracertRoutes(fastify, options) {
    * GET /tracert/customers/:userId
    * Detalhes do cliente
    */
-  fastify.get('/customers/:userId', async (req, reply) => {
-    try {
-      console.log('=== INICIANDO /tracert/customers/:userId ===');
-      const { userId } = req.params;
-      console.log('User ID:', userId);
+ // GET /tracert/customers/:userId
+fastify.get('/customers/:userId', async (req, reply) => {
+  try {
+    console.log('=== INICIANDO /tracert/customers/:userId ===');
+    const { userId } = req.params;
 
-      // Base info - apenas colunas que existem na view
-      const baseSql = `
-        SELECT
-          cliente_id,
-          user_id,
-          name,
-          channel,
-          current_stage,
-          current_stage_type,
-          stage_entered_at,
-          time_in_stage_sec,
-          loops_in_stage
-        FROM v_bot_customer_list
-        WHERE user_id = $1
-        LIMIT 1
-      `;
-
-      console.log('Base SQL:', baseSql);
-      const baseResult = await req.db.query(baseSql, [userId]);
-      
-      if (!baseResult.rows.length) {
-        console.log('Cliente não encontrado');
-        return reply.code(404).send({ error: 'Cliente não encontrado no tracert do bot' });
-      }
-
-      const base = baseResult.rows[0];
-      console.log('Base data found:', base);
-
-      // Journey
-// Journey (agora traz type)
-
-const journeySql = `
-  WITH j AS (
-    SELECT
-      vsd.user_id,
-      vsd.block         AS stage,
-      vsd.entered_at,
-      vsd.left_at,
-      vsd.duration_sec,
-      bt.block_type     AS stage_type
-    FROM v_bot_stage_dwells vsd
-    LEFT JOIN bot_transitions bt
-      ON bt.user_id = vsd.user_id
-     AND COALESCE(bt.block_label, bt.block_id) = vsd.block
-     AND bt.entered_at = vsd.entered_at
-     AND (bt.visible IS NULL OR bt.visible = true)
-    WHERE vsd.user_id = $1
-    ORDER BY vsd.entered_at
-  )
-  SELECT
-    j.stage,
-    j.entered_at,
-    j.left_at,
-    j.duration_sec,
-    j.stage_type AS type,
-
-    -- prévia: última IN e OUT dentro do intervalo
-    (SELECT content FROM messages m
-      WHERE m.user_id = j.user_id AND m.direction='incoming'
-        AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
-      ORDER BY m."timestamp" DESC LIMIT 1)          AS last_incoming,
-
-    (SELECT content FROM messages m
-      WHERE m.user_id = j.user_id AND m.direction='outgoing'
-        AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
-      ORDER BY m."timestamp" DESC LIMIT 1)          AS last_outgoing,
-
-    -- flag de erro (validação falhou OU system_reset ou metadata.error)
-    EXISTS (
-      SELECT 1 FROM messages m
-      WHERE m.user_id = j.user_id
-        AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
-        AND (
-          (m.metadata ? 'validation' AND m.metadata->>'validation' = 'fail')
-          OR (m.metadata ? 'error')
-          OR (m.direction='system')
-        )
-    )                                                AS has_error
-  FROM j
-`;
-
-      console.log('Journey SQL:', journeySql);
-      const journeyResult = await req.db.query(journeySql, [userId]);
-      const journey = journeyResult.rows;
-      console.log('Journey result:', journey.length, 'rows');
-
-      // Dwell
-const dwellSql = `
-  SELECT
-    block,
-    entered_at,
-    left_at,
-    duration_sec,
-    COALESCE(bot_msgs, 0)                AS bot_msgs,
-    COALESCE(user_msgs, 0)               AS user_msgs,
-    COALESCE(validation_fails, 0)        AS validation_fails,
-    COALESCE(max_user_response_gap_sec,0) AS max_user_response_gap_sec
-  FROM v_bot_dwell_diagnostics
-  WHERE user_id = $1
-    AND block   = $2
-  ORDER BY entered_at DESC
-  LIMIT 1
-`;
-
-      console.log('Dwell SQL:', dwellSql);
-      const dwellResult = await req.db.query(dwellSql, [userId, base.current_stage]);
-      const dwell = dwellResult.rows[0] || null;
-      console.log('Dwell result:', dwell);
-
-      return reply.send({
-        ...base,
-        journey,
-        dwell
-      });
-
-    } catch (error) {
-      console.error('Erro em /customers/:userId:', error);
-      fastify.log.error('Erro ao buscar detalhes:', error);
-      return reply.code(500).send({ 
-        error: 'Erro interno ao buscar detalhes do tracert do bot',
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined
-      });
+    // Base info
+    const baseSql = `
+      SELECT
+        cliente_id,
+        user_id,
+        name,
+        channel,
+        current_stage,
+        current_stage_type,
+        stage_entered_at,
+        time_in_stage_sec,
+        loops_in_stage
+      FROM v_bot_customer_list
+      WHERE user_id = $1
+      LIMIT 1
+    `;
+    const baseResult = await req.db.query(baseSql, [userId]);
+    if (!baseResult.rows.length) {
+      return reply.code(404).send({ error: 'Cliente não encontrado no tracert do bot' });
     }
-  });
+    const base = baseResult.rows[0];
+
+    // Journey (com type + prévias + flag erro + VARS da transição)
+    const journeySql = `
+      WITH j AS (
+        SELECT
+          vsd.user_id,
+          vsd.block         AS stage,
+          vsd.entered_at,
+          vsd.left_at,
+          vsd.duration_sec,
+          bt.block_type     AS stage_type,
+          bt.vars           AS vars     -- <<< AQUI: variáveis capturadas na transição
+        FROM v_bot_stage_dwells vsd
+        LEFT JOIN bot_transitions bt
+          ON bt.user_id = vsd.user_id
+         AND COALESCE(bt.block_label, bt.block_id) = vsd.block
+         AND bt.entered_at = vsd.entered_at
+         AND (bt.visible IS NULL OR bt.visible = true)
+        WHERE vsd.user_id = $1
+        ORDER BY vsd.entered_at
+      )
+      SELECT
+        j.stage,
+        j.entered_at,
+        j.left_at,
+        j.duration_sec,
+        j.stage_type AS type,
+        j.vars,  -- <<< fica NULL se não houve registro de transição visível
+
+        -- prévia: última IN e OUT dentro do intervalo
+        (SELECT content FROM messages m
+          WHERE m.user_id = j.user_id AND m.direction='incoming'
+            AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
+          ORDER BY m."timestamp" DESC LIMIT 1)          AS last_incoming,
+
+        (SELECT content FROM messages m
+          WHERE m.user_id = j.user_id AND m.direction='outgoing'
+            AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
+          ORDER BY m."timestamp" DESC LIMIT 1)          AS last_outgoing,
+
+        -- flag de erro (validação falhou OU system_reset ou metadata.error)
+        EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.user_id = j.user_id
+            AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
+            AND (
+              (m.metadata ? 'validation' AND m.metadata->>'validation' = 'fail')
+              OR (m.metadata ? 'error')
+              OR (m.direction='system')
+            )
+        )                                                AS has_error
+      FROM j
+    `;
+    const journeyResult = await req.db.query(journeySql, [userId]);
+    const journey = journeyResult.rows;
+
+    // Dwell (diagnóstico)
+    const dwellSql = `
+      SELECT
+        block,
+        entered_at,
+        left_at,
+        duration_sec,
+        COALESCE(bot_msgs, 0)                 AS bot_msgs,
+        COALESCE(user_msgs, 0)                AS user_msgs,
+        COALESCE(validation_fails, 0)         AS validation_fails,
+        COALESCE(max_user_response_gap_sec,0) AS max_user_response_gap_sec
+      FROM v_bot_dwell_diagnostics
+      WHERE user_id = $1
+        AND block   = $2
+      ORDER BY entered_at DESC
+      LIMIT 1
+    `;
+    const dwellResult = await req.db.query(dwellSql, [userId, base.current_stage]);
+    const dwell = dwellResult.rows[0] || null;
+
+    // Vars atuais da sessão (úteis p/ modal aba "Variáveis")
+    const sessSql = `SELECT vars FROM sessions WHERE user_id = $1 LIMIT 1`;
+    const sessRes = await req.db.query(sessSql, [userId]);
+    const session_vars = sessRes.rows[0]?.vars ?? null;
+
+    return reply.send({
+      ...base,
+      journey,        // cada item já vem com .vars (jsonb) da transição daquela etapa
+      dwell,
+      session_vars,   // estado atual (jsonb) da sessão
+    });
+
+  } catch (error) {
+    console.error('Erro em /customers/:userId:', error);
+    req.server.log.error('Erro ao buscar detalhes:', error);
+    return reply.code(500).send({
+      error: 'Erro interno ao buscar detalhes do tracert do bot',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
 
   /**
    * POST /tracert/customers/:userId/reset
