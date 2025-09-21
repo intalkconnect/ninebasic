@@ -192,7 +192,7 @@ async function tracertRoutes(fastify, options) {
 
       // Journey
 // Journey (agora traz type)
--- substitui o bloco Journey dentro do GET /customers/:userId
+
 const journeySql = `
   WITH j AS (
     SELECT
