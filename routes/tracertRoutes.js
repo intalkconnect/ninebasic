@@ -489,6 +489,46 @@ const dwellSql = `
     }
   });
 
+  // GET /tracert/customers/:userId/stage-log
+fastify.get('/customers/:userId/stage-log', async (req, reply) => {
+  const { userId } = req.params;
+  const { entered_at, stage, limit = '100' } = req.query;
+
+  if (!entered_at || !stage) {
+    return reply.code(400).send({ error: 'entered_at e stage são obrigatórios' });
+  }
+
+  const sql = `
+    WITH dw AS (
+      SELECT entered_at, left_at
+      FROM v_bot_stage_dwells
+      WHERE user_id = $1 AND block = $2 AND entered_at = $3::timestamptz
+      LIMIT 1
+    )
+    SELECT
+      m."timestamp"                  AS ts,
+      m.direction,
+      m.type,
+      m.content,
+      m.metadata,
+      -- marca erro: validação, metadata.error ou system
+      (
+        (m.metadata ? 'validation' AND m.metadata->>'validation' = 'fail')
+        OR (m.metadata ? 'error')
+        OR (m.direction = 'system')
+      ) AS is_error
+    FROM messages m
+    CROSS JOIN dw
+    WHERE m.user_id = $1
+      AND m."timestamp" >= dw.entered_at
+      AND m."timestamp" <= dw.left_at
+    ORDER BY m."timestamp"
+    LIMIT $4
+  `;
+  const { rows } = await req.db.query(sql, [userId, stage, entered_at, Math.min(500, parseInt(limit)||100)]);
+  return reply.send(rows);
+});
+
 }
 
 export default tracertRoutes;
