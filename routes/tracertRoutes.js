@@ -214,12 +214,13 @@ const dwellSql = `
     entered_at,
     left_at,
     duration_sec,
-    bot_msgs,
-    user_msgs,
-    validation_fails,
-    max_user_response_gap_sec
+    COALESCE(bot_msgs, 0)                AS bot_msgs,
+    COALESCE(user_msgs, 0)               AS user_msgs,
+    COALESCE(validation_fails, 0)        AS validation_fails,
+    COALESCE(max_user_response_gap_sec,0) AS max_user_response_gap_sec
   FROM hmg.v_bot_dwell_diagnostics
-  WHERE user_id = $1 AND block = $2
+  WHERE user_id = $1
+    AND block   = $2
   ORDER BY entered_at DESC
   LIMIT 1
 `;
