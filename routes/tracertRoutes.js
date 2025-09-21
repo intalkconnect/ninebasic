@@ -208,17 +208,21 @@ const journeySql = `
       console.log('Journey result:', journey.length, 'rows');
 
       // Dwell
-      const dwellSql = `
-        SELECT
-          block,
-          entered_at,
-          left_at,
-          duration_sec
-        FROM v_bot_stage_dwells
-        WHERE user_id = $1 AND block = $2
-        ORDER BY entered_at DESC
-        LIMIT 1
-      `;
+const dwellSql = `
+  SELECT
+    block,
+    entered_at,
+    left_at,
+    duration_sec,
+    bot_msgs,
+    user_msgs,
+    validation_fails,
+    max_user_response_gap_sec
+  FROM hmg.v_bot_dwell_diagnostics
+  WHERE user_id = $1 AND block = $2
+  ORDER BY entered_at DESC
+  LIMIT 1
+`;
 
       console.log('Dwell SQL:', dwellSql);
       const dwellResult = await req.db.query(dwellSql, [userId, base.current_stage]);
