@@ -191,16 +191,17 @@ async function tracertRoutes(fastify, options) {
       console.log('Base data found:', base);
 
       // Journey
-      const journeySql = `
-        SELECT
-          stage,
-          entered_at,
-          duration_sec
-        FROM v_bot_user_journey
-        WHERE user_id = $1 and visible = true
-        ORDER BY entered_at
-      `;
-
+// Journey (agora traz type)
+const journeySql = `
+  SELECT
+    stage,
+    entered_at,
+    duration_sec,
+    stage_type AS type
+  FROM hmg.v_bot_user_journey
+  WHERE user_id = $1 AND visible = true
+  ORDER BY entered_at
+`;
       console.log('Journey SQL:', journeySql);
       const journeyResult = await req.db.query(journeySql, [userId]);
       const journey = journeyResult.rows;
