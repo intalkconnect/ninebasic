@@ -152,7 +152,7 @@ async function usersRoutes(fastify, _options) {
   });
 
   // GET /users/id/:id  → busca por ID (string, uuid ou numérico)
-fastify.get('/:id', async (req, reply) => {
+fastify.get('/id/:id', async (req, reply) => {
   const { id } = req.params;
   try {
     const cols = await detectUserColumns(req);
