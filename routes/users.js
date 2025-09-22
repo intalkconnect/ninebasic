@@ -151,6 +151,28 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
+  // GET /users/id/:id  → busca por ID (string, uuid ou numérico)
+fastify.get('/id/:id', async (req, reply) => {
+  const { id } = req.params;
+  try {
+    const cols = await detectUserColumns(req);
+    req.log.info({ cols, id }, '🔎 colunas detectadas (GET /users/id/:id)');
+
+    if (!cols.idCol) {
+      return reply.code(500).send({ error: 'Tabela users não possui coluna de ID' });
+    }
+
+    const sql = buildSelect(cols) + ` WHERE ${cols.idCol} = $1`;
+    const { rows } = await req.db.query(sql, [String(id)]);
+    if (rows.length === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+    return reply.send(rows[0]);
+  } catch (err) {
+    fastify.log.error(err);
+    return reply.code(500).send({ error: 'Erro ao buscar atendente por ID' });
+  }
+});
+
+
   // Buscar por email
   fastify.get('/:email', async (req, reply) => {
     const { email } = req.params;
