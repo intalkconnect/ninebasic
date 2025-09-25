@@ -28,6 +28,7 @@ import usersRoutes         from './routes/users.js';
 import campaignsRoutes     from './routes/campaigns.js';
 import billingRoutes       from './routes/billing.js';
 import tracertRoutes       from './routes/tracertRoutes.js';
+import realtimeRoutes      from "./routes/realtime.js";
 
 // novos
 import whatsappRoutes      from './routes/whatsapp.js';
@@ -127,6 +128,7 @@ async function buildServer() {
     api.register(usersRoutes,         { prefix: '/api/v1/users' });
     api.register(campaignsRoutes,     { prefix: '/api/v1/campaigns' });
     api.register(billingRoutes,       { prefix: '/api/v1/billing' });
+    api.register(realtimeRoutes,      { prefix: "/api/v1/realtime" });
 
     // novos
     api.register(whatsappRoutes, { prefix: '/api/v1/whatsapp' });
@@ -152,6 +154,7 @@ async function start() {
 }
 
 start();
+
 
 
 
