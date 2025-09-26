@@ -1,74 +1,63 @@
 // routes/realtime.js
 import jwt from "jsonwebtoken";
 
-/**
- * Rotas de realtime (PÚBLICAS):
- * - GET /api/v1/realtime/token         -> gera token de conexão (HS256) para o Centrifugo
- * - POST /api/v1/realtime/subscribe    -> gera subscribe token (HS256) p/ canal conv:t:<tenant>:<userId>
- */
 export default async function realtimeRoutes(fastify) {
-  const HMAC =
-    process.env.CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY ||
-    process.env.CENTRIFUGO_TOKEN_HMAC_SECRET_KEY;
+  const HMAC = process.env.CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY;
+  if (!HMAC) fastify.log.warn("[realtime] CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY ausente");
 
-  if (!HMAC) fastify.log.warn("[realtime] CENTRIFUGO_*_HMAC_SECRET_KEY ausente");
-
-  // extrai user/tenant de cabeçalhos/cookies/query sem depender do bearer
-  function getAuth(req) {
-    let userId = String(req.headers["x-user-id"] || "").trim();
-    let tenant = String(req.headers["x-tenant"]   || "").trim();
-
-    // fallback via cookie defaultAssert (se existir)
-    if ((!userId || !tenant) && req.cookies?.defaultAssert) {
-      try {
-        const decoded = jwt.decode(req.cookies.defaultAssert) || {};
-        userId ||= decoded.email || decoded.sub || decoded.id || "";
-        tenant ||= decoded.tenant || decoded.tenantId || decoded?.info?.tenantId || "";
-      } catch {}
-    }
-
-    // fallback via query (debug)
-    if (!userId) userId = String(req.query?.userId || "");
-    if (!tenant) tenant = String(req.query?.tenant  || req.query?.tenantId || "");
-
-    return { userId, tenant };
-  }
-
-  // === GET /realtime/token (PÚBLICO) ===
-  fastify.get("/token", async (req, reply) => {
-    const { userId, tenant } = getAuth(req);
-
-    // exigimos pelo menos X-Tenant (e idealmente X-User-Id)
+  fastify.get("/token", { config: { public: true } }, async (req, reply) => {
+    const tenant = req.headers["x-tenant"];
     if (!tenant) return reply.code(400).send({ error: "missing_tenant" });
 
+    const secret =
+      process.env.CENTRIFUGO_TOKEN_HMAC_SECRET_KEY ||
+      process.env.CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY;
+
+    if (!secret) return reply.code(500).send({ error: "cent_secret_not_configured" });
+
     const now = Math.floor(Date.now() / 1000);
-    const exp = now + 60 * 5; // 5 min
+    const exp = now + 60 * 10; // ↑ 10 minutos para tolerar skew
 
-    // sub padrão: userId se veio, senão "agent:anonymous"
-    const sub = userId || "agent:anonymous";
+    const u = req.user || {};
+    const sub = String(
+      u.id || u.sub || u.email || req.headers["x-user-id"] || "agent:anonymous"
+    );
 
-    const token = jwt.sign({ sub, exp }, HMAC, { algorithm: "HS256" });
+    const token = jwt.sign({ sub, exp }, secret, { algorithm: "HS256" });
     return reply.send({ token, exp, sub });
   });
 
-  // === POST /realtime/subscribe (PÚBLICO, mas verifica canal/tenant) ===
   fastify.post("/subscribe", async (req, reply) => {
     try {
-      if (!HMAC) return reply.code(500).send({ error: "cent_secret_not_configured" });
-
-      const { userId, tenant } = getAuth(req);
-      const { client, channel } = req.body || {};
-
-      if (!client || !channel) return reply.code(400).send({ error: "bad_request" });
+      const tenant = req.headers["x-tenant"];
       if (!tenant) return reply.code(400).send({ error: "missing_tenant" });
-      if (!userId) return reply.code(401).send({ error: "missing_user" });
 
-      // apenas canais conv:t:<tenant>:<algumId> são permitidos
-      const ok = /^conv:/.test(channel) && channel.startsWith(`conv:t:${tenant}:`);
-      if (!ok) return reply.code(403).send({ error: "forbidden_for_channel" });
+      const { client, channel } = req.body || {};
+      if (!client || !channel) {
+        return reply.code(400).send({ error: "bad_request", missing: { client: !client, channel: !channel } });
+      }
 
-      const exp = Math.floor(Date.now() / 1000) + 120; // 2 min
-      const token = jwt.sign({ client, channel, exp }, HMAC, { algorithm: "HS256" });
+      // (opcional) restrinja por tenant se o canal for conv:t:<tenant>:*
+      const allowed =
+        channel.startsWith(`conv:t:${tenant}:`) ||
+        channel.startsWith(`queue:`); // ajuste se quiser queue privada por tenant
+
+      if (!allowed) return reply.code(403).send({ error: "forbidden_for_channel" });
+
+      // Pegue o mesmo "sub" que foi usado no token de conexão:
+      const u = req.user || {};
+      const sub = String(
+        u.id || u.sub || u.email || req.headers["x-user-id"] || "agent:anonymous"
+      );
+
+      // IMPORTANTÍSSIMO: inclua "user" no token de subscribe
+      const exp = Math.floor(Date.now() / 1000) + 60 * 10; // ↑ 10 minutos
+      const token = jwt.sign(
+        { client, channel, user: sub, exp },
+        HMAC,
+        { algorithm: "HS256" }
+      );
+
       return reply.send({ token, exp });
     } catch (e) {
       req.log.error(e);
