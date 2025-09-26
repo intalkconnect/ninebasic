@@ -6,29 +6,56 @@ export default async function realtimeRoutes(fastify) {
     process.env.CENTRIFUGO_TOKEN_HMAC_SECRET_KEY ||
     process.env.CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY;
 
-  const SUBSCRIBE_SECRET = process.env.CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY;
+  const SUBSCRIBE_SECRET =
+    process.env.CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY ||
+    process.env.CENTRIFUGO_TOKEN_HMAC_SECRET_KEY;
 
   if (!CONNECT_SECRET) fastify.log.warn("[realtime] CONNECT_SECRET ausente");
   if (!SUBSCRIBE_SECRET) fastify.log.warn("[realtime] SUBSCRIBE_SECRET ausente");
 
-  // ---- CONNECT TOKEN (público, mas exige X-Tenant) ----
+  // Helpers
+  function getSub(req) {
+    const u = req.user || {};
+    return String(
+      u.id || u.sub || u.email || req.headers["x-user-id"] || "agent:anonymous"
+    );
+  }
+
+  // Janela grande pra descartar skew entre relógios
+  const EXP_SECONDS = 24 * 60 * 60; // 24h
+  const LEEWAY = 60; // 60s
+
+  // -------- CONNECT TOKEN (público mas exige X-Tenant) --------
   fastify.get("/token", { config: { public: true } }, async (req, reply) => {
     const tenant = req.headers["x-tenant"];
     if (!tenant) return reply.code(400).send({ error: "missing_tenant" });
     if (!CONNECT_SECRET) return reply.code(500).send({ error: "cent_secret_not_configured" });
 
-    const u = req.user || {};
-    const sub =
-      String(u.id || u.sub || u.email || req.headers["x-user-id"] || "agent:anonymous");
-
+    const sub = getSub(req);
     const now = Math.floor(Date.now() / 1000);
-    const payload = { sub, iat: now - 30, exp: now + 3600 }; // 1h
+
+    const payload = {
+      sub,
+      iat: now - LEEWAY, // tolerância
+      nbf: now - LEEWAY,
+      exp: now + EXP_SECONDS,
+    };
+
     const token = jwt.sign(payload, CONNECT_SECRET, { algorithm: "HS256" });
 
-    return reply.send({ token, ...payload });
+    // DEBUG útil pra comparar relógios
+    return reply.send({
+      token,
+      sub,
+      now,
+      exp: payload.exp,
+      leeway: LEEWAY,
+      ttl_sec: EXP_SECONDS,
+      note: "connect-token",
+    });
   });
 
-  // ---- SUBSCRIBE TOKEN (privado; usa mesma identidade "sub") ----
+  // -------- SUBSCRIBE TOKEN (privado) --------
   fastify.post("/subscribe", async (req, reply) => {
     try {
       const tenant = req.headers["x-tenant"];
@@ -43,30 +70,39 @@ export default async function realtimeRoutes(fastify) {
         });
       }
 
-      // limita canais por tenant (ajuste se quiser queue pública)
+      // restrição de canais (ajuste conforme regra)
       const allowed =
-        channel.startsWith(`conv:t:${tenant}:`) || channel.startsWith("queue:");
+        channel.startsWith(`conv:t:${tenant}:`) ||
+        channel.startsWith("queue:");
       if (!allowed) return reply.code(403).send({ error: "forbidden_for_channel" });
 
-      // >>> AQUI: defina 'sub' ANTES de usar
-      const u = req.user || {};
-      const sub =
-        String(u.id || u.sub || u.email || req.headers["x-user-id"] || "agent:anonymous");
-
+      const sub = getSub(req);
       const now = Math.floor(Date.now() / 1000);
+
+      // IMPORTANTE: Centrifugo confere que o 'sub' do subscribe token == 'sub' do connect token
       const payload = {
+        sub,
         client,
         channel,
-        sub,            // o Centrifugo confere este sub com o sub do connect token
-        iat: now - 30,
-        exp: now + 3600 // 1h
+        iat: now - LEEWAY,
+        nbf: now - LEEWAY,
+        exp: now + EXP_SECONDS,
       };
 
-      // (debug opcional)
-      // req.log.info({ payload }, "[realtime] subscribe-payload");
-
       const token = jwt.sign(payload, SUBSCRIBE_SECRET, { algorithm: "HS256" });
-      return reply.send({ token, exp: payload.exp });
+
+      // DEBUG útil
+      return reply.send({
+        token,
+        sub,
+        client,
+        channel,
+        now,
+        exp: payload.exp,
+        leeway: LEEWAY,
+        ttl_sec: EXP_SECONDS,
+        note: "subscribe-token",
+      });
     } catch (e) {
       req.log.error(e);
       return reply.code(500).send({ error: "subscribe_token_error" });
