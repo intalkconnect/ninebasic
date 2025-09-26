@@ -13,7 +13,8 @@ export default async function realtimeRoutes(fastify) {
   if (!CONNECT_SECRET) fastify.log.warn("[realtime] CONNECT_SECRET ausente");
   if (!SUBSCRIBE_SECRET) fastify.log.warn("[realtime] SUBSCRIBE_SECRET ausente");
 
-  // Helpers
+  const EXP_SECONDS = 24 * 60 * 60; // 24h de validade
+
   function getSub(req) {
     const u = req.user || {};
     return String(
@@ -21,11 +22,7 @@ export default async function realtimeRoutes(fastify) {
     );
   }
 
-  // Janela grande pra descartar skew entre relógios
-  const EXP_SECONDS = 24 * 60 * 60; // 24h
-  const LEEWAY = 60; // 60s
-
-  // -------- CONNECT TOKEN (público mas exige X-Tenant) --------
+  // -------- CONNECT TOKEN --------
   fastify.get("/token", { config: { public: true } }, async (req, reply) => {
     const tenant = req.headers["x-tenant"];
     if (!tenant) return reply.code(400).send({ error: "missing_tenant" });
@@ -33,29 +30,15 @@ export default async function realtimeRoutes(fastify) {
 
     const sub = getSub(req);
     const now = Math.floor(Date.now() / 1000);
+    const exp = now + EXP_SECONDS;
 
-    const payload = {
-      sub,
-      iat: now - LEEWAY, // tolerância
-      nbf: now - LEEWAY,
-      exp: now + EXP_SECONDS,
-    };
+    // sem iat/nbf: evita rejeição por skew de relógio
+    const token = jwt.sign({ sub, exp }, CONNECT_SECRET, { algorithm: "HS256" });
 
-    const token = jwt.sign(payload, CONNECT_SECRET, { algorithm: "HS256" });
-
-    // DEBUG útil pra comparar relógios
-    return reply.send({
-      token,
-      sub,
-      now,
-      exp: payload.exp,
-      leeway: LEEWAY,
-      ttl_sec: EXP_SECONDS,
-      note: "connect-token",
-    });
+    return reply.send({ token, sub, now, exp, ttl_sec: EXP_SECONDS, note: "connect-token" });
   });
 
-  // -------- SUBSCRIBE TOKEN (privado) --------
+  // -------- SUBSCRIBE TOKEN --------
   fastify.post("/subscribe", async (req, reply) => {
     try {
       const tenant = req.headers["x-tenant"];
@@ -70,7 +53,7 @@ export default async function realtimeRoutes(fastify) {
         });
       }
 
-      // restrição de canais (ajuste conforme regra)
+      // restrição simples por tenant; ajuste conforme regra
       const allowed =
         channel.startsWith(`conv:t:${tenant}:`) ||
         channel.startsWith("queue:");
@@ -78,31 +61,12 @@ export default async function realtimeRoutes(fastify) {
 
       const sub = getSub(req);
       const now = Math.floor(Date.now() / 1000);
+      const exp = now + EXP_SECONDS;
 
-      // IMPORTANTE: Centrifugo confere que o 'sub' do subscribe token == 'sub' do connect token
-      const payload = {
-        sub,
-        client,
-        channel,
-        iat: now - LEEWAY,
-        nbf: now - LEEWAY,
-        exp: now + EXP_SECONDS,
-      };
+      // Centrifugo compara 'sub' do subscribe com o do connect
+      const token = jwt.sign({ sub, client, channel, exp }, SUBSCRIBE_SECRET, { algorithm: "HS256" });
 
-      const token = jwt.sign(payload, SUBSCRIBE_SECRET, { algorithm: "HS256" });
-
-      // DEBUG útil
-      return reply.send({
-        token,
-        sub,
-        client,
-        channel,
-        now,
-        exp: payload.exp,
-        leeway: LEEWAY,
-        ttl_sec: EXP_SECONDS,
-        note: "subscribe-token",
-      });
+      return reply.send({ token, sub, client, channel, now, exp, ttl_sec: EXP_SECONDS, note: "subscribe-token" });
     } catch (e) {
       req.log.error(e);
       return reply.code(500).send({ error: "subscribe_token_error" });
