@@ -9,36 +9,68 @@ export default async function realtimeRoutes(fastify) {
     throw new Error("HMAC secret não configurado");
   }
 
+  console.log("[realtime] HMAC secret configured, length:", HMAC.length);
+
   const getSub = (req) => {
     const u = req.user || {};
-    // Garanta que sempre retorne um valor válido
-    const sub = String(u.id || u.sub || u.email || req.headers["x-user-id"] || "agent:anonymous");
-    console.log("[realtime] getSub result:", sub); // DEBUG
+    const headers = req.headers || {};
+    
+    console.log("[realtime] getSub - req.user:", u);
+    console.log("[realtime] getSub - headers:", {
+      'x-user-id': headers['x-user-id'],
+      'x-user-email': headers['x-user-email'],
+      authorization: headers['authorization'] ? 'present' : 'missing'
+    });
+
+    const sub = String(
+      u.id || 
+      u.sub || 
+      u.email || 
+      headers["x-user-id"] || 
+      headers["x-user-email"] ||
+      "agent:anonymous"
+    );
+    
+    console.log("[realtime] getSub result:", sub);
     return sub;
   };
 
   // ---- CONNECT TOKEN ----
   fastify.get("/token", { config: { public: true } }, async (req, reply) => {
     try {
+      console.log("[realtime] GET /token called, headers:", req.headers);
+      
       const tenant = req.headers["x-tenant"];
       if (!tenant) return reply.code(400).send({ error: "missing_tenant" });
 
       const sub = getSub(req);
       const exp = Math.floor(Date.now()/1000) + (24 * 60 * 60);
 
-      const token = jwt.sign({ sub, exp }, HMAC, { algorithm: "HS256" });
+      const tokenPayload = { sub, exp };
+      console.log("[realtime] connect token payload:", tokenPayload);
 
-      console.log("[realtime] connect token generated for sub:", sub); // DEBUG
-      return reply.send({ token });
+      const token = jwt.sign(tokenPayload, HMAC, { algorithm: "HS256" });
+
+      // Decodifique para verificar
+      const decoded = jwt.verify(token, HMAC);
+      console.log("[realtime] connect token decoded:", decoded);
+
+      return reply.send({ 
+        token,
+        decoded: decoded // ← Incluir para debug
+      });
     } catch (error) {
       console.error("[realtime] token error:", error);
-      return reply.code(500).send({ error: "token_generation_failed" });
+      return reply.code(500).send({ error: "token_generation_failed", details: error.message });
     }
   });
 
   // ---- SUBSCRIBE TOKEN ----
   fastify.post("/subscribe", async (req, reply) => {
     try {
+      console.log("[realtime] POST /subscribe called, headers:", req.headers);
+      console.log("[realtime] POST /subscribe body:", req.body);
+
       const tenant = req.headers["x-tenant"];
       if (!tenant) return reply.code(400).send({ error: "missing_tenant" });
 
@@ -59,27 +91,53 @@ export default async function realtimeRoutes(fastify) {
       const sub = getSub(req);
       const exp = Math.floor(Date.now()/1000) + (24 * 60 * 60);
 
-      // 🔥 CORREÇÃO PRINCIPAL: Inclua o campo 'user' no payload
+      // Payload do token de subscribe
       const payload = {
-        user: sub,  // ← ESTE CAMPO É OBRIGATÓRIO
+        user: sub,  // ← CAMPO CRÍTICO
         channel,
-        client,
+        client, 
         exp
       };
 
-      console.log("[realtime] subscribe token payload:", payload); // DEBUG
+      console.log("[realtime] subscribe token payload:", payload);
 
       const token = jwt.sign(payload, HMAC, { algorithm: "HS256" });
+
+      // Verifique o token gerado
+      const decoded = jwt.verify(token, HMAC);
+      console.log("[realtime] subscribe token decoded:", decoded);
 
       return reply.send({ 
         token,
         user: sub,
         channel,
-        client
+        client,
+        decoded: decoded // ← Para debug
       });
     } catch (error) {
       console.error("[realtime] subscribe error:", error);
-      return reply.code(500).send({ error: "subscribe_token_generation_failed" });
+      return reply.code(500).send({ error: "subscribe_token_generation_failed", details: error.message });
+    }
+  });
+
+  // Endpoint para debug do token
+  fastify.post("/debug-verify", async (req, reply) => {
+    try {
+      const { token } = req.body;
+      if (!token) return reply.code(400).send({ error: "token_required" });
+
+      const decoded = jwt.verify(token, HMAC);
+      return reply.send({ 
+        decoded,
+        valid: true,
+        currentTime: Math.floor(Date.now()/1000)
+      });
+    } catch (error) {
+      return reply.send({ 
+        valid: false, 
+        error: error.message,
+        currentTime: Math.floor(Date.now()/1000)
+      });
     }
   });
 }
