@@ -2,40 +2,40 @@
 import jwt from "jsonwebtoken";
 
 export default async function realtimeRoutes(fastify) {
-  const CONNECT_SECRET =
+  // Use a MESMA chave nos dois tokens (e a mesma do Centrifugo)
+  const HMAC =
     process.env.CENTRIFUGO_TOKEN_HMAC_SECRET_KEY ||
     process.env.CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY;
 
-  const SUBSCRIBE_SECRET =
-    process.env.CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY ||
-    process.env.CENTRIFUGO_TOKEN_HMAC_SECRET_KEY;
+  if (!HMAC) fastify.log.warn("[realtime] HMAC secret ausente (CENTRIFUGO_*_SECRET_KEY)");
 
-  if (!CONNECT_SECRET) fastify.log.warn("[realtime] CONNECT_SECRET ausente");
-  if (!SUBSCRIBE_SECRET) fastify.log.warn("[realtime] SUBSCRIBE_SECRET ausente");
+  // Validade “grande” + sem iat/nbf para não esbarrar em skew
+  const EXP_SECONDS = 24 * 60 * 60; // 24h
 
-  const EXP_SECONDS = 24 * 60 * 60; // 24h de validade
-
-  function getSub(req) {
+  const getSub = (req) => {
     const u = req.user || {};
-    return String(
-      u.id || u.sub || u.email || req.headers["x-user-id"] || "agent:anonymous"
-    );
-  }
+    return String(u.id || u.sub || u.email || req.headers["x-user-id"] || "agent:anonymous");
+  };
 
-  // -------- CONNECT TOKEN --------
+  // -------- CONNECT TOKEN (público, só exige X-Tenant) --------
   fastify.get("/token", { config: { public: true } }, async (req, reply) => {
-    const tenant = req.headers["x-tenant"];
-    if (!tenant) return reply.code(400).send({ error: "missing_tenant" });
-    if (!CONNECT_SECRET) return reply.code(500).send({ error: "cent_secret_not_configured" });
+    try {
+      const tenant = req.headers["x-tenant"];
+      if (!tenant) return reply.code(400).send({ error: "missing_tenant" });
+      if (!HMAC)   return reply.code(500).send({ error: "cent_secret_not_configured" });
 
-    const sub = getSub(req);
-    const now = Math.floor(Date.now() / 1000);
-    const exp = now + EXP_SECONDS;
+      const sub = getSub(req);
+      const now = Math.floor(Date.now() / 1000);
+      const exp = now + EXP_SECONDS;
 
-    // sem iat/nbf: evita rejeição por skew de relógio
-    const token = jwt.sign({ sub, exp }, CONNECT_SECRET, { algorithm: "HS256" });
+      // ⚠️ noTimestamp: true evita o iat automático
+      const token = jwt.sign({ sub, exp }, HMAC, { algorithm: "HS256", noTimestamp: true });
 
-    return reply.send({ token, sub, now, exp, ttl_sec: EXP_SECONDS, note: "connect-token" });
+      return reply.send({ token, sub, now, exp, ttl_sec: EXP_SECONDS, note: "connect-token" });
+    } catch (e) {
+      req.log.error(e);
+      return reply.code(500).send({ error: "connect_token_error" });
+    }
   });
 
   // -------- SUBSCRIBE TOKEN --------
@@ -43,17 +43,14 @@ export default async function realtimeRoutes(fastify) {
     try {
       const tenant = req.headers["x-tenant"];
       if (!tenant) return reply.code(400).send({ error: "missing_tenant" });
-      if (!SUBSCRIBE_SECRET) return reply.code(500).send({ error: "cent_secret_not_configured" });
+      if (!HMAC)   return reply.code(500).send({ error: "cent_secret_not_configured" });
 
       const { client, channel } = req.body || {};
       if (!client || !channel) {
-        return reply.code(400).send({
-          error: "bad_request",
-          missing: { client: !client, channel: !channel },
-        });
+        return reply.code(400).send({ error: "bad_request", missing: { client: !client, channel: !channel } });
       }
 
-      // restrição simples por tenant; ajuste conforme regra
+      // Regras simples por tenant
       const allowed =
         channel.startsWith(`conv:t:${tenant}:`) ||
         channel.startsWith("queue:");
@@ -63,8 +60,12 @@ export default async function realtimeRoutes(fastify) {
       const now = Math.floor(Date.now() / 1000);
       const exp = now + EXP_SECONDS;
 
-      // Centrifugo compara 'sub' do subscribe com o do connect
-      const token = jwt.sign({ sub, client, channel, exp }, SUBSCRIBE_SECRET, { algorithm: "HS256" });
+      // Mesmo sub do connect + noTimestamp
+      const token = jwt.sign(
+        { sub, client, channel, exp },
+        HMAC,
+        { algorithm: "HS256", noTimestamp: true }
+      );
 
       return reply.send({ token, sub, client, channel, now, exp, ttl_sec: EXP_SECONDS, note: "subscribe-token" });
     } catch (e) {
