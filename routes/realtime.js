@@ -75,10 +75,10 @@ export default async function realtimeRoutes(fastify) {
       if (!tenant) return reply.code(400).send({ error: "missing_tenant" });
 
       const { client, channel } = req.body || {};
-      if (!client || !channel) {
+      if (!channel) {
         return reply.code(400).send({ 
           error: "bad_request", 
-          missing: { client: !client, channel: !channel } 
+          missing: { client: !channel } 
         });
       }
 
@@ -92,7 +92,7 @@ export default async function realtimeRoutes(fastify) {
       const exp = Math.floor(Date.now()/1000) + (24 * 60 * 60);
 
       // Payload do token de subscribe
-      const payload = { sub, channel, client, exp };
+      const payload = { sub, channel, exp };
 
       console.log("[realtime] subscribe token payload:", payload);
 
