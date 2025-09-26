@@ -9,7 +9,7 @@ export default async function realtimeRoutes(fastify) {
   function getAuth(req) {
     // 1) middleware de auth (ideal)
     let userId = req.user?.id || req.user?.sub || "";
-    let tenantId = req.user?.tenantId || "";
+    let tenantId = req.headers["x-tenant"];
 
     // 2) Authorization: Bearer <jwt>
     if ((!userId || !tenantId) && req.headers.authorization?.startsWith("Bearer ")) {
