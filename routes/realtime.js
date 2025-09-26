@@ -49,11 +49,8 @@ export default async function realtimeRoutes(fastify) {
         req.user?.id || req.user?.sub || req.user?.email || req.headers["x-user-id"] || "agent:anonymous";
 
       const now = Math.floor(Date.now() / 1000);
-      const token = jwt.sign(
-        { client, channel, user: String(user), iat: now - 30, exp: now + 3600 }, // 1h
-        SECRET,
-        { algorithm: "HS256" }
-      );
+      const token = jwt.sign({ client, channel, sub: String(sub),  iat: now - 30, exp: now + 3600 }, SECRET, { algorithm: "HS256" });
+
       return reply.send({ token, exp: now + 3600 });
     } catch (e) {
       req.log.error(e);
