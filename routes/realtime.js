@@ -92,12 +92,7 @@ export default async function realtimeRoutes(fastify) {
       const exp = Math.floor(Date.now()/1000) + (24 * 60 * 60);
 
       // Payload do token de subscribe
-      const payload = {
-        user: sub,  // ← CAMPO CRÍTICO
-        channel,
-        client, 
-        exp
-      };
+      const payload = { sub, channel, client, exp };
 
       console.log("[realtime] subscribe token payload:", payload);
 
@@ -109,7 +104,7 @@ export default async function realtimeRoutes(fastify) {
 
       return reply.send({ 
         token,
-        user: sub,
+        sub,
         channel,
         client,
         decoded: decoded // ← Para debug
