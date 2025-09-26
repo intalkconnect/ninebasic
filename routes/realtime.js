@@ -2,83 +2,89 @@
 import jwt from "jsonwebtoken";
 
 export default async function realtimeRoutes(fastify) {
-  const HMAC = process.env.CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY;
-  if (!HMAC) fastify.log.warn("[realtime] CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY ausente");
+  const HMAC =
+    process.env.CENTRIFUGO_TOKEN_HMAC_SECRET_KEY ||
+    process.env.CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY ||
+    "";
 
-  // tenta extrair user/tenant de várias fontes
+  if (!HMAC) fastify.log.warn("[realtime] HMAC do Centrifugo ausente");
+
+  // Extrai user/tenant de várias fontes (padronizado p/ X-Tenant e claim 'tenant')
   function getAuth(req) {
-    // 1) middleware de auth (ideal)
-    let userId = req.user?.id || req.user?.sub || "";
-    let tenantId = req.headers["x-tenant"];
+    let userId  = req.user?.id || req.user?.sub || "";
+    let tenant  = (req.headers["x-tenant"] || "").toString().trim();
 
-    // 2) Authorization: Bearer <jwt>
-    if ((!userId || !tenantId) && req.headers.authorization?.startsWith("Bearer ")) {
+    // Authorization: Bearer <jwt> (se houver)
+    if ((!userId || !tenant) && req.headers.authorization?.startsWith("Bearer ")) {
       try {
-        const token = req.headers.authorization.slice("Bearer ".length);
+        const token   = req.headers.authorization.slice("Bearer ".length);
         const decoded = jwt.decode(token) || {};
-        userId ||= decoded.sub || decoded.id || "";
-        tenantId ||= decoded.tenantId || decoded?.info?.tenantId || "";
+        userId ||= decoded.sub || decoded.id || decoded.email || "";
+        tenant ||= decoded.tenant || ""; // << importante: claim 'tenant'
       } catch {}
     }
 
-    // 3) Cookies (se usar sessão/JWT em cookie)
-    if ((!userId || !tenantId) && req.cookies?.auth) {
+    // Cookies (opcional)
+    if ((!userId || !tenant) && req.cookies?.auth) {
       try {
         const decoded = jwt.decode(req.cookies.auth) || {};
-        userId ||= decoded.sub || decoded.id || "";
-        tenantId ||= decoded.tenantId || decoded?.info?.tenantId || "";
+        userId ||= decoded.sub || decoded.id || decoded.email || "";
+        tenant ||= decoded.tenant || "";
       } catch {}
     }
 
-    // 4) Headers de dev (útil agora)
+    // Headers auxiliares
     userId ||= String(req.headers["x-user-id"] || "").trim();
-    tenantId ||= String(req.headers["x-tenant-id"] || "").trim();
 
-    // 5) (opcional) Query string para debug: ?userId=&tenantId=
+    // Query de debug (opcional)
     if (!userId) userId = String(req.query?.userId || "");
-    if (!tenantId) tenantId = String(req.query?.tenantId || "");
+    if (!tenant) tenant = String(req.query?.tenant || "");
 
-    const name = req.user?.name || req.headers["x-user-name"] || "";
-    return { userId, tenantId, name };
+    return { userId, tenant };
   }
 
-  fastify.get("/token", async (req, reply) => {
-    try {
-      if (!HMAC) return reply.code(500).send({ error: "cent secret not configured" });
+  // --- PUBLIC: token de conexão do Centrifugo (sem Bearer) ---
+  fastify.get("/token", { config: { public: true } }, async (req, reply) => {
+    const tenant = String(req.headers["x-tenant"] || "").trim();
+    if (!tenant) return reply.code(400).send({ error: "missing_tenant" });
+    if (!HMAC)   return reply.code(500).send({ error: "cent_secret_not_configured" });
 
-      const { userId, tenantId, name } = getAuth(req);
-      if (!userId || !tenantId) {
-        return reply.code(401).send({ error: "unauthenticated", hint: "missing userId/tenantId" });
-      }
+    const now = Math.floor(Date.now() / 1000);
+    const exp = now + 60 * 5;
 
-      const exp = Math.floor(Date.now()/1000) + 60 * 60; // 1h
-      const token = jwt.sign({ sub: userId, info: { tenantId, name }, exp }, HMAC, { algorithm: "HS256" });
-      return reply.send({ token, exp, sub: userId });
-    } catch (e) {
-      req.log.error(e);
-      return reply.code(500).send({ error: "erro ao gerar token" });
-    }
+    // sub do usuário (se tiver guard), senão cai no header auxiliar
+    const u   = req.user || {};
+    const sub = String(u.id || u.sub || u.email || req.headers["x-user-id"] || "agent:anonymous");
+
+    const token = jwt.sign({ sub, exp }, HMAC, { algorithm: "HS256" });
+    return reply.send({ token, exp, sub });
   });
 
-  // mantém também a rota de subscribe se ainda não adicionou:
-  fastify.post("/centrifugo/subscribe", async (req, reply) => {
+  // --- PROTECTED (ou público, como preferir): subscribe token por canal ---
+  // Se quiser protegido por Bearer, NÃO ponha config.public aqui.
+  fastify.post("/subscribe", async (req, reply) => {
     try {
-      if (!HMAC) return reply.code(500).send({ error: "cent secret not configured" });
-      const { userId, tenantId } = getAuth(req);
-      if (!userId || !tenantId) return reply.code(401).send({ error: "unauthenticated" });
+      if (!HMAC) return reply.code(500).send({ error: "cent_secret_not_configured" });
+
+      const { userId, tenant } = getAuth(req);
+      if (!userId || !tenant) return reply.code(401).send({ error: "unauthenticated" });
 
       const { client, channel } = req.body || {};
       if (!client || !channel) return reply.code(400).send({ error: "bad_request" });
 
-      const allowed = /^conv:/.test(channel) && new RegExp(`^conv:t:${tenantId}:`).test(channel);
-      if (!allowed) return reply.code(403).send({ error: "forbidden for this channel" });
+      // somente canais do tenant atual (ex.: conv:t:hmg:12345)
+      const allowed =
+        channel.startsWith("conv:") &&
+        new RegExp(`^conv:t:${tenant}:`).test(channel);
 
-      const exp = Math.floor(Date.now()/1000) + 120;
+      if (!allowed) return reply.code(403).send({ error: "forbidden_for_this_channel" });
+
+      const exp   = Math.floor(Date.now() / 1000) + 120;
       const token = jwt.sign({ client, channel, exp }, HMAC, { algorithm: "HS256" });
       return reply.send({ token, exp });
     } catch (e) {
       req.log.error(e);
-      return reply.code(500).send({ error: "erro ao gerar subscribe token" });
+      return reply.code(500).send({ error: "subscribe_token_error" });
     }
   });
 }
