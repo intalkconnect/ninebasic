@@ -58,6 +58,8 @@ async function buildServer() {
   // 2. Registra o tenant plugin (resolve subdomain)
   await fastify.register(tenantPlugin);
 
+  fastify.register(realtimeRoutes, { prefix: "/api/v1/realtime" });
+
   // rotas públicas
   fastify.get('/healthz', async () => ({ ok: true }));
   
@@ -128,7 +130,7 @@ async function buildServer() {
     api.register(usersRoutes,         { prefix: '/api/v1/users' });
     api.register(campaignsRoutes,     { prefix: '/api/v1/campaigns' });
     api.register(billingRoutes,       { prefix: '/api/v1/billing' });
-    api.register(realtimeRoutes,      { prefix: "/api/v1/realtime" });
+
 
     // novos
     api.register(whatsappRoutes, { prefix: '/api/v1/whatsapp' });
@@ -154,6 +156,7 @@ async function start() {
 }
 
 start();
+
 
 
 
