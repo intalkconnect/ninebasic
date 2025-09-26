@@ -2,56 +2,41 @@
 import jwt from "jsonwebtoken";
 
 export default async function realtimeRoutes(fastify) {
-  // Use a variável de ambiente correta
   const HMAC = process.env.CENTRIFUGO_TOKEN_HMAC_SECRET_KEY;
   
   if (!HMAC) {
     fastify.log.error("[realtime] CENTRIFUGO_TOKEN_HMAC_SECRET_KEY ausente");
     throw new Error("HMAC secret não configurado");
   }
-  
-  const EXP_SECONDS = 24 * 60 * 60; // 24h
 
   const getSub = (req) => {
     const u = req.user || {};
-    return String(
-      u.id || u.sub || u.email || req.headers["x-user-id"] || "agent:anonymous"
-    );
+    // Garanta que sempre retorne um valor válido
+    const sub = String(u.id || u.sub || u.email || req.headers["x-user-id"] || "agent:anonymous");
+    console.log("[realtime] getSub result:", sub); // DEBUG
+    return sub;
   };
 
-  // ---- CONNECT TOKEN (usa `sub` conforme documentação do Centrifugo) ----
+  // ---- CONNECT TOKEN ----
   fastify.get("/token", { config: { public: true } }, async (req, reply) => {
     try {
       const tenant = req.headers["x-tenant"];
       if (!tenant) return reply.code(400).send({ error: "missing_tenant" });
 
       const sub = getSub(req);
-      const now = Math.floor(Date.now()/1000);
-      const exp = now + EXP_SECONDS;
+      const exp = Math.floor(Date.now()/1000) + (24 * 60 * 60);
 
-      // Token de conexão deve conter `sub`
-      const token = jwt.sign({ 
-        sub, 
-        exp 
-      }, HMAC, { 
-        algorithm: "HS256", 
-        noTimestamp: true 
-      });
+      const token = jwt.sign({ sub, exp }, HMAC, { algorithm: "HS256" });
 
-      return reply.send({ 
-        token, 
-        sub, 
-        now, 
-        exp, 
-        ttl_sec: EXP_SECONDS 
-      });
+      console.log("[realtime] connect token generated for sub:", sub); // DEBUG
+      return reply.send({ token });
     } catch (error) {
-      fastify.log.error("[realtime] token error:", error);
+      console.error("[realtime] token error:", error);
       return reply.code(500).send({ error: "token_generation_failed" });
     }
   });
 
-  // ---- SUBSCRIBE TOKEN (usa `user` conforme documentação) ----
+  // ---- SUBSCRIBE TOKEN ----
   fastify.post("/subscribe", async (req, reply) => {
     try {
       const tenant = req.headers["x-tenant"];
@@ -72,35 +57,28 @@ export default async function realtimeRoutes(fastify) {
       if (!allowed) return reply.code(403).send({ error: "forbidden_for_channel" });
 
       const sub = getSub(req);
-      const now = Math.floor(Date.now()/1000);
-      const exp = now + EXP_SECONDS;
+      const exp = Math.floor(Date.now()/1000) + (24 * 60 * 60);
 
-      // Token de subscribe deve conter `user`
-      const token = jwt.sign(
-        { 
-          user: sub,  // ← IMPORTANTE: usar 'user' para subscribe tokens
-          client, 
-          channel, 
-          exp 
-        },
-        HMAC,
-        { 
-          algorithm: "HS256", 
-          noTimestamp: true 
-        }
-      );
+      // 🔥 CORREÇÃO PRINCIPAL: Inclua o campo 'user' no payload
+      const payload = {
+        user: sub,  // ← ESTE CAMPO É OBRIGATÓRIO
+        channel,
+        client,
+        exp
+      };
+
+      console.log("[realtime] subscribe token payload:", payload); // DEBUG
+
+      const token = jwt.sign(payload, HMAC, { algorithm: "HS256" });
 
       return reply.send({ 
-        token, 
-        user: sub,  // ← Retornar como 'user' para consistência
-        client, 
-        channel, 
-        now, 
-        exp, 
-        ttl_sec: EXP_SECONDS 
+        token,
+        user: sub,
+        channel,
+        client
       });
     } catch (error) {
-      fastify.log.error("[realtime] subscribe error:", error);
+      console.error("[realtime] subscribe error:", error);
       return reply.code(500).send({ error: "subscribe_token_generation_failed" });
     }
   });
