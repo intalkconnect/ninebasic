@@ -16,7 +16,7 @@ async function ticketTagsRoutes(fastify) {
   // ===== Helpers =====
   async function getFilaIdByNome(db, nomeFila) {
     const { rows } = await db.query(
-      `SELECT id FROM hmg.filas WHERE nome = $1 LIMIT 1`,
+      `SELECT id FROM filas WHERE nome = $1 LIMIT 1`,
       [nomeFila]
     );
     return rows[0]?.id || null;
@@ -24,7 +24,7 @@ async function ticketTagsRoutes(fastify) {
 
   async function getTicketFilaNome(db, ticketNumber) {
     const { rows } = await db.query(
-      `SELECT fila FROM hmg.tickets WHERE ticket_number = $1 LIMIT 1`,
+      `SELECT fila FROM tickets WHERE ticket_number = $1 LIMIT 1`,
       [ticketNumber]
     );
     return rows[0]?.fila || null;
@@ -61,10 +61,10 @@ async function ticketTagsRoutes(fastify) {
       }
       const whereSql = `WHERE ${where.join(' AND ')}`;
 
-      const sqlCount = `SELECT COUNT(*)::bigint AS total FROM hmg.queue_ticket_tag_catalog ${whereSql}`;
+      const sqlCount = `SELECT COUNT(*)::bigint AS total FROM queue_ticket_tag_catalog ${whereSql}`;
       const sqlList  = `
         SELECT fila_id, tag, label, color, active, created_at
-          FROM hmg.queue_ticket_tag_catalog
+          FROM queue_ticket_tag_catalog
           ${whereSql}
          ORDER BY tag ASC
          LIMIT $${params.length + 1}
@@ -102,7 +102,7 @@ async function ticketTagsRoutes(fastify) {
       if (!filaId) return reply.code(404).send({ error: 'Fila não encontrada' });
 
       const sql = `
-        INSERT INTO hmg.queue_ticket_tag_catalog (fila_id, tag, label, color, active)
+        INSERT INTO queue_ticket_tag_catalog (fila_id, tag, label, color, active)
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (fila_id, tag) DO UPDATE
           SET label = EXCLUDED.label,
@@ -147,7 +147,7 @@ async function ticketTagsRoutes(fastify) {
       vals.push(filaId, tag);
 
       const sql = `
-        UPDATE hmg.queue_ticket_tag_catalog
+        UPDATE queue_ticket_tag_catalog
            SET ${sets.join(', ')}
          WHERE fila_id = $${i++} AND tag = $${i}
          RETURNING fila_id, tag, label, color, active, created_at
@@ -173,7 +173,7 @@ async function ticketTagsRoutes(fastify) {
 
       // impedir exclusão se estiver em uso
       const inUse = await req.db.query(
-        `SELECT 1 FROM hmg.ticket_tags WHERE fila_id = $1 AND tag = $2 LIMIT 1`,
+        `SELECT 1 FROM ticket_tags WHERE fila_id = $1 AND tag = $2 LIMIT 1`,
         [filaId, tag]
       );
       if (inUse.rowCount) {
@@ -181,7 +181,7 @@ async function ticketTagsRoutes(fastify) {
       }
 
       const { rowCount } = await req.db.query(
-        `DELETE FROM hmg.queue_ticket_tag_catalog WHERE fila_id = $1 AND tag = $2`,
+        `DELETE FROM queue_ticket_tag_catalog WHERE fila_id = $1 AND tag = $2`,
         [filaId, tag]
       );
       return rowCount ? reply.code(204).send() : reply.code(404).send({ error: 'Tag de fila não encontrada' });
@@ -204,7 +204,7 @@ async function ticketTagsRoutes(fastify) {
     try {
       // checa ticket + resolve fila
       const { rows: rt } = await req.db.query(
-        `SELECT ticket_number, fila FROM hmg.tickets WHERE ticket_number = $1 LIMIT 1`,
+        `SELECT ticket_number, fila FROM tickets WHERE ticket_number = $1 LIMIT 1`,
         [tn]
       );
       const t = rt[0];
@@ -213,10 +213,10 @@ async function ticketTagsRoutes(fastify) {
       const { rows } = await req.db.query(
         `SELECT tt.ticket_number, tt.fila_id, qttc.tag, qttc.label, qttc.color, qttc.active, tt.created_at,
                 f.nome AS fila
-           FROM hmg.ticket_tags tt
-           JOIN hmg.queue_ticket_tag_catalog qttc
+           FROM ticket_tags tt
+           JOIN queue_ticket_tag_catalog qttc
              ON qttc.fila_id = tt.fila_id AND qttc.tag = tt.tag
-           JOIN hmg.filas f ON f.id = tt.fila_id
+           JOIN filas f ON f.id = tt.fila_id
           WHERE tt.ticket_number = $1
           ORDER BY qttc.tag ASC`,
         [tn]
@@ -243,7 +243,7 @@ async function ticketTagsRoutes(fastify) {
 
       const { rows } = await req.db.query(
         `SELECT fila_id, tag, label, color, active, created_at
-           FROM hmg.queue_ticket_tag_catalog
+           FROM queue_ticket_tag_catalog
           WHERE fila_id = $1 AND active IS TRUE
           ORDER BY tag ASC`,
         [filaId]
@@ -272,7 +272,7 @@ async function ticketTagsRoutes(fastify) {
 
       // só permite tags existentes/ativas no catálogo da fila
       const rKnown = await req.db.query(
-        `SELECT tag FROM hmg.queue_ticket_tag_catalog
+        `SELECT tag FROM queue_ticket_tag_catalog
           WHERE fila_id = $1 AND tag = ANY($2::text[]) AND active IS TRUE`,
         [filaId, tags]
       );
@@ -292,7 +292,7 @@ async function ticketTagsRoutes(fastify) {
         values.push(`($${i++}, $${i++}, $${i++})`);
       }
       const sql = `
-        INSERT INTO hmg.ticket_tags (ticket_number, fila_id, tag)
+        INSERT INTO ticket_tags (ticket_number, fila_id, tag)
         VALUES ${values.join(', ')}
         ON CONFLICT (ticket_number, tag) DO NOTHING
         RETURNING ticket_number, fila_id, tag, created_at
@@ -313,7 +313,7 @@ async function ticketTagsRoutes(fastify) {
 
     try {
       const { rowCount } = await req.db.query(
-        `DELETE FROM hmg.ticket_tags WHERE ticket_number = $1 AND tag = $2`,
+        `DELETE FROM ticket_tags WHERE ticket_number = $1 AND tag = $2`,
         [tn, tag]
       );
       return rowCount ? reply.code(204).send() : reply.code(404).send({ error: 'Vínculo não encontrado' });
