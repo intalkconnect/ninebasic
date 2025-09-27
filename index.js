@@ -29,7 +29,8 @@ import campaignsRoutes     from './routes/campaigns.js';
 import billingRoutes       from './routes/billing.js';
 import tracertRoutes       from './routes/tracertRoutes.js';
 import realtimeRoutes      from "./routes/realtime.js";
-
+import customerTagsRoutes from './routes/customerTags.js';
+import ticketTagsRoutes from './routes/ticketTags.js';
 // novos
 import whatsappRoutes      from './routes/whatsapp.js';
 import telegramRoutes      from './routes/telegram.js';
@@ -130,6 +131,8 @@ async function buildServer() {
     api.register(usersRoutes,         { prefix: '/api/v1/users' });
     api.register(campaignsRoutes,     { prefix: '/api/v1/campaigns' });
     api.register(billingRoutes,       { prefix: '/api/v1/billing' });
+    api.register(customerTagsRoutes,  { prefix: '/api/v1/tags' });
+    api.register(ticketTagsRoutes,    { prefix: '/api/v1/tags' });
 
 
     // novos
@@ -156,6 +159,7 @@ async function start() {
 }
 
 start();
+
 
 
 
