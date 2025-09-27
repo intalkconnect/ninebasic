@@ -2,6 +2,17 @@ function isValidUserId(userId) {
   return /^[^@]+@[^@]+\.[^@]+$/.test(userId);
 }
 
+
+  function normalizeTag(raw) {
+    if (raw == null) return null;
+    const t = String(raw).trim().replace(/\s+/g, ' ');
+    if (!t) return null;
+    if (t.length > 40) return t.slice(0, 40);
+
+    if (/[^\S\r\n]*[\r\n]/.test(t)) return null;
+    return t;
+  }
+
 async function customersRoutes(fastify, options) {
 
   // GET /clientes?page=&page_size=&q=
@@ -192,20 +203,6 @@ async function customersRoutes(fastify, options) {
     }
   });
 
-    /* =========================
-     TAGS DO CLIENTE (clientes)
-     ========================= */
-
-  // normalizador/validador de tag (mínimo 1, máximo 40, sem quebras de linha)
-  function normalizeTag(raw) {
-    if (raw == null) return null;
-    const t = String(raw).trim().replace(/\s+/g, ' ');
-    if (!t) return null;
-    if (t.length > 40) return t.slice(0, 40);
-    // evita quebras/controle
-    if (/[^\S\r\n]*[\r\n]/.test(t)) return null;
-    return t;
-  }
 
   // GET /clientes/:user_id/tags -> { user_id, tags: [] }
   fastify.get('/:user_id/tags', async (req, reply) => {
