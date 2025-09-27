@@ -191,6 +191,145 @@ async function customersRoutes(fastify, options) {
       });
     }
   });
+
+    /* =========================
+     TAGS DO CLIENTE (clientes)
+     ========================= */
+
+  // normalizador/validador de tag (mínimo 1, máximo 40, sem quebras de linha)
+  function normalizeTag(raw) {
+    if (raw == null) return null;
+    const t = String(raw).trim().replace(/\s+/g, ' ');
+    if (!t) return null;
+    if (t.length > 40) return t.slice(0, 40);
+    // evita quebras/controle
+    if (/[^\S\r\n]*[\r\n]/.test(t)) return null;
+    return t;
+  }
+
+  // GET /clientes/:user_id/tags -> { user_id, tags: [] }
+  fastify.get('/:user_id/tags', async (req, reply) => {
+    const { user_id } = req.params;
+
+    if (!isValidUserId(user_id)) {
+      return reply.code(400).send({ error: 'Formato de user_id inválido. Use: usuario@dominio' });
+    }
+
+    try {
+      // garante que o cliente existe
+      const cRes = await req.db.query(`SELECT 1 FROM clientes WHERE user_id = $1`, [user_id]);
+      if (cRes.rowCount === 0) return reply.code(404).send({ error: 'Cliente não encontrado' });
+
+      const { rows } = await req.db.query(
+        `SELECT tag FROM customer_tags WHERE user_id = $1 ORDER BY tag ASC`,
+        [user_id]
+      );
+      return reply.send({ user_id, tags: rows.map(r => r.tag) });
+    } catch (err) {
+      req.log.error({ err }, 'Erro em GET /clientes/:user_id/tags');
+      return reply.code(500).send({ error: 'Erro interno ao listar tags do cliente' });
+    }
+  });
+
+  // PUT /clientes/:user_id/tags { tags: string[] } -> substitui o conjunto
+  fastify.put('/:user_id/tags', async (req, reply) => {
+    const { user_id } = req.params;
+    const { tags } = req.body || {};
+
+    if (!isValidUserId(user_id)) {
+      return reply.code(400).send({ error: 'Formato de user_id inválido. Use: usuario@dominio' });
+    }
+    if (!Array.isArray(tags)) {
+      return reply.code(400).send({ error: 'Payload inválido. Envie { tags: string[] }' });
+    }
+
+    // normaliza e remove duplicadas
+    const norm = [...new Set(tags.map(normalizeTag).filter(Boolean))];
+
+    const client = req.db;
+    let inTx = false;
+    try {
+      // garante cliente existente
+      const cRes = await client.query(`SELECT 1 FROM clientes WHERE user_id = $1`, [user_id]);
+      if (cRes.rowCount === 0) return reply.code(404).send({ error: 'Cliente não encontrado' });
+
+      await client.query('BEGIN'); inTx = true;
+
+      // apaga todas e insere as novas (conjunto substitutivo)
+      await client.query(`DELETE FROM customer_tags WHERE user_id = $1`, [user_id]);
+
+      if (norm.length) {
+        const values = norm.map((_, i) => `($1, $${i + 2})`).join(', ');
+        await client.query(
+          `INSERT INTO customer_tags (user_id, tag) VALUES ${values} ON CONFLICT DO NOTHING`,
+          [user_id, ...norm]
+        );
+      }
+
+      await client.query('COMMIT'); inTx = false;
+      return reply.send({ ok: true, user_id, tags: norm });
+    } catch (err) {
+      if (inTx) { try { await req.db.query('ROLLBACK'); } catch {} }
+      req.log.error({ err }, 'Erro em PUT /clientes/:user_id/tags');
+      return reply.code(500).send({ error: 'Erro ao salvar tags do cliente' });
+    }
+  });
+
+  // POST /clientes/:user_id/tags { tag: string } -> adiciona uma tag
+  fastify.post('/:user_id/tags', async (req, reply) => {
+    const { user_id } = req.params;
+    const { tag } = req.body || {};
+    const t = normalizeTag(tag);
+
+    if (!isValidUserId(user_id)) {
+      return reply.code(400).send({ error: 'Formato de user_id inválido. Use: usuario@dominio' });
+    }
+    if (!t) {
+      return reply.code(400).send({ error: 'Tag inválida' });
+    }
+
+    try {
+      const cRes = await req.db.query(`SELECT 1 FROM clientes WHERE user_id = $1`, [user_id]);
+      if (cRes.rowCount === 0) return reply.code(404).send({ error: 'Cliente não encontrado' });
+
+      await req.db.query(
+        `INSERT INTO customer_tags (user_id, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [user_id, t]
+      );
+      return reply.code(201).send({ ok: true, user_id, tag: t });
+    } catch (err) {
+      req.log.error({ err }, 'Erro em POST /clientes/:user_id/tags');
+      return reply.code(500).send({ error: 'Erro ao adicionar tag do cliente' });
+    }
+  });
+
+  // DELETE /clientes/:user_id/tags/:tag -> remove uma tag
+  fastify.delete('/:user_id/tags/:tag', async (req, reply) => {
+    const { user_id, tag } = req.params;
+    const t = normalizeTag(tag);
+
+    if (!isValidUserId(user_id)) {
+      return reply.code(400).send({ error: 'Formato de user_id inválido. Use: usuario@dominio' });
+    }
+    if (!t) {
+      return reply.code(400).send({ error: 'Tag inválida' });
+    }
+
+    try {
+      const { rowCount } = await req.db.query(
+        `DELETE FROM customer_tags WHERE user_id = $1 AND tag = $2`,
+        [user_id, t]
+      );
+      if (rowCount === 0) {
+        return reply.code(404).send({ error: 'Tag não encontrada para este cliente' });
+      }
+      return reply.code(204).send();
+    } catch (err) {
+      req.log.error({ err }, 'Erro em DELETE /clientes/:user_id/tags/:tag');
+      return reply.code(500).send({ error: 'Erro ao remover tag do cliente' });
+    }
+  });
+
 }
 
 export default customersRoutes;
