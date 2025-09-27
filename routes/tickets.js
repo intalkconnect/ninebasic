@@ -19,6 +19,17 @@ async function ensureAMQPIncoming() {
   return amqpChIncoming;
 }
 
+  // helper: valida e resolve ticket_number existente
+  async function ensureTicketExistsByNumber(db, ticket_number) {
+    const num = String(ticket_number || '').trim();
+    if (!/^\d+$/.test(num)) return null;
+    const r = await db.query(
+      `SELECT ticket_number FROM tickets WHERE ticket_number = $1`,
+      [num]
+    );
+    return r.rowCount ? num : null;
+  }
+
 async function ticketsRoutes(fastify, options) {
   // Validação simples do formato do user_id
   function isValidUserId(user_id) {
@@ -910,6 +921,121 @@ fastify.get('/history', async (req, reply) => {
     return reply.code(500).send({ error: 'Erro interno ao listar histórico' });
   }
 });
+
+    /* =======================
+     TAGS DO TICKET (tickets)
+     ======================= */
+
+  function normalizeTicketTag(raw) {
+    if (raw == null) return null;
+    const t = String(raw).trim().replace(/\s+/g, ' ');
+    if (!t) return null;
+    if (t.length > 40) return t.slice(0, 40);
+    if (/[^\S\r\n]*[\r\n]/.test(t)) return null;
+    return t;
+  }
+
+  // GET /tickets/:ticket_number/tags
+  fastify.get('/:ticket_number/tags', async (req, reply) => {
+    const { ticket_number } = req.params;
+
+    try {
+      const tn = await ensureTicketExistsByNumber(req.db, ticket_number);
+      if (!tn) return reply.code(404).send({ error: 'Ticket não encontrado' });
+
+      const { rows } = await req.db.query(
+        `SELECT tag FROM ticket_tags WHERE ticket_number = $1 ORDER BY tag ASC`,
+        [tn]
+      );
+      return reply.send({ ticket_number: tn, tags: rows.map(r => r.tag) });
+    } catch (err) {
+      req.log.error({ err }, 'Erro em GET /tickets/:ticket_number/tags');
+      return reply.code(500).send({ error: 'Erro interno ao listar tags do ticket' });
+    }
+  });
+
+  // PUT /tickets/:ticket_number/tags { tags: string[] } (substitui)
+  fastify.put('/:ticket_number/tags', async (req, reply) => {
+    const { ticket_number } = req.params;
+    const { tags } = req.body || {};
+
+    if (!Array.isArray(tags)) {
+      return reply.code(400).send({ error: 'Payload inválido. Envie { tags: string[] }' });
+    }
+
+    try {
+      const tn = await ensureTicketExistsByNumber(req.db, ticket_number);
+      if (!tn) return reply.code(404).send({ error: 'Ticket não encontrado' });
+
+      const norm = [...new Set(tags.map(normalizeTicketTag).filter(Boolean))];
+
+      await req.db.query('BEGIN');
+      await req.db.query(`DELETE FROM ticket_tags WHERE ticket_number = $1`, [tn]);
+
+      if (norm.length) {
+        const values = norm.map((_, i) => `($1, $${i + 2})`).join(', ');
+        await req.db.query(
+          `INSERT INTO ticket_tags (ticket_number, tag) VALUES ${values} ON CONFLICT DO NOTHING`,
+          [tn, ...norm]
+        );
+      }
+      await req.db.query('COMMIT');
+
+      return reply.send({ ok: true, ticket_number: tn, tags: norm });
+    } catch (err) {
+      try { await req.db.query('ROLLBACK'); } catch {}
+      req.log.error({ err }, 'Erro em PUT /tickets/:ticket_number/tags');
+      return reply.code(500).send({ error: 'Erro ao salvar tags do ticket' });
+    }
+  });
+
+  // POST /tickets/:ticket_number/tags { tag: string } (adiciona)
+  fastify.post('/:ticket_number/tags', async (req, reply) => {
+    const { ticket_number } = req.params;
+    const { tag } = req.body || {};
+    const t = normalizeTicketTag(tag);
+
+    if (!t) return reply.code(400).send({ error: 'Tag inválida' });
+
+    try {
+      const tn = await ensureTicketExistsByNumber(req.db, ticket_number);
+      if (!tn) return reply.code(404).send({ error: 'Ticket não encontrado' });
+
+      await req.db.query(
+        `INSERT INTO ticket_tags (ticket_number, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [tn, t]
+      );
+      return reply.code(201).send({ ok: true, ticket_number: tn, tag: t });
+    } catch (err) {
+      req.log.error({ err }, 'Erro em POST /tickets/:ticket_number/tags');
+      return reply.code(500).send({ error: 'Erro ao adicionar tag do ticket' });
+    }
+  });
+
+  // DELETE /tickets/:ticket_number/tags/:tag
+  fastify.delete('/:ticket_number/tags/:tag', async (req, reply) => {
+    const { ticket_number, tag } = req.params;
+    const t = normalizeTicketTag(tag);
+
+    if (!t) return reply.code(400).send({ error: 'Tag inválida' });
+
+    try {
+      const tn = await ensureTicketExistsByNumber(req.db, ticket_number);
+      if (!tn) return reply.code(404).send({ error: 'Ticket não encontrado' });
+
+      const { rowCount } = await req.db.query(
+        `DELETE FROM ticket_tags WHERE ticket_number = $1 AND tag = $2`,
+        [tn, t]
+      );
+      if (rowCount === 0) return reply.code(404).send({ error: 'Tag não encontrada para este ticket' });
+
+      return reply.code(204).send();
+    } catch (err) {
+      req.log.error({ err }, 'Erro em DELETE /tickets/:ticket_number/tags/:tag');
+      return reply.code(500).send({ error: 'Erro ao remover tag do ticket' });
+    }
+  });
+
 
 }
 
