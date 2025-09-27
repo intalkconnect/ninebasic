@@ -1,7 +1,6 @@
 // routes/filas.js
 async function queuesRoutes(fastify, options) {
-  // Helpers --------------------------------------------------------------
-
+  // ---------------- Helpers ----------------
   function normalizeHexColor(input) {
     if (!input) return null;
     let c = String(input).trim();
@@ -30,14 +29,14 @@ async function queuesRoutes(fastify, options) {
     return hslToHex(h, s, l);
   }
 
-  // ➕ Criar nova fila (ativa sempre TRUE; descricao/color opcionais)
+  // ---------------- Rotas existentes ----------------
+
+  // ➕ Criar fila
   fastify.post('/', async (req, reply) => {
     const { nome, descricao = null, color = null } = req.body || {};
     if (!nome || !String(nome).trim()) {
       return reply.code(400).send({ error: 'Nome da fila é obrigatório' });
     }
-
-    // Ignora qualquer tentativa de setar "ativa" vindo do cliente
     const finalColor = normalizeHexColor(color) || randomPastelHex();
 
     try {
@@ -52,7 +51,6 @@ async function queuesRoutes(fastify, options) {
       return reply.send(rows[0]);
     } catch (err) {
       fastify.log.error(err, 'Erro ao criar fila');
-      // 23505 = unique_violation (caso exista unique em "nome")
       if (err.code === '23505') {
         return reply.code(409).send({ error: 'Já existe uma fila com esse nome.' });
       }
@@ -93,8 +91,6 @@ async function queuesRoutes(fastify, options) {
   // 📥 Listar filas
   fastify.get('/', async (req, reply) => {
     try {
-      // se quiser listar apenas ativas, troque pela linha comentada:
-      // const { rows } = await req.db.query('SELECT * FROM filas WHERE ativa = TRUE ORDER BY nome');
       const { rows } = await req.db.query('SELECT * FROM filas ORDER BY nome');
       return reply.send(rows);
     } catch (err) {
@@ -146,6 +142,98 @@ async function queuesRoutes(fastify, options) {
     } catch (err) {
       fastify.log.error(err);
       return reply.code(500).send({ error: 'Erro ao buscar permissões' });
+    }
+  });
+
+  // ---------------- Novas rotas p/ QueueForm ----------------
+
+  // 👁️ GET /queues/:id  (aceita número ou nome)
+  fastify.get('/:id', async (req, reply) => {
+    const raw = String(req.params?.id || '').trim();
+    if (!raw) return reply.code(400).send({ error: 'Parâmetro id é obrigatório' });
+
+    // decide pelo tipo do parâmetro
+    const isNumeric = /^[0-9]+$/.test(raw);
+    const whereSql  = isNumeric ? 'id = $1' : 'nome = $1';
+    const val       = isNumeric ? Number(raw) : raw;
+
+    try {
+      const { rows } = await req.db.query(
+        `SELECT id, nome, descricao, ativa, color FROM filas WHERE ${whereSql} LIMIT 1`,
+        [val]
+      );
+      const row = rows?.[0];
+      if (!row) return reply.code(404).send({ error: 'Fila não encontrada' });
+      // front aceita {data} ou o objeto direto — aqui devolvemos { data }
+      return reply.send({ data: row });
+    } catch (err) {
+      fastify.log.error(err, 'GET /queues/:id');
+      return reply.code(500).send({ error: 'Erro ao obter fila' });
+    }
+  });
+
+  // ✏️ PUT /queues/:id  (update parcial; ignora ativa, normaliza color)
+  fastify.put('/:id', async (req, reply) => {
+    const raw = String(req.params?.id || '').trim();
+    if (!raw) return reply.code(400).send({ error: 'Parâmetro id é obrigatório' });
+
+    const isNumeric = /^[0-9]+$/.test(raw);
+    const whereSql  = isNumeric ? 'id = $1' : 'nome = $1';
+    const whereVal  = isNumeric ? Number(raw) : raw;
+
+    const { nome, descricao, color } = req.body || {};
+
+    // Monta SET dinâmico
+    const sets = [];
+    const vals = [];
+    let i = 1;
+
+    if (typeof nome !== 'undefined') {
+      const v = String(nome || '').trim();
+      if (!v) return reply.code(400).send({ error: 'Nome da fila não pode ser vazio' });
+      sets.push(`nome = $${++i}`);
+      vals.push(v);
+    }
+    if (typeof descricao !== 'undefined') {
+      const v = String(descricao || '').trim();
+      sets.push(`descricao = $${++i}`);
+      vals.push(v || null);
+    }
+    if (typeof color !== 'undefined') {
+      const norm = normalizeHexColor(color);
+      // se vier vazio/invalid, zera; se válido, usa; se nem veio, mantém
+      sets.push(`color = $${++i}`);
+      vals.push(norm || null);
+    }
+
+    if (!sets.length) {
+      return reply.code(400).send({ error: 'Nada para atualizar' });
+    }
+
+    try {
+      // primeiro garante que existe
+      const r0 = await req.db.query(
+        `SELECT id FROM filas WHERE ${whereSql} LIMIT 1`,
+        [whereVal]
+      );
+      const found = r0.rows?.[0]?.id;
+      if (!found) return reply.code(404).send({ error: 'Fila não encontrada' });
+
+      // aplica update
+      const sql = `
+        UPDATE filas
+           SET ${sets.join(', ')}
+         WHERE id = $1
+         RETURNING id, nome, descricao, ativa, color
+      `;
+      const { rows } = await req.db.query(sql, [found, ...vals]);
+      return reply.send({ data: rows[0] });
+    } catch (err) {
+      fastify.log.error(err, 'PUT /queues/:id');
+      if (err.code === '23505') {
+        return reply.code(409).send({ error: 'Já existe uma fila com esse nome.' });
+      }
+      return reply.code(500).send({ error: 'Erro ao atualizar fila' });
     }
   });
 }
