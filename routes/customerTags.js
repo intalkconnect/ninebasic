@@ -140,60 +140,57 @@ fastify.delete('/customer/catalog/:tag', async (req, reply) => {
 
   const isDry = String(dry_run).toLowerCase() === 'true';
 
-  const client = await req.db.connect(); // pg.Pool
   try {
-    // existe no catálogo?
-    const rCat = await client.query(
+    // Se não existir no catálogo, 404 logo
+    const chk = await req.db.query(
       'SELECT 1 FROM customer_tag_catalog WHERE tag = $1 LIMIT 1',
       [key]
     );
-    if (!rCat.rowCount) {
+    if (!chk.rowCount) {
       return reply.code(404).send({ error: 'Tag não encontrada no catálogo' });
     }
 
-    // quantos vínculos existem?
-    const rCount = await client.query(
-      'SELECT COUNT(*)::bigint AS n FROM customer_tags WHERE tag = $1',
-      [key]
-    );
-    const links = Number(rCount.rows?.[0]?.n || 0);
-
     if (isDry) {
+      // Apenas contabiliza, não remove
+      const c1 = await req.db.query(
+        'SELECT COUNT(*)::bigint AS n FROM customer_tags WHERE tag = $1',
+        [key]
+      );
       return reply.send({
         tag: key,
-        would_remove_from_customers: links,
+        would_remove_from_customers: Number(c1.rows?.[0]?.n || 0),
         would_remove_from_catalog: 1
       });
     }
 
-    await client.query('BEGIN');
+    // Remoção em cascata numa única instrução (atômica)
+    const sql = `
+      WITH del_links AS (
+        DELETE FROM customer_tags WHERE tag = $1
+        RETURNING 1
+      ),
+      del_cat AS (
+        DELETE FROM customer_tag_catalog WHERE tag = $1
+        RETURNING 1
+      )
+      SELECT
+        (SELECT COUNT(*)::int FROM del_links) AS removed_from_customers,
+        (SELECT COUNT(*)::int FROM del_cat)   AS removed_from_catalog
+    `;
+    const { rows } = await req.db.query(sql, [key]);
+    const res = rows?.[0] || { removed_from_customers: 0, removed_from_catalog: 0 };
 
-    const rDelLinks = await client.query(
-      'DELETE FROM customer_tags WHERE tag = $1',
-      [key]
-    );
+    // Se por algum motivo nada saiu do catálogo (concorrência), trate como 404
+    if (!res.removed_from_catalog) {
+      return reply.code(404).send({ error: 'Tag não encontrada (já removida?)' });
+    }
 
-    const rDelCat = await client.query(
-      'DELETE FROM customer_tag_catalog WHERE tag = $1',
-      [key]
-    );
-
-    await client.query('COMMIT');
-
-    return reply.send({
-      tag: key,
-      removed_from_customers: rDelLinks.rowCount || 0,
-      removed_from_catalog: rDelCat.rowCount || 0
-    });
+    return reply.send({ tag: key, ...res });
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch {}
-    req.log.error({ err }, 'DELETE /tags/customer/catalog/:tag (cascade)');
+    req.log.error({ err }, 'DELETE /tags/customer/catalog/:tag (cte-cascade)');
     return reply.code(500).send({ error: 'Erro ao remover tag do catálogo (cascade)' });
-  } finally {
-    client.release();
   }
 });
-
 
   // ============================
   // Vínculo cliente ⇄ tag (customer_tags)
