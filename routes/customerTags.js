@@ -132,31 +132,68 @@ async function customerTagsRoutes(fastify) {
     }
   });
 
-  // DELETE /tags/customer/catalog/:tag
-  fastify.delete('/customer/catalog/:tag', async (req, reply) => {
-    const key = String(req.params?.tag || '').trim();
-    if (!key) return reply.code(400).send({ error: 'tag inválida' });
+  // DELETE /tags/customer/catalog/:tag?dry_run=true|false
+fastify.delete('/customer/catalog/:tag', async (req, reply) => {
+  const key = String(req.params?.tag || '').trim();
+  const { dry_run = 'false' } = req.query || {};
+  if (!key) return reply.code(400).send({ error: 'tag inválida' });
 
-    try {
-      // impede excluir se em uso (opcional; remova se quiser cascata lógica)
-      const rUse = await req.db.query(
-        `SELECT 1 FROM customer_tags WHERE tag = $1 LIMIT 1`,
-        [key]
-      );
-      if (rUse.rowCount) {
-        return reply.code(409).send({ error: 'Tag está em uso por clientes — remova os vínculos antes' });
-      }
+  const isDry = String(dry_run).toLowerCase() === 'true';
 
-      const { rowCount } = await req.db.query(
-        `DELETE FROM customer_tag_catalog WHERE tag = $1`,
-        [key]
-      );
-      return rowCount ? reply.code(204).send() : reply.code(404).send({ error: 'Tag não encontrada' });
-    } catch (err) {
-      req.log.error({ err }, 'DELETE /tags/customer/catalog/:tag');
-      return reply.code(500).send({ error: 'Erro ao remover tag do catálogo' });
+  const client = await req.db.connect(); // pg.Pool
+  try {
+    // existe no catálogo?
+    const rCat = await client.query(
+      'SELECT 1 FROM customer_tag_catalog WHERE tag = $1 LIMIT 1',
+      [key]
+    );
+    if (!rCat.rowCount) {
+      return reply.code(404).send({ error: 'Tag não encontrada no catálogo' });
     }
-  });
+
+    // quantos vínculos existem?
+    const rCount = await client.query(
+      'SELECT COUNT(*)::bigint AS n FROM customer_tags WHERE tag = $1',
+      [key]
+    );
+    const links = Number(rCount.rows?.[0]?.n || 0);
+
+    if (isDry) {
+      return reply.send({
+        tag: key,
+        would_remove_from_customers: links,
+        would_remove_from_catalog: 1
+      });
+    }
+
+    await client.query('BEGIN');
+
+    const rDelLinks = await client.query(
+      'DELETE FROM customer_tags WHERE tag = $1',
+      [key]
+    );
+
+    const rDelCat = await client.query(
+      'DELETE FROM customer_tag_catalog WHERE tag = $1',
+      [key]
+    );
+
+    await client.query('COMMIT');
+
+    return reply.send({
+      tag: key,
+      removed_from_customers: rDelLinks.rowCount || 0,
+      removed_from_catalog: rDelCat.rowCount || 0
+    });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch {}
+    req.log.error({ err }, 'DELETE /tags/customer/catalog/:tag (cascade)');
+    return reply.code(500).send({ error: 'Erro ao remover tag do catálogo (cascade)' });
+  } finally {
+    client.release();
+  }
+});
+
 
   // ============================
   // Vínculo cliente ⇄ tag (customer_tags)
