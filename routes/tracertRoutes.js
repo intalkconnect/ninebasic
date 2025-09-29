@@ -184,8 +184,7 @@ fastify.get('/customers/:userId', async (req, reply) => {
     }
     const base = baseResult.rows[0];
 
-    // Journey: corta no último reset e começa no 1º bloco "start" após o reset.
-    // Não exibe o próprio system_reset.
+    // Journey (do último reset em diante; começa no 1º START pós-reset; oculta 'system_reset')
     const journeySql = `
       WITH last_reset AS (
         SELECT MAX(entered_at) AS ts
@@ -210,16 +209,12 @@ fastify.get('/customers/:userId', async (req, reply) => {
          AND bt.entered_at = vsd.entered_at
          AND (bt.visible IS NULL OR bt.visible = TRUE)
         WHERE vsd.user_id = $1
-          AND (
-            (SELECT ts FROM last_reset) IS NULL
-            OR vsd.entered_at >= (SELECT ts FROM last_reset)
-          )
+          AND ( (SELECT ts FROM last_reset) IS NULL
+                OR vsd.entered_at >= (SELECT ts FROM last_reset) )
       ),
       start_from AS (
         SELECT COALESCE(
-          -- 1º START após o reset (se existir)
           (SELECT MIN(entered_at) FROM dw WHERE LOWER(COALESCE(stage_type,'')) = 'start'),
-          -- senão, o próprio instante do reset (ou NULL se nunca resetou)
           (SELECT ts FROM last_reset)
         ) AS ts
       )
@@ -230,19 +225,14 @@ fastify.get('/customers/:userId', async (req, reply) => {
         d.duration_sec,
         d.stage_type AS type,
         d.vars,
-
-        -- prévia: última IN e OUT dentro do intervalo do dwell
         (SELECT content FROM messages m
           WHERE m.user_id = d.user_id AND m.direction='incoming'
             AND m."timestamp" >= d.entered_at AND m."timestamp" <= d.left_at
           ORDER BY m."timestamp" DESC LIMIT 1)          AS last_incoming,
-
         (SELECT content FROM messages m
           WHERE m.user_id = d.user_id AND m.direction='outgoing'
             AND m."timestamp" >= d.entered_at AND m."timestamp" <= d.left_at
           ORDER BY m."timestamp" DESC LIMIT 1)          AS last_outgoing,
-
-        -- flag de erro (validação falhou OU metadata.error OU system)
         EXISTS (
           SELECT 1 FROM messages m
           WHERE m.user_id = d.user_id
@@ -255,16 +245,25 @@ fastify.get('/customers/:userId', async (req, reply) => {
         )                                                AS has_error
       FROM dw d
       WHERE
-        -- começa no 1º START pós-reset (se houver) ou no próprio reset
         (SELECT ts FROM start_from) IS NULL OR d.entered_at >= (SELECT ts FROM start_from)
-        -- nunca mostra o próprio system_reset
         AND LOWER(COALESCE(d.stage_type,'')) <> 'system_reset'
       ORDER BY d.entered_at
     `;
     const journeyResult = await req.db.query(journeySql, [userId]);
     const journey = journeyResult.rows;
 
-    // Dwell (diagnóstico) da etapa atual
+    // Carimbo do último reset (para exibir no topo, se quiser)
+    const lastResetSql = `
+      SELECT MAX(entered_at) AS last_reset_at
+      FROM bot_transitions
+      WHERE user_id = $1
+        AND block_type = 'system_reset'
+        AND (visible IS TRUE OR visible IS NULL)
+    `;
+    const lastResetRes = await req.db.query(lastResetSql, [userId]);
+    const last_reset_at = lastResetRes.rows[0]?.last_reset_at ?? null;
+
+    // Dwell atual
     const dwellSql = `
       SELECT
         block,
@@ -284,16 +283,17 @@ fastify.get('/customers/:userId', async (req, reply) => {
     const dwellResult = await req.db.query(dwellSql, [userId, base.current_stage]);
     const dwell = dwellResult.rows[0] || null;
 
-    // Vars atuais da sessão (aba "Variáveis (sessão)")
+    // Vars atuais de sessão
     const sessSql = `SELECT vars FROM sessions WHERE user_id = $1 LIMIT 1`;
     const sessRes = await req.db.query(sessSql, [userId]);
     const session_vars = sessRes.rows[0]?.vars ?? null;
 
     return reply.send({
       ...base,
-      journey,      // itens já com .type e .vars por transição/etapa
+      last_reset_at, // ← só o horário do último reset
+      journey,
       dwell,
-      session_vars, // estado atual da sessão
+      session_vars,
     });
 
   } catch (error) {
@@ -308,6 +308,7 @@ fastify.get('/customers/:userId', async (req, reply) => {
 
 
 
+
   /**
    * POST /tracert/customers/:userId/reset
    * Reset da sessão - com schema para permitir body vazio
@@ -316,14 +317,10 @@ fastify.get('/customers/:userId', async (req, reply) => {
   try {
     console.log('=== INICIANDO POST /reset ===');
     const { userId } = req.params;
-    const { reason } = req.body || {};
-    
-    console.log('Reset for user:', userId);
-    console.log('Reset reason:', reason);
 
     const now = new Date().toISOString();
 
-    // 1) Buscar flow ativo
+    // 1) Flow ativo
     const flowResult = await req.db.query('SELECT id, data FROM flows WHERE active = true LIMIT 1');
     const activeFlow = flowResult.rows[0];
     if (!activeFlow) {
@@ -331,98 +328,77 @@ fastify.get('/customers/:userId', async (req, reply) => {
     }
 
     const startBlock = activeFlow.data?.start || 'onboarding';
-    console.log('Active flow:', activeFlow.id, 'Start block:', startBlock);
-
-    // 2) Buscar label do bloco inicial do flow
     let startBlockLabel = 'Início';
     try {
       if (activeFlow.data?.blocks && activeFlow.data.blocks[startBlock]) {
         startBlockLabel = activeFlow.data.blocks[startBlock].label || startBlock;
       }
-    } catch (e) {
-      console.log('Erro ao buscar label do bloco inicial, usando padrão:', e.message);
-    }
+    } catch {}
 
-    // 3) Marcar todas as transições anteriores como não visíveis
-    const hideSql = `
-      UPDATE bot_transitions 
-      SET visible = false 
-      WHERE user_id = $1 AND (visible IS NULL OR visible = true)
-    `;
-    console.log('Hiding previous transitions');
-    await req.db.query(hideSql, [userId]);
-    console.log('Previous transitions hidden');
+    // 2) Oculta transições antigas
+    await req.db.query(
+      `UPDATE bot_transitions SET visible = false WHERE user_id = $1 AND (visible IS NULL OR visible = true)`,
+      [userId]
+    );
 
-    // 4) Inserir nova transição de reset (visível)
+    // 3) Insere uma transição "system_reset" só como LOG com o horário
     const insertTransitionSql = `
       INSERT INTO bot_transitions (
-        user_id, channel, flow_id, block_id, block_label, block_type, 
+        user_id, channel, flow_id, block_id, block_label, block_type,
         entered_at, vars, visible
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, true)
       RETURNING id
     `;
-    
-    console.log('Inserting reset transition');
-    const transitionResult = await req.db.query(insertTransitionSql, [
+    const varsJson = JSON.stringify({ last_reset_at: now });
+    await req.db.query(insertTransitionSql, [
       userId,
       null,
       activeFlow.id,
-      startBlock,
+      startBlock,          // mantemos referência do bloco inicial vigente
       startBlockLabel,
       'system_reset',
       now,
-      JSON.stringify({ 
-        reset_by: 'system',
-        reset_at: now,
-        reset_reason: reason || 'manual_reset'
-      })
+      varsJson
     ]);
-    console.log('Reset transition inserted:', transitionResult.rows[0]?.id);
 
-    // 5) Atualizar sessão para o bloco inicial
+    // 4) Reposiciona a sessão no bloco inicial e guarda apenas o carimbo
     const sessionSql = `
       INSERT INTO sessions (user_id, current_block, last_flow_id, vars, updated_at)
       VALUES ($1, $2, $3, $4, NOW())
       ON CONFLICT (user_id)
-      DO UPDATE SET 
+      DO UPDATE SET
         current_block = EXCLUDED.current_block,
-        last_flow_id = EXCLUDED.last_flow_id,
-        vars = EXCLUDED.vars,
-        updated_at = EXCLUDED.updated_at
+        last_flow_id  = EXCLUDED.last_flow_id,
+        vars          = EXCLUDED.vars,
+        updated_at    = EXCLUDED.updated_at
     `;
-
-    console.log('Updating session');
     await req.db.query(sessionSql, [
       userId,
       startBlock,
       activeFlow.id,
-      JSON.stringify({ 
+      JSON.stringify({
         last_reset_at: now,
-        current_block_label: startBlockLabel,
-        current_block_type: 'system_reset',
-        reset_reason: reason || 'manual_reset'
+        current_block_label: startBlockLabel
       })
     ]);
 
-    console.log('Reset completed successfully');
-
-    return reply.send({ 
-      ok: true, 
-      reset_at: now,
+    return reply.send({
+      ok: true,
+      last_reset_at: now,
       start_block: startBlock,
-      start_block_label: startBlockLabel,
-      reason: reason || 'manual_reset'
+      start_block_label: startBlockLabel
     });
 
   } catch (error) {
     console.error('Erro no reset:', error);
     fastify.log.error('Erro ao resetar:', error);
-    return reply.code(500).send({ 
+    return reply.code(500).send({
       error: 'Falha ao resetar sessão',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
+
 
   /**
    * GET /tracert/metrics
