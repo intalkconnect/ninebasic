@@ -186,56 +186,65 @@ fastify.get('/customers/:userId', async (req, reply) => {
 
     // Journey (com type + prévias + flag erro + VARS da transição)
     const journeySql = `
-      WITH j AS (
-        SELECT
-          vsd.user_id,
-          vsd.block         AS stage,
-          vsd.entered_at,
-          vsd.left_at,
-          vsd.duration_sec,
+      WITH last_reset AS (
+        SELECT MAX(entered_at) AS ts
+        FROM bot_transitions
+        WHERE user_id = $1
+          AND block_type = 'system_reset'
+          AND (visible IS TRUE OR visible IS NULL)
+      ),
+      j AS (
+         SELECT
+           vsd.user_id,
+           vsd.block         AS stage,
+           vsd.entered_at,
+          COALESCE(vsd.left_at, NOW()) AS left_at,
+           vsd.duration_sec,
           bt.block_type     AS stage_type,
-          bt.vars           AS vars     -- <<< AQUI: variáveis capturadas na transição
-        FROM v_bot_stage_dwells vsd
-        LEFT JOIN bot_transitions bt
-          ON bt.user_id = vsd.user_id
-         AND COALESCE(bt.block_label, bt.block_id) = vsd.block
-         AND bt.entered_at = vsd.entered_at
-         AND (bt.visible IS NULL OR bt.visible = true)
+           bt.vars           AS vars
+         FROM v_bot_stage_dwells vsd
+         LEFT JOIN bot_transitions bt
+           ON bt.user_id = vsd.user_id
+          AND COALESCE(bt.block_label, bt.block_id) = vsd.block
+          AND bt.entered_at = vsd.entered_at
+          AND (bt.visible IS NULL OR bt.visible = true)
         WHERE vsd.user_id = $1
-        ORDER BY vsd.entered_at
-      )
-      SELECT
-        j.stage,
-        j.entered_at,
-        j.left_at,
-        j.duration_sec,
-        j.stage_type AS type,
-        j.vars,  -- <<< fica NULL se não houve registro de transição visível
+          AND (
+            (SELECT ts FROM last_reset) IS NULL
+            OR vsd.entered_at >= (SELECT ts FROM last_reset)
+          )
+         ORDER BY vsd.entered_at
+       )
+       SELECT
+         j.stage,
+         j.entered_at,
+         j.left_at,
+         j.duration_sec,
+         j.stage_type AS type,
+         j.vars,
 
-        -- prévia: última IN e OUT dentro do intervalo
-        (SELECT content FROM messages m
-          WHERE m.user_id = j.user_id AND m.direction='incoming'
+         (SELECT content FROM messages m
+           WHERE m.user_id = j.user_id AND m.direction='incoming'
             AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
-          ORDER BY m."timestamp" DESC LIMIT 1)          AS last_incoming,
+           ORDER BY m."timestamp" DESC LIMIT 1)          AS last_incoming,
 
-        (SELECT content FROM messages m
-          WHERE m.user_id = j.user_id AND m.direction='outgoing'
+         (SELECT content FROM messages m
+           WHERE m.user_id = j.user_id AND m.direction='outgoing'
             AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
-          ORDER BY m."timestamp" DESC LIMIT 1)          AS last_outgoing,
+           ORDER BY m."timestamp" DESC LIMIT 1)          AS last_outgoing,
 
-        -- flag de erro (validação falhou OU system_reset ou metadata.error)
-        EXISTS (
-          SELECT 1 FROM messages m
-          WHERE m.user_id = j.user_id
-            AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
-            AND (
-              (m.metadata ? 'validation' AND m.metadata->>'validation' = 'fail')
-              OR (m.metadata ? 'error')
-              OR (m.direction='system')
-            )
-        )                                                AS has_error
-      FROM j
-    `;
+         EXISTS (
+           SELECT 1 FROM messages m
+           WHERE m.user_id = j.user_id
+             AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
+             AND (
+               (m.metadata ? 'validation' AND m.metadata->>'validation' = 'fail')
+               OR (m.metadata ? 'error')
+               OR (m.direction='system')
+             )
+         )                                                AS has_error
+       FROM j
+     `;
     const journeyResult = await req.db.query(journeySql, [userId]);
     const journey = journeyResult.rows;
 
