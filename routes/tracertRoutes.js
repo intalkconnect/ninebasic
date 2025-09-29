@@ -184,7 +184,8 @@ fastify.get('/customers/:userId', async (req, reply) => {
     }
     const base = baseResult.rows[0];
 
-    // Journey (com type + prévias + flag erro + VARS da transição)
+    // Journey: corta no último reset e começa no 1º bloco "start" após o reset.
+    // Não exibe o próprio system_reset.
     const journeySql = `
       WITH last_reset AS (
         SELECT MAX(entered_at) AS ts
@@ -193,62 +194,77 @@ fastify.get('/customers/:userId', async (req, reply) => {
           AND block_type = 'system_reset'
           AND (visible IS TRUE OR visible IS NULL)
       ),
-      j AS (
-         SELECT
-           vsd.user_id,
-           vsd.block         AS stage,
-           vsd.entered_at,
-          COALESCE(vsd.left_at, NOW()) AS left_at,
-           vsd.duration_sec,
-          bt.block_type     AS stage_type,
-           bt.vars           AS vars
-         FROM v_bot_stage_dwells vsd
-         LEFT JOIN bot_transitions bt
-           ON bt.user_id = vsd.user_id
-          AND COALESCE(bt.block_label, bt.block_id) = vsd.block
-          AND bt.entered_at = vsd.entered_at
-          AND (bt.visible IS NULL OR bt.visible = true)
+      dw AS (
+        SELECT
+          vsd.user_id,
+          vsd.block                               AS stage,
+          vsd.entered_at,
+          COALESCE(vsd.left_at, NOW())            AS left_at,
+          vsd.duration_sec,
+          bt.block_type                            AS stage_type,
+          bt.vars                                  AS vars
+        FROM v_bot_stage_dwells vsd
+        LEFT JOIN bot_transitions bt
+          ON bt.user_id = vsd.user_id
+         AND COALESCE(bt.block_label, bt.block_id) = vsd.block
+         AND bt.entered_at = vsd.entered_at
+         AND (bt.visible IS NULL OR bt.visible = TRUE)
         WHERE vsd.user_id = $1
           AND (
             (SELECT ts FROM last_reset) IS NULL
             OR vsd.entered_at >= (SELECT ts FROM last_reset)
           )
-         ORDER BY vsd.entered_at
-       )
-       SELECT
-         j.stage,
-         j.entered_at,
-         j.left_at,
-         j.duration_sec,
-         j.stage_type AS type,
-         j.vars,
+      ),
+      start_from AS (
+        SELECT COALESCE(
+          -- 1º START após o reset (se existir)
+          (SELECT MIN(entered_at) FROM dw WHERE LOWER(COALESCE(stage_type,'')) = 'start'),
+          -- senão, o próprio instante do reset (ou NULL se nunca resetou)
+          (SELECT ts FROM last_reset)
+        ) AS ts
+      )
+      SELECT
+        d.stage,
+        d.entered_at,
+        d.left_at,
+        d.duration_sec,
+        d.stage_type AS type,
+        d.vars,
 
-         (SELECT content FROM messages m
-           WHERE m.user_id = j.user_id AND m.direction='incoming'
-            AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
-           ORDER BY m."timestamp" DESC LIMIT 1)          AS last_incoming,
+        -- prévia: última IN e OUT dentro do intervalo do dwell
+        (SELECT content FROM messages m
+          WHERE m.user_id = d.user_id AND m.direction='incoming'
+            AND m."timestamp" >= d.entered_at AND m."timestamp" <= d.left_at
+          ORDER BY m."timestamp" DESC LIMIT 1)          AS last_incoming,
 
-         (SELECT content FROM messages m
-           WHERE m.user_id = j.user_id AND m.direction='outgoing'
-            AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
-           ORDER BY m."timestamp" DESC LIMIT 1)          AS last_outgoing,
+        (SELECT content FROM messages m
+          WHERE m.user_id = d.user_id AND m.direction='outgoing'
+            AND m."timestamp" >= d.entered_at AND m."timestamp" <= d.left_at
+          ORDER BY m."timestamp" DESC LIMIT 1)          AS last_outgoing,
 
-         EXISTS (
-           SELECT 1 FROM messages m
-           WHERE m.user_id = j.user_id
-             AND m."timestamp" >= j.entered_at AND m."timestamp" <= j.left_at
-             AND (
-               (m.metadata ? 'validation' AND m.metadata->>'validation' = 'fail')
-               OR (m.metadata ? 'error')
-               OR (m.direction='system')
-             )
-         )                                                AS has_error
-       FROM j
-     `;
+        -- flag de erro (validação falhou OU metadata.error OU system)
+        EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.user_id = d.user_id
+            AND m."timestamp" >= d.entered_at AND m."timestamp" <= d.left_at
+            AND (
+              (m.metadata ? 'validation' AND m.metadata->>'validation' = 'fail')
+              OR (m.metadata ? 'error')
+              OR (m.direction='system')
+            )
+        )                                                AS has_error
+      FROM dw d
+      WHERE
+        -- começa no 1º START pós-reset (se houver) ou no próprio reset
+        (SELECT ts FROM start_from) IS NULL OR d.entered_at >= (SELECT ts FROM start_from)
+        -- nunca mostra o próprio system_reset
+        AND LOWER(COALESCE(d.stage_type,'')) <> 'system_reset'
+      ORDER BY d.entered_at
+    `;
     const journeyResult = await req.db.query(journeySql, [userId]);
     const journey = journeyResult.rows;
 
-    // Dwell (diagnóstico)
+    // Dwell (diagnóstico) da etapa atual
     const dwellSql = `
       SELECT
         block,
@@ -268,16 +284,16 @@ fastify.get('/customers/:userId', async (req, reply) => {
     const dwellResult = await req.db.query(dwellSql, [userId, base.current_stage]);
     const dwell = dwellResult.rows[0] || null;
 
-    // Vars atuais da sessão (úteis p/ modal aba "Variáveis")
+    // Vars atuais da sessão (aba "Variáveis (sessão)")
     const sessSql = `SELECT vars FROM sessions WHERE user_id = $1 LIMIT 1`;
     const sessRes = await req.db.query(sessSql, [userId]);
     const session_vars = sessRes.rows[0]?.vars ?? null;
 
     return reply.send({
       ...base,
-      journey,        // cada item já vem com .vars (jsonb) da transição daquela etapa
+      journey,      // itens já com .type e .vars por transição/etapa
       dwell,
-      session_vars,   // estado atual (jsonb) da sessão
+      session_vars, // estado atual da sessão
     });
 
   } catch (error) {
@@ -289,6 +305,7 @@ fastify.get('/customers/:userId', async (req, reply) => {
     });
   }
 });
+
 
 
   /**
