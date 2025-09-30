@@ -31,6 +31,7 @@ import tracertRoutes       from './routes/tracertRoutes.js';
 import realtimeRoutes      from "./routes/realtime.js";
 import customerTagsRoutes from './routes/customerTags.js';
 import ticketTagsRoutes from './routes/ticketTags.js';
+import queueRulesRoutes from './routes/queueRules.js';
 // novos
 import whatsappRoutes      from './routes/whatsapp.js';
 import telegramRoutes      from './routes/telegram.js';
@@ -122,6 +123,7 @@ async function buildServer() {
     api.register(settingsRoutes,      { prefix: '/api/v1/settings' });
     api.register(ticketsRoutes,       { prefix: '/api/v1/tickets' });
     api.register(queuesRoutes,        { prefix: '/api/v1/queues' });
+    api.register(queueRulesRoutes,    { prefix: '/queue-rules' });
     api.register(agentsRoutes,        { prefix: '/api/v1/agents' });
     api.register(quickRepliesRoutes,  { prefix: '/api/v1/quick-replies' });
     api.register(analyticsRoutes,     { prefix: '/api/v1/analytics' });
@@ -159,6 +161,7 @@ async function start() {
 }
 
 start();
+
 
 
 
