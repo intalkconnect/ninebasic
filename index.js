@@ -123,7 +123,7 @@ async function buildServer() {
     api.register(settingsRoutes,      { prefix: '/api/v1/settings' });
     api.register(ticketsRoutes,       { prefix: '/api/v1/tickets' });
     api.register(queuesRoutes,        { prefix: '/api/v1/queues' });
-    api.register(queueRulesRoutes,    { prefix: '/queue-rules' });
+    api.register(queueRulesRoutes,    { prefix: '/api/v1/queue-rules' });
     api.register(agentsRoutes,        { prefix: '/api/v1/agents' });
     api.register(quickRepliesRoutes,  { prefix: '/api/v1/quick-replies' });
     api.register(analyticsRoutes,     { prefix: '/api/v1/analytics' });
@@ -161,6 +161,7 @@ async function start() {
 }
 
 start();
+
 
 
 
