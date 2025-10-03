@@ -1,0 +1,71 @@
+version: "3.9"
+
+services:
+  endpoints:
+    image: node:20-alpine
+    container_name: basic-endpoints
+    environment:
+      NODE_ENV: production
+      PORT: 3101
+      # Postgres
+      DATABASE_URL: "postgres://postgres:Alice*321@postgres:5432"
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: postgres
+      PGUSER: postgres
+      PGPASSWORD: "Alice*321"
+      PG_SCHEMA: hmg
+
+      # RabbitMQ
+      AMQP_URL: amqp://guest:guest@rabbit:5672/
+      INCOMING_QUEUE: hmg.incoming
+      # OUTGOING_QUEUE: outgoing
+      # MinIO
+      MINIO_ENDPOINT: "https://bucket.dkdevs.com.br"
+      MINIO_ACCESS_KEY: "F8fuZbb0aA2GG3SBxEAP"
+      MINIO_SECRET_KEY: "rhMeg4DHPN0NagLg8TEEsnUUBj56Ki3eulIQFjuX"
+      MINIO_BUCKET: "bucket"
+
+      GRAPH_VERSION: v23.0 
+      META_APP_ID: "684947304155673" 
+      META_APP_SECRET: "5daeaff8d0447f7469f854b6082bb2d1" 
+      META_REDIRECT_URI: "" 
+      # se usou no front 
+      YOUR_BUSINESS_ID: "1678966149710129"
+      SYSTEM_USER_ID: "61576477112076" 
+      SYSTEM_USER_TOKEN: "EAAJu9LjBChkBPPQzp1vAOdNioRhJR7ZByNpTnZCETMjo68BLca6GUwRZBurgtE1bRHyE5OrTQ0TZBlIUH8TZCZCK4x6ivc7sRLC85F0u1FpMOjkdHUIWWhsQ562UiFZCsUzyjkWsZCGD4ZCHO04MiI2lcpMPw50rLGSd2D73uXvZALgn603FLzm4HkYJJ4Y3ZADgQZDZD" 
+      # SU 
+      SYSTEM_USER_ADMIN_TOKEN: "EAAJu9LjBChkBPPQzp1vAOdNioRhJR7ZByNpTnZCETMjo68BLca6GUwRZBurgtE1bRHyE5OrTQ0TZBlIUH8TZCZCK4x6ivc7sRLC85F0u1FpMOjkdHUIWWhsQ562UiFZCsUzyjkWsZCGD4ZCHO04MiI2lcpMPw50rLGSd2D73uXvZALgn603FLzm4HkYJJ4Y3ZADgQZDZD" # pode ser o mesmo
+      AUTH_API_BASE: "https://srv-auth.ninechat.com.br"
+      AUTH_API_TOKEN: ""
+      WEBHOOK_BASE_URL : "https://channels.ninechat.com.br/webhook"
+      JWT_SECRET: "17fa304f805422af7fffa24fa8a9a622df190e049596a4ae009368db986c6e4a6c30166b957cf81743b65526"
+      CENTRIFUGO_TOKEN_HMAC_SECRET_KEY: "7abced9c-ee3a-46c1-93f3-196016a54fa0"
+    command: >
+      sh -lc '
+        set -euo pipefail;
+        apk add --no-cache git ca-certificates && update-ca-certificates;
+        cd /;
+        rm -rf /app && git clone --depth=1 https://github.com/intalkconnect/ninebasic.git /app;
+        cd /app;
+        if [ -f package-lock.json ]; then
+          npm ci --omit=dev;
+        else
+          npm install --omit=dev --no-audit --no-fund --legacy-peer-deps || true;
+        fi;
+        node index.js
+      '
+    ports:
+      - "3101:3101"
+    networks:
+      - nginx-proxy-manager_default
+      - public_network
+    restart: unless-stopped
+
+networks:
+  nginx-proxy-manager_default:
+    external: true
+    name: nginx-proxy-manager_default
+  public_network:
+    external: true
+    name: public_network
