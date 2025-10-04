@@ -209,4 +209,13 @@ fastify.get('/ops/stacks/diag', async (_req, reply) => {
   }
 });
 
+  // em routes/stacks.js, dentro do export default:
+fastify.get('/ops/stacks/env', async (_req, reply) => {
+  reply.send({
+    PORTAINER_URL: process.env.PORTAINER_URL,
+    ALLOW_HTTP_INTERNAL: process.env.ALLOW_HTTP_INTERNAL,
+    DEFAULT_ENDPOINT_ID: process.env.DEFAULT_ENDPOINT_ID
+  });
+});
+
 }
