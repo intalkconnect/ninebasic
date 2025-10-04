@@ -14,7 +14,7 @@ const STACK_FILE          = process.env.STACK_FILE || 'stack.yml';
 if (process.env.TLS_REJECT_UNAUTHORIZED === '0' || process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
   throw new Error(
     'TLS relaxado detectado (TLS_REJECT_UNAUTHORIZED/NODE_TLS_REJECT_UNAUTHORIZED=0). ' +
-    'Em produção, use PORTAINER_URL com certificado válido (Let's Encrypt/NPM) ou adicione a CA em NODE_EXTRA_CA_CERTS.'
+    'Em produção, use PORTAINER_URL com certificado válido (Lets Encrypt/NPM) ou adicione a CA em NODE_EXTRA_CA_CERTS.'
   );
 }
 
