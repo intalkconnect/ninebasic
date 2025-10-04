@@ -1,36 +1,42 @@
 // routes/stacks.js
-import 'dotenv/config';              // garante .env carregado sem tocar no endpoints.js
+import 'dotenv/config';              // carrega .env aqui mesmo
 import fs from 'fs/promises';
 import https from 'https';
 import axios from 'axios';
 
-// ---- Config (via .env) ----
-const PORTAINER_URL       = process.env.PORTAINER_URL;       // ex.: https://SEU_IP:9443
-const PORTAINER_TOKEN     = process.env.PORTAINER_TOKEN;     // Access Token (X-API-Key)
-const DEFAULT_ENDPOINT_ID = process.env.DEFAULT_ENDPOINT_ID || '2';
-const STACK_FILE          = process.env.STACK_FILE || 'stack.yml'; // caminho local OU URL
+// --- DEV ONLY: se pedir, desliga a verificação TLS GLOBALMENTE
+if (process.env.TLS_REJECT_UNAUTHORIZED === '0') {
+  // ⚠️ use somente em DEV! Em produção, configure FQDN+cert válido.
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
 
-// TLS: em DEV, aceite self-signed definindo TLS_REJECT_UNAUTHORIZED=0 no .env
+// ---- Config (via .env) ----
+const PORTAINER_URL       = process.env.PORTAINER_URL;        // ex.: https://SEU_IP:9443
+const PORTAINER_TOKEN     = process.env.PORTAINER_TOKEN;      // Access Token (X-API-Key)
+const DEFAULT_ENDPOINT_ID = process.env.DEFAULT_ENDPOINT_ID || '2';
+const STACK_FILE          = process.env.STACK_FILE || 'stack.yml';
+
+// httpsAgent: ainda passamos explicitamente para axios
 function getHttpsAgent() {
   const strict = process.env.TLS_REJECT_UNAUTHORIZED !== '0';
   return new https.Agent({ rejectUnauthorized: strict });
 }
 
-// Carrega stack.yml de arquivo local ou URL
+// Carrega stack.yml de caminho local OU URL
 async function loadStackYaml() {
   const isUrl = /^https?:\/\//i.test(STACK_FILE);
   if (isUrl) {
     const { data } = await axios.get(STACK_FILE, {
       httpsAgent: getHttpsAgent(),
       responseType: 'text',
-      transformResponse: x => x, // evita parse
+      transformResponse: x => x,
     });
     return data;
   }
   return await fs.readFile(STACK_FILE, 'utf8');
 }
 
-// Cache simples do YAML
+// Cache simples
 let STACK_YAML = null;
 async function ensureYamlLoaded() {
   if (!STACK_YAML) STACK_YAML = await loadStackYaml();
@@ -46,7 +52,7 @@ function ensureConfig(fastify) {
 }
 
 export default async function stacksRoutes(fastify) {
-  // Recarregar o YAML sem reiniciar
+  // Recarregar YAML sem reiniciar (opcional)
   fastify.post('/ops/stacks/reload-yaml', async (_req, reply) => {
     STACK_YAML = await loadStackYaml();
     reply.send({ ok: true, bytes: STACK_YAML.length });
@@ -85,11 +91,10 @@ export default async function stacksRoutes(fastify) {
             params: { type: 2, method: 'string', endpointId: eid },
             headers: {
               'X-API-Key': PORTAINER_TOKEN,
-              'Content-Type': 'application/json'
+              'Content-Type': 'application/json',
             },
             httpsAgent: getHttpsAgent(),
-            // timeout opcional: 30s
-            timeout: 30_000,
+            timeout: 30000,
           }
         );
         reply.code(status).send(data);
@@ -134,10 +139,10 @@ export default async function stacksRoutes(fastify) {
             params: { endpointId: eid },
             headers: {
               'X-API-Key': PORTAINER_TOKEN,
-              'Content-Type': 'application/json'
+              'Content-Type': 'application/json',
             },
             httpsAgent: getHttpsAgent(),
-            timeout: 30_000,
+            timeout: 30000,
           }
         );
         reply.code(status).send(data);
