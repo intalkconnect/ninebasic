@@ -1,4 +1,4 @@
-// routes/stacks.js — TLS estrito SEM usar TLS_REJECT_UNAUTHORIZED / NODE_TLS_REJECT_UNAUTHORIZED
+// routes/stacks.js — produção (TLS estrito), sem httpErrors, Swarm por padrão
 import 'dotenv/config';
 import fs from 'fs/promises';
 import https from 'https';
@@ -9,12 +9,11 @@ const PORTAINER_TOKEN     = process.env.PORTAINER_TOKEN;        // X-API-Key
 const DEFAULT_ENDPOINT_ID = String(process.env.DEFAULT_ENDPOINT_ID || '2');
 const STACK_FILE          = process.env.STACK_FILE || 'stack.yml';
 
-// HTTPS agent estrito (sem relaxar verificação)
+// HTTPS estrito para chamadas HTTPS
 function strictHttpsAgent() {
   return new https.Agent({ rejectUnauthorized: true });
 }
 
-// helper: detectar host privado (RFC1918/localhost)
 function isPrivateHost(urlStr) {
   try {
     const { hostname } = new URL(urlStr);
@@ -28,29 +27,24 @@ function isPrivateHost(urlStr) {
   } catch { return false; }
 }
 
-// valida configuração sem usar variáveis que relaxem TLS
-function ensureConfig(fastify) {
+// Validação sem fastify.httpErrors (lança Error comum)
+function ensureConfigOrThrow() {
   if (!PORTAINER_URL || !PORTAINER_TOKEN) {
-    throw fastify.httpErrors.internalServerError('Faltam PORTAINER_URL e/ou PORTAINER_TOKEN.');
+    throw new Error('Faltam PORTAINER_URL e/ou PORTAINER_TOKEN.');
   }
-
   const isHttps = /^https:\/\//i.test(PORTAINER_URL);
-  const isHttp  = /^http:\/\//i.test(PORTAINER_URL);
+  const isHttp  =  /^http:\/\//i.test(PORTAINER_URL);
 
   if (isHttp) {
-    // Só permitimos HTTP se for rede privada e explicitamente habilitado
     const allowHttpInternal = process.env.ALLOW_HTTP_INTERNAL === '1';
     if (!allowHttpInternal || !isPrivateHost(PORTAINER_URL)) {
-      throw fastify.httpErrors.internalServerError(
-        'PORTAINER_URL HTTP só é permitido para host privado e com ALLOW_HTTP_INTERNAL=1.'
-      );
+      throw new Error('PORTAINER_URL HTTP só é permitido para host privado e com ALLOW_HTTP_INTERNAL=1.');
     }
   } else if (!isHttps) {
-    throw fastify.httpErrors.internalServerError('PORTAINER_URL deve ser http(s).');
+    throw new Error('PORTAINER_URL deve ser http(s).');
   }
 }
 
-// baixa o stack.yml (arquivo local ou URL HTTPS)
 async function loadStackYaml() {
   const isUrl = /^https?:\/\//i.test(STACK_FILE);
   if (isUrl) {
@@ -82,7 +76,6 @@ function axiosOpts(extra = {}) {
       'Content-Type': 'application/json'
     }
   };
-  // Para HTTPS, aplica agent estrito; para HTTP, não precisa agent
   if (/^https:\/\//i.test(PORTAINER_URL)) {
     base.httpsAgent = strictHttpsAgent();
   }
@@ -90,12 +83,17 @@ function axiosOpts(extra = {}) {
 }
 
 export default async function stacksRoutes(fastify) {
+  // Reload do YAML
   fastify.post('/ops/stacks/reload-yaml', async (_req, reply) => {
-    STACK_YAML = await loadStackYaml();
-    reply.send({ ok: true, bytes: STACK_YAML.length });
+    try {
+      STACK_YAML = await loadStackYaml();
+      reply.send({ ok: true, bytes: STACK_YAML.length });
+    } catch (err) {
+      reply.code(500).send({ error: String(err?.message || err) });
+    }
   });
 
-  // CREATE — Swarm por padrão (type=1). Se quiser compose, passe stackType="compose".
+  // CREATE — Swarm por padrão (type=1)
   fastify.post('/ops/stacks/create', {
     schema: {
       body: {
@@ -105,24 +103,25 @@ export default async function stacksRoutes(fastify) {
           name:       { type: 'string', minLength: 1 },
           tenant:     { type: 'string', minLength: 1 },
           endpointId: { type: 'string' },
-          stackType:  { type: 'string', enum: ['swarm','compose'] }
+          stackType:  { type: 'string', enum: ['swarm','compose'] } // opcional
         }
       }
     },
     handler: async (req, reply) => {
-      ensureConfig(fastify);
-      const { name, tenant, endpointId, stackType } = req.body;
-      const eid  = String(endpointId || DEFAULT_ENDPOINT_ID);
-      const type = (stackType === 'compose') ? 2 : 1; // default: swarm
-
-      const yaml = await ensureYamlLoaded();
-      const payload = {
-        name,
-        stackFileContent: yaml,
-        env: [{ name: 'TENANT', value: String(tenant) }]
-      };
-
       try {
+        ensureConfigOrThrow();
+
+        const { name, tenant, endpointId, stackType } = req.body;
+        const eid  = String(endpointId || DEFAULT_ENDPOINT_ID);
+        const type = (stackType === 'compose') ? 2 : 1; // default: swarm
+
+        const yaml = await ensureYamlLoaded();
+        const payload = {
+          name,
+          stackFileContent: yaml,
+          env: [{ name: 'TENANT', value: String(tenant) }]
+        };
+
         const { status, data } = await axios.post(
           `${PORTAINER_URL}/api/stacks`,
           payload,
@@ -130,12 +129,14 @@ export default async function stacksRoutes(fastify) {
         );
         reply.code(status).send(data);
       } catch (err) {
-        reply.code(err.response?.status || 500).send(err.response?.data || { error: String(err) });
+        const status = err.response?.status || 500;
+        const data   = err.response?.data || { error: String(err?.message || err) };
+        reply.code(status).send(data);
       }
     }
   });
 
-  // UPDATE — reimplementa stack com prune
+  // UPDATE — redeploy com prune
   fastify.post('/ops/stacks/update', {
     schema: {
       body: {
@@ -149,18 +150,19 @@ export default async function stacksRoutes(fastify) {
       }
     },
     handler: async (req, reply) => {
-      ensureConfig(fastify);
-      const { stackId, tenant, endpointId } = req.body;
-      const eid  = String(endpointId || DEFAULT_ENDPOINT_ID);
-
-      const yaml = await ensureYamlLoaded();
-      const payload = {
-        prune: true,
-        stackFileContent: yaml,
-        env: [{ name: 'TENANT', value: String(tenant) }]
-      };
-
       try {
+        ensureConfigOrThrow();
+
+        const { stackId, tenant, endpointId } = req.body;
+        const eid  = String(endpointId || DEFAULT_ENDPOINT_ID);
+
+        const yaml = await ensureYamlLoaded();
+        const payload = {
+          prune: true,
+          stackFileContent: yaml,
+          env: [{ name: 'TENANT', value: String(tenant) }]
+        };
+
         const { status, data } = await axios.put(
           `${PORTAINER_URL}/api/stacks/${encodeURIComponent(stackId)}`,
           payload,
@@ -168,8 +170,20 @@ export default async function stacksRoutes(fastify) {
         );
         reply.code(status).send(data);
       } catch (err) {
-        reply.code(err.response?.status || 500).send(err.response?.data || { error: String(err) });
+        const status = err.response?.status || 500;
+        const data   = err.response?.data || { error: String(err?.message || err) };
+        reply.code(status).send(data);
       }
+    }
+  });
+
+  // (opcional) ping/debug
+  fastify.get('/ops/stacks/ping', async (_req, reply) => {
+    try {
+      ensureConfigOrThrow();
+      reply.send({ ok: true, url: PORTAINER_URL, endpointId: DEFAULT_ENDPOINT_ID });
+    } catch (err) {
+      reply.code(500).send({ error: String(err?.message || err) });
     }
   });
 }
