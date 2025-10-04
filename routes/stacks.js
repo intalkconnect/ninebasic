@@ -17,15 +17,32 @@ function strictHttpsAgent() {
 function isPrivateHost(urlStr) {
   try {
     const { hostname } = new URL(urlStr);
-    return (
-      hostname === 'localhost' ||
-      hostname === '127.0.0.1' ||
-      hostname.startsWith('10.') ||
-      hostname.startsWith('192.168.') ||
-      /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname)
-    );
-  } catch { return false; }
+
+    // localhost/loopback
+    if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
+
+    // 🔸 SINGLE-LABEL (ex.: "portainer") => tratar como interno (overlay/compose)
+    if (!hostname.includes('.')) return true;
+
+    // domínios comumente internos
+    if (
+      hostname.endsWith('.local') ||
+      hostname.endsWith('.internal') ||
+      hostname.endsWith('.docker') ||
+      hostname.endsWith('.localdomain')
+    ) return true;
+
+    // RFC1918/172.16-31.x.x
+    if (hostname.startsWith('10.')) return true;
+    if (hostname.startsWith('192.168.')) return true;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname)) return true;
+
+    return false;
+  } catch {
+    return false;
+  }
 }
+
 
 // Validação sem fastify.httpErrors (lança Error comum)
 function ensureConfigOrThrow() {
