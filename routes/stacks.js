@@ -1,48 +1,50 @@
 // routes/portainerStacks.js
 import fs from "fs/promises";
-import https from "https";
 import { Agent as UndiciAgent } from "undici";
 
-const STACK_FILE = process.env.STACK_FILE || "stack.yml"; // local path OU URL http(s)
+const STACK_FILE = process.env.STACK_FILE || "stack.yml"; // caminho local ou URL http(s)
 const PORTAINER_URL = process.env.PORTAINER_URL;
 const PORTAINER_TOKEN = process.env.PORTAINER_TOKEN;
 const DEFAULT_ENDPOINT_ID = process.env.DEFAULT_ENDPOINT_ID || "2";
 
- const TLS_STRICT = process.env.TLS_REJECT_UNAUTHORIZED !== "0";
- // dispatcher do Undici (usado pelo fetch nativo do Node)
- const UNDICI_DISPATCHER = TLS_STRICT
-   ? undefined
-   : new UndiciAgent({ connect: { rejectUnauthorized: false } });
+// TLS: aceitar self-signed em DEV se TLS_REJECT_UNAUTHORIZED=0
+const TLS_STRICT = process.env.TLS_REJECT_UNAUTHORIZED !== "0";
+const UNDICI_DISPATCHER = TLS_STRICT
+  ? undefined
+  : new UndiciAgent({ connect: { rejectUnauthorized: false } });
 
 // carrega stack.yml de arquivo local OU URL
 async function loadStackYaml() {
   const isUrl = /^https?:\/\//i.test(STACK_FILE);
   if (isUrl) {
-    const r = await fetch(STACK_FILE, { agent: AGENT });
-    if (!r.ok) throw new Error(`Falha ao buscar STACK_FILE URL (${r.status})`);
+    const r = await fetch(STACK_FILE, {
+      dispatcher: UNDICI_DISPATCHER, // importante
+    });
+    if (!r.ok) {
+      throw new Error(`Falha ao baixar STACK_FILE (${r.status}) ${STACK_FILE}`);
+    }
     return await r.text();
   } else {
     return await fs.readFile(STACK_FILE, "utf8");
   }
 }
 
-// cache simples em memória
 let STACK_YAML = null;
 async function ensureYamlLoaded() {
   if (!STACK_YAML) STACK_YAML = await loadStackYaml();
   return STACK_YAML;
 }
 
-export default async function stacksRoutes(fastify) {
-  function ensureConfig() {
-    if (!PORTAINER_URL || !PORTAINER_TOKEN) {
-      throw fastify.httpErrors.internalServerError(
-        "PORTAINER_URL/PORTAINER_TOKEN não configurados"
-      );
-    }
+function ensureConfig(fastify) {
+  if (!PORTAINER_URL || !PORTAINER_TOKEN) {
+    throw fastify.httpErrors.internalServerError(
+      "PORTAINER_URL/PORTAINER_TOKEN não configurados no .env"
+    );
   }
+}
 
-  // opcional: recarregar YAML sem reiniciar
+export default async function stacksRoutes(fastify) {
+  // recarrega o YAML sem reiniciar
   fastify.post("/ops/stacks/reload-yaml", async (_req, reply) => {
     STACK_YAML = await loadStackYaml();
     reply.send({ ok: true, bytes: STACK_YAML.length });
@@ -58,15 +60,13 @@ export default async function stacksRoutes(fastify) {
           name: { type: "string", minLength: 1 },
           tenant: { type: "string", minLength: 1 },
           endpointId: { type: "string" }
-          // se quiser, acrescente replicas extras: WORKER_*_REPLICAS etc.
         },
       },
     },
     handler: async (req, reply) => {
-      ensureConfig();
+      ensureConfig(fastify);
       const { name, tenant, endpointId } = req.body;
       const eid = String(endpointId || DEFAULT_ENDPOINT_ID);
-
       const yaml = await ensureYamlLoaded();
 
       const payload = {
@@ -83,7 +83,7 @@ export default async function stacksRoutes(fastify) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
-        dispatcher: UNDICI_DISPATCHER,
+        dispatcher: UNDICI_DISPATCHER, // <- aceita self-signed se TLS_STRICT=false
       });
 
       const text = await r.text();
@@ -98,17 +98,16 @@ export default async function stacksRoutes(fastify) {
         type: "object",
         required: ["stackId", "tenant"],
         properties: {
-          stackId: { type: "integer" },
+          stackId: { oneOf: [{ type: "integer" }, { type: "string" }] },
           tenant: { type: "string", minLength: 1 },
           endpointId: { type: "string" },
         },
       },
     },
     handler: async (req, reply) => {
-      ensureConfig();
+      ensureConfig(fastify);
       const { stackId, tenant, endpointId } = req.body;
       const eid = String(endpointId || DEFAULT_ENDPOINT_ID);
-
       const yaml = await ensureYamlLoaded();
 
       const payload = {
