@@ -186,4 +186,27 @@ export default async function stacksRoutes(fastify) {
       reply.code(500).send({ error: String(err?.message || err) });
     }
   });
+
+  // em routes/stacks.js, dentro do export default async function stacksRoutes(fastify) { ... }
+fastify.get('/ops/stacks/diag', async (_req, reply) => {
+  try {
+    // 1) status do Portainer
+    const s = await axios.get(`${PORTAINER_URL}/api/status`, axiosOpts());
+    // 2) endpoints (ambientes) disponíveis
+    const e = await axios.get(`${PORTAINER_URL}/api/endpoints`, axiosOpts());
+    reply.send({
+      ok: true,
+      portainerUrl: PORTAINER_URL,
+      status: s.data,
+      endpoints: e.data.map(x => ({ Id: x.Id, Name: x.Name, Type: x.Type, URL: x.URL }))
+    });
+  } catch (err) {
+    reply.code(err.response?.status || 500).send({
+      ok: false,
+      portainerUrl: PORTAINER_URL,
+      error: err.response?.data || String(err)
+    });
+  }
+});
+
 }
