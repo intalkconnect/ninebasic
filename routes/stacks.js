@@ -1,15 +1,18 @@
 // routes/portainerStacks.js
 import fs from "fs/promises";
 import https from "https";
+import { Agent as UndiciAgent } from "undici";
 
 const STACK_FILE = process.env.STACK_FILE || "stack.yml"; // local path OU URL http(s)
 const PORTAINER_URL = process.env.PORTAINER_URL;
 const PORTAINER_TOKEN = process.env.PORTAINER_TOKEN;
 const DEFAULT_ENDPOINT_ID = process.env.DEFAULT_ENDPOINT_ID || "2";
 
-const AGENT = new https.Agent({
-  rejectUnauthorized: process.env.TLS_REJECT_UNAUTHORIZED !== "0",
-});
+ const TLS_STRICT = process.env.TLS_REJECT_UNAUTHORIZED !== "0";
+ // dispatcher do Undici (usado pelo fetch nativo do Node)
+ const UNDICI_DISPATCHER = TLS_STRICT
+   ? undefined
+   : new UndiciAgent({ connect: { rejectUnauthorized: false } });
 
 // carrega stack.yml de arquivo local OU URL
 async function loadStackYaml() {
