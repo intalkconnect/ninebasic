@@ -1,30 +1,31 @@
 // routes/stacks.js
-import 'dotenv/config'; // garante que .env esteja carregado mesmo sem mudar endpoints.js
+import 'dotenv/config';              // garante .env carregado sem tocar no endpoints.js
 import fs from 'fs/promises';
-import { Agent as UndiciAgent } from 'undici';
+import https from 'https';
+import axios from 'axios';
 
 // ---- Config (via .env) ----
 const PORTAINER_URL       = process.env.PORTAINER_URL;       // ex.: https://SEU_IP:9443
-const PORTAINER_TOKEN     = process.env.PORTAINER_TOKEN;     // Access Token
+const PORTAINER_TOKEN     = process.env.PORTAINER_TOKEN;     // Access Token (X-API-Key)
 const DEFAULT_ENDPOINT_ID = process.env.DEFAULT_ENDPOINT_ID || '2';
-const STACK_FILE          = process.env.STACK_FILE || 'stack.yml'; // caminho local ou URL
+const STACK_FILE          = process.env.STACK_FILE || 'stack.yml'; // caminho local OU URL
 
-// Dispatcher do undici em runtime (funciona com fetch nativo do Node)
-function getDispatcher() {
-  // Em DEV, para IP com cert self-signed, defina TLS_REJECT_UNAUTHORIZED=0
+// TLS: em DEV, aceite self-signed definindo TLS_REJECT_UNAUTHORIZED=0 no .env
+function getHttpsAgent() {
   const strict = process.env.TLS_REJECT_UNAUTHORIZED !== '0';
-  return strict ? undefined : new UndiciAgent({ connect: { rejectUnauthorized: false } });
+  return new https.Agent({ rejectUnauthorized: strict });
 }
 
 // Carrega stack.yml de arquivo local ou URL
 async function loadStackYaml() {
   const isUrl = /^https?:\/\//i.test(STACK_FILE);
   if (isUrl) {
-    const r = await fetch(STACK_FILE, { dispatcher: getDispatcher() });
-    if (!r.ok) {
-      throw new Error(`Falha ao baixar STACK_FILE (${r.status}) ${STACK_FILE}`);
-    }
-    return await r.text();
+    const { data } = await axios.get(STACK_FILE, {
+      httpsAgent: getHttpsAgent(),
+      responseType: 'text',
+      transformResponse: x => x, // evita parse
+    });
+    return data;
   }
   return await fs.readFile(STACK_FILE, 'utf8');
 }
@@ -45,7 +46,7 @@ function ensureConfig(fastify) {
 }
 
 export default async function stacksRoutes(fastify) {
-  // (opcional) recarregar YAML sem reiniciar
+  // Recarregar o YAML sem reiniciar
   fastify.post('/ops/stacks/reload-yaml', async (_req, reply) => {
     STACK_YAML = await loadStackYaml();
     reply.send({ ok: true, bytes: STACK_YAML.length });
@@ -76,19 +77,27 @@ export default async function stacksRoutes(fastify) {
         env: [{ name: 'TENANT', value: String(tenant) }]
       };
 
-      const url = `${PORTAINER_URL}/api/stacks?type=2&method=string&endpointId=${encodeURIComponent(eid)}`;
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'X-API-Key': PORTAINER_TOKEN,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload),
-        dispatcher: getDispatcher() // ← aceita self-signed em DEV se TLS_REJECT_UNAUTHORIZED=0
-      });
-
-      const text = await r.text();
-      reply.code(r.status).type('application/json').send(text);
+      try {
+        const { status, data } = await axios.post(
+          `${PORTAINER_URL}/api/stacks`,
+          payload,
+          {
+            params: { type: 2, method: 'string', endpointId: eid },
+            headers: {
+              'X-API-Key': PORTAINER_TOKEN,
+              'Content-Type': 'application/json'
+            },
+            httpsAgent: getHttpsAgent(),
+            // timeout opcional: 30s
+            timeout: 30_000,
+          }
+        );
+        reply.code(status).send(data);
+      } catch (err) {
+        const status = err.response?.status || 500;
+        const data = err.response?.data || { error: String(err) };
+        reply.code(status).send(data);
+      }
     }
   });
 
@@ -117,19 +126,26 @@ export default async function stacksRoutes(fastify) {
         env: [{ name: 'TENANT', value: String(tenant) }]
       };
 
-      const url = `${PORTAINER_URL}/api/stacks/${encodeURIComponent(stackId)}?endpointId=${encodeURIComponent(eid)}`;
-      const r = await fetch(url, {
-        method: 'PUT',
-        headers: {
-          'X-API-Key': PORTAINER_TOKEN,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload),
-        dispatcher: getDispatcher()
-      });
-
-      const text = await r.text();
-      reply.code(r.status).type('application/json').send(text);
+      try {
+        const { status, data } = await axios.put(
+          `${PORTAINER_URL}/api/stacks/${encodeURIComponent(stackId)}`,
+          payload,
+          {
+            params: { endpointId: eid },
+            headers: {
+              'X-API-Key': PORTAINER_TOKEN,
+              'Content-Type': 'application/json'
+            },
+            httpsAgent: getHttpsAgent(),
+            timeout: 30_000,
+          }
+        );
+        reply.code(status).send(data);
+      } catch (err) {
+        const status = err.response?.status || 500;
+        const data = err.response?.data || { error: String(err) };
+        reply.code(status).send(data);
+      }
     }
   });
 }
