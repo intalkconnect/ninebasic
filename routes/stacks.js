@@ -83,7 +83,7 @@ export default async function stacksRoutes(fastify) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
-        agent: AGENT,
+        dispatcher: UNDICI_DISPATCHER,
       });
 
       const text = await r.text();
@@ -125,7 +125,7 @@ export default async function stacksRoutes(fastify) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
-        agent: AGENT,
+        dispatcher: UNDICI_DISPATCHER,
       });
 
       const text = await r.text();
