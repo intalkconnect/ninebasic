@@ -60,7 +60,7 @@ async function buildServer() {
   });
 await fastify.register(stacksRoutes, { prefix: '/api/v1' });
   // 2. Registra o tenant plugin (resolve subdomain)
-  await fastify.register(tenantPlugin);
+  
 
   fastify.register(realtimeRoutes, { prefix: "/api/v1/realtime" });
   
@@ -80,6 +80,7 @@ await fastify.register(stacksRoutes, { prefix: '/api/v1' });
 
   // 🔒 escopo protegido /api/v1/*
   await fastify.register(async (api) => {
+    await fastify.register(tenantPlugin);
     // Hook onRequest: converte cookie defaultAssert -> Authorization header
     api.addHook('onRequest', async (req) => {
       // Se já veio Authorization, não mexe
@@ -164,6 +165,7 @@ async function start() {
 }
 
 start();
+
 
 
 
