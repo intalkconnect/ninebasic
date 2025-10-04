@@ -1,30 +1,28 @@
-// routes/stacks.js — produção (TLS estrito), sem httpErrors, Swarm por padrão
+// routes/stacks.js — produção (TLS estrito), auto-detect Swarm/Compose, sem httpErrors
 import 'dotenv/config';
 import fs from 'fs/promises';
 import https from 'https';
 import axios from 'axios';
 
-const PORTAINER_URL       = process.env.PORTAINER_URL;          // ex.: https://portainer.seu-dominio.com
-const PORTAINER_TOKEN     = process.env.PORTAINER_TOKEN;        // X-API-Key
-const DEFAULT_ENDPOINT_ID = String(process.env.DEFAULT_ENDPOINT_ID || '2');
+const PORTAINER_URL       = process.env.PORTAINER_URL;           // ex.: http://portainer:9000  ou  https://portainer.seu-dominio.com
+const PORTAINER_TOKEN     = process.env.PORTAINER_TOKEN;         // X-API-Key
+const DEFAULT_ENDPOINT_ID = String(process.env.DEFAULT_ENDPOINT_ID || '3'); // no seu caso, 3
 const STACK_FILE          = process.env.STACK_FILE || 'stack.yml';
 
-// HTTPS estrito para chamadas HTTPS
+// HTTPS estrito (apenas quando usamos HTTPS)
 function strictHttpsAgent() {
   return new https.Agent({ rejectUnauthorized: true });
 }
 
+// aceita hostnames internos (ex.: "portainer") e redes privadas como "http://10.x..."
 function isPrivateHost(urlStr) {
   try {
     const { hostname } = new URL(urlStr);
 
-    // localhost/loopback
     if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
-
-    // 🔸 SINGLE-LABEL (ex.: "portainer") => tratar como interno (overlay/compose)
+    // single-label (service name em overlay / compose) => interno
     if (!hostname.includes('.')) return true;
 
-    // domínios comumente internos
     if (
       hostname.endsWith('.local') ||
       hostname.endsWith('.internal') ||
@@ -32,7 +30,6 @@ function isPrivateHost(urlStr) {
       hostname.endsWith('.localdomain')
     ) return true;
 
-    // RFC1918/172.16-31.x.x
     if (hostname.startsWith('10.')) return true;
     if (hostname.startsWith('192.168.')) return true;
     if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname)) return true;
@@ -43,8 +40,7 @@ function isPrivateHost(urlStr) {
   }
 }
 
-
-// Validação sem fastify.httpErrors (lança Error comum)
+// valida config (sem fastify.httpErrors)
 function ensureConfigOrThrow() {
   if (!PORTAINER_URL || !PORTAINER_TOKEN) {
     throw new Error('Faltam PORTAINER_URL e/ou PORTAINER_TOKEN.');
@@ -62,6 +58,7 @@ function ensureConfigOrThrow() {
   }
 }
 
+// carrega stack.yml (arquivo local ou URL https)
 async function loadStackYaml() {
   const isUrl = /^https?:\/\//i.test(STACK_FILE);
   if (isUrl) {
@@ -99,8 +96,17 @@ function axiosOpts(extra = {}) {
   return { ...base, ...extra };
 }
 
+// pergunta ao Portainer se o endpoint está com Swarm ativo
+async function isSwarmActive(eid) {
+  const r = await axios.get(
+    `${PORTAINER_URL}/api/endpoints/${eid}/docker/info`,
+    axiosOpts()
+  );
+  return r.data?.Swarm?.LocalNodeState === 'active';
+}
+
 export default async function stacksRoutes(fastify) {
-  // Reload do YAML
+  // reload do YAML em memória
   fastify.post('/ops/stacks/reload-yaml', async (_req, reply) => {
     try {
       STACK_YAML = await loadStackYaml();
@@ -110,7 +116,7 @@ export default async function stacksRoutes(fastify) {
     }
   });
 
-  // CREATE — Swarm por padrão (type=1)
+  // CREATE — auto detect: swarm (1) se ativo; senão compose (2)
   fastify.post('/ops/stacks/create', {
     schema: {
       body: {
@@ -120,7 +126,7 @@ export default async function stacksRoutes(fastify) {
           name:       { type: 'string', minLength: 1 },
           tenant:     { type: 'string', minLength: 1 },
           endpointId: { type: 'string' },
-          stackType:  { type: 'string', enum: ['swarm','compose'] } // opcional
+          stackType:  { type: 'string', enum: ['swarm','compose'] } // opcional: força modo
         }
       }
     },
@@ -129,8 +135,13 @@ export default async function stacksRoutes(fastify) {
         ensureConfigOrThrow();
 
         const { name, tenant, endpointId, stackType } = req.body;
-        const eid  = String(endpointId || DEFAULT_ENDPOINT_ID);
-        const type = (stackType === 'compose') ? 2 : 1; // default: swarm
+        const eid = String(endpointId || DEFAULT_ENDPOINT_ID);
+
+        // decide o type
+        let type;
+        if (stackType === 'swarm') type = 1;
+        else if (stackType === 'compose') type = 2;
+        else type = (await isSwarmActive(eid)) ? 1 : 2;  // auto
 
         const yaml = await ensureYamlLoaded();
         const payload = {
@@ -144,6 +155,7 @@ export default async function stacksRoutes(fastify) {
           payload,
           axiosOpts({ params: { type, method: 'string', endpointId: eid } })
         );
+
         reply.code(status).send(data);
       } catch (err) {
         const status = err.response?.status || 500;
@@ -171,7 +183,7 @@ export default async function stacksRoutes(fastify) {
         ensureConfigOrThrow();
 
         const { stackId, tenant, endpointId } = req.body;
-        const eid  = String(endpointId || DEFAULT_ENDPOINT_ID);
+        const eid = String(endpointId || DEFAULT_ENDPOINT_ID);
 
         const yaml = await ensureYamlLoaded();
         const payload = {
@@ -194,7 +206,7 @@ export default async function stacksRoutes(fastify) {
     }
   });
 
-  // (opcional) ping/debug
+  // ping/debug
   fastify.get('/ops/stacks/ping', async (_req, reply) => {
     try {
       ensureConfigOrThrow();
@@ -204,35 +216,48 @@ export default async function stacksRoutes(fastify) {
     }
   });
 
-  // em routes/stacks.js, dentro do export default async function stacksRoutes(fastify) { ... }
-fastify.get('/ops/stacks/diag', async (_req, reply) => {
-  try {
-    // 1) status do Portainer
-    const s = await axios.get(`${PORTAINER_URL}/api/status`, axiosOpts());
-    // 2) endpoints (ambientes) disponíveis
-    const e = await axios.get(`${PORTAINER_URL}/api/endpoints`, axiosOpts());
-    reply.send({
-      ok: true,
-      portainerUrl: PORTAINER_URL,
-      status: s.data,
-      endpoints: e.data.map(x => ({ Id: x.Id, Name: x.Name, Type: x.Type, URL: x.URL }))
-    });
-  } catch (err) {
-    reply.code(err.response?.status || 500).send({
-      ok: false,
-      portainerUrl: PORTAINER_URL,
-      error: err.response?.data || String(err)
-    });
-  }
-});
-
-  // em routes/stacks.js, dentro do export default:
-fastify.get('/ops/stacks/env', async (_req, reply) => {
-  reply.send({
-    PORTAINER_URL: process.env.PORTAINER_URL,
-    ALLOW_HTTP_INTERNAL: process.env.ALLOW_HTTP_INTERNAL,
-    DEFAULT_ENDPOINT_ID: process.env.DEFAULT_ENDPOINT_ID
+  // diagnóstico (status + endpoints)
+  fastify.get('/ops/stacks/diag', async (_req, reply) => {
+    try {
+      const s = await axios.get(`${PORTAINER_URL}/api/status`, axiosOpts());
+      const e = await axios.get(`${PORTAINER_URL}/api/endpoints`, axiosOpts());
+      reply.send({
+        ok: true,
+        portainerUrl: PORTAINER_URL,
+        status: s.data,
+        endpoints: e.data.map(x => ({ Id: x.Id, Name: x.Name, Type: x.Type, URL: x.URL }))
+      });
+    } catch (err) {
+      reply.code(err.response?.status || 500).send({
+        ok: false,
+        portainerUrl: PORTAINER_URL,
+        error: err.response?.data || String(err)
+      });
+    }
   });
-});
 
+  // ver variáveis efetivas
+  fastify.get('/ops/stacks/env', async (_req, reply) => {
+    reply.send({
+      PORTAINER_URL: process.env.PORTAINER_URL,
+      ALLOW_HTTP_INTERNAL: process.env.ALLOW_HTTP_INTERNAL,
+      DEFAULT_ENDPOINT_ID: process.env.DEFAULT_ENDPOINT_ID
+    });
+  });
+
+  // (extra) ver estado do swarm do endpoint
+  fastify.get('/ops/stacks/swarm/:eid', async (req, reply) => {
+    const eid = String(req.params.eid);
+    try {
+      const r = await axios.get(`${PORTAINER_URL}/api/endpoints/${eid}/docker/info`, axiosOpts());
+      reply.send({
+        eid,
+        swarmLocalNodeState: r.data?.Swarm?.LocalNodeState,
+        controlAvailable: r.data?.Swarm?.ControlAvailable,
+        nodeID: r.data?.Swarm?.NodeID
+      });
+    } catch (err) {
+      reply.code(err.response?.status || 500).send({ error: err.response?.data || String(err) });
+    }
+  });
 }
