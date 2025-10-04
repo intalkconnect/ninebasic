@@ -58,12 +58,12 @@ async function buildServer() {
     secret: false, // não precisamos assinar cookies
     hook: 'onRequest' 
   });
-
+await fastify.register(stacksRoutes, { prefix: '/api/v1' });
   // 2. Registra o tenant plugin (resolve subdomain)
   await fastify.register(tenantPlugin);
 
   fastify.register(realtimeRoutes, { prefix: "/api/v1/realtime" });
-  fastify.register(stacksRoutes, { prefix: '/api/v1' });
+  
 
   // rotas públicas
   fastify.get('/healthz', async () => ({ ok: true }));
@@ -164,6 +164,7 @@ async function start() {
 }
 
 start();
+
 
 
 
