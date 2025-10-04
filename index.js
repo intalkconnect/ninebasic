@@ -8,6 +8,8 @@ import dotenv from 'dotenv';
 import tenantPlugin from './plugins/tenant.js';
 import securityTokensRoutes from './routes/securityTokens.js';
 import { requireTenantBearerDb } from './plugins/tenantBearerDb.js';
+import stacksRoutes from './routes/stacks.js';
+
 
 // rotas...
 import messagesRoutes      from './routes/messages.js';
@@ -61,6 +63,7 @@ async function buildServer() {
   await fastify.register(tenantPlugin);
 
   fastify.register(realtimeRoutes, { prefix: "/api/v1/realtime" });
+  fastify.register(stacksRoutes, { prefix: '/api/v1' });
 
   // rotas públicas
   fastify.get('/healthz', async () => ({ ok: true }));
@@ -161,6 +164,7 @@ async function start() {
 }
 
 start();
+
 
 
 
