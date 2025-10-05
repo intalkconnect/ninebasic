@@ -192,14 +192,7 @@ fastify.get('/customers/:userId', async (req, reply) => {
 
     // Journey (do último reset em diante; começa no 1º START pós-reset; oculta 'system_reset')
     const journeySql = `
-      WITH last_reset AS (
-        SELECT MAX(entered_at) AS ts
-        FROM bot_transitions
-        WHERE user_id = $1
-          AND block_type = 'system_reset'
-          AND (visible IS TRUE OR visible IS NULL)
-      ),
-      dw AS (
+      WITH dw AS (
         SELECT
           vsd.user_id,
           vsd.block                               AS stage,
@@ -215,14 +208,11 @@ fastify.get('/customers/:userId', async (req, reply) => {
          AND bt.entered_at = vsd.entered_at
          AND (bt.visible IS NULL OR bt.visible = TRUE)
         WHERE vsd.user_id = $1
-          AND ( (SELECT ts FROM last_reset) IS NULL
-                OR vsd.entered_at >= (SELECT ts FROM last_reset) )
       ),
       start_from AS (
-        SELECT COALESCE(
-          (SELECT MIN(entered_at) FROM dw WHERE LOWER(COALESCE(stage_type,'')) = 'start'),
-          (SELECT ts FROM last_reset)
-        ) AS ts
+SELECT (SELECT MAX(entered_at)
+               FROM dw
+                WHERE LOWER(COALESCE(stage_type,'')) = 'start') AS ts
       )
       SELECT
         d.stage,
@@ -251,7 +241,10 @@ fastify.get('/customers/:userId', async (req, reply) => {
         )                                                AS has_error
       FROM dw d
       WHERE
-        (SELECT ts FROM start_from) IS NULL OR d.entered_at >= (SELECT ts FROM start_from)
+        (
+          (SELECT ts FROM start_from) IS NULL
+          OR d.entered_at >= (SELECT ts FROM start_from)
+        )
         AND LOWER(COALESCE(d.stage_type,'')) <> 'system_reset'
       ORDER BY d.entered_at
     `;
