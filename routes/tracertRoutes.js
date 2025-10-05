@@ -34,7 +34,8 @@ async function tracertRoutes(fastify, options) {
         stage,
         min_loops,
         min_time_sec,
-        exclude_human = 'true',
+        exclude_human = 'false',
+        exclude_start = 'true',
         order_by = 'time_in_stage_sec',
         order_dir = 'desc',
         page = '1',
@@ -86,6 +87,11 @@ async function tracertRoutes(fastify, options) {
       if (String(exclude_human).toLowerCase() === 'true') {
         whereConditions.push(`current_stage != 'human'`);
         console.log('Exclude human filter added: current_stage != human');
+      }
+
+      if (String(exclude_start).toLowerCase() === 'true') {
+       whereConditions.push(`LOWER(COALESCE(current_stage_type,'')) NOT IN ('start','system_reset')`);
+       console.log('Exclude start/system_reset filter added (by type)');
       }
 
       const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
