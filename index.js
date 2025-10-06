@@ -48,7 +48,7 @@ async function buildServer() {
     origin: true,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant','X-User-Id'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant','X-User-Id','X-User-Name','X-User-Email'],
     exposedHeaders: []
   });
 
@@ -167,4 +167,5 @@ async function start() {
 }
 
 start();
+
 
