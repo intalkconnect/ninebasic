@@ -1,5 +1,5 @@
 // routes/waProfile.js
-import { gget, gpost } from '../services/metaGraph.js';
+import { gget, gpost } from "../services/metaGraph.js";
 
 async function whatsappRoutes(fastify) {
   const TOKEN =
@@ -8,7 +8,7 @@ async function whatsappRoutes(fastify) {
     process.env.SYSTEM_USER_ADMIN_TOKEN;
 
   const requireToken = () => {
-    if (!TOKEN) throw new Error('meta_token_missing');
+    if (!TOKEN) throw new Error("meta_token_missing");
     return TOKEN;
   };
 
@@ -17,7 +17,7 @@ async function whatsappRoutes(fastify) {
     return (
       req?.tenant?.subdomain ||
       req?.tenant?.name ||
-      req?.headers['x-tenant-subdomain'] ||
+      req?.headers["x-tenant-subdomain"] ||
       req?.query?.subdomain ||
       req?.body?.subdomain ||
       null
@@ -26,15 +26,15 @@ async function whatsappRoutes(fastify) {
 
   async function resolveTenant(req) {
     const sub = getSubdomain(req);
-    if (!sub) throw new Error('missing_subdomain');
-    if (!req.db) throw new Error('db_not_available');
+    if (!sub) throw new Error("missing_subdomain");
+    if (!req.db) throw new Error("db_not_available");
 
     const tRes = await req.db.query(
       `SELECT id, subdomain FROM public.tenants WHERE subdomain = $1 LIMIT 1`,
       [sub]
     );
     const t = tRes.rows[0];
-    if (!t) throw new Error('tenant_not_found');
+    if (!t) throw new Error("tenant_not_found");
     return t;
   }
 
@@ -53,13 +53,17 @@ async function whatsappRoutes(fastify) {
     `;
     const { rows } = await req.db.query(q, [tenant.id]);
     const row = rows[0];
-    if (!row?.phone_id) throw new Error('no_whatsapp_connection');
+    if (!row?.phone_id) throw new Error("no_whatsapp_connection");
 
     const waba_id =
       row?.settings?.waba_id ||
-      (row?.settings && typeof row.settings === 'string'
+      (row?.settings && typeof row.settings === "string"
         ? (() => {
-            try { return JSON.parse(row.settings)?.waba_id; } catch { return null; }
+            try {
+              return JSON.parse(row.settings)?.waba_id;
+            } catch {
+              return null;
+            }
           })()
         : null);
 
@@ -69,218 +73,411 @@ async function whatsappRoutes(fastify) {
   const sanitizeWebsites = (raw) => {
     if (!raw) return [];
     const arr = Array.isArray(raw) ? raw : String(raw).split(/[,\s]+/);
-    return arr.map(String).map(s => s.trim()).filter(Boolean).slice(0, 2);
+    return arr
+      .map(String)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 2);
   };
   const sanitizeVertical = (v) => (v ? String(v).toUpperCase() : undefined);
 
   // ---------- ENDPOINTS ----------
 
   // GET /wa/profile -> phone + business profile
-  fastify.get('/profile', async (req, reply) => {
+  fastify.get("/profile", async (req, reply) => {
     try {
       requireToken();
       const { phone_id } = await resolveActivePhone(req);
 
       const phoneFields = [
-        'id',
-        'display_phone_number',
-        'verified_name',
-        'quality_rating',
-        'is_official_business_account',
-        'account_mode',
-        'code_verification_status'
-      ].join(',');
+        "id",
+        "display_phone_number",
+        "verified_name",
+        "quality_rating",
+        "is_official_business_account",
+        "account_mode",
+        "code_verification_status",
+      ].join(",");
 
       const profileFields = [
-        'about',
-        'address',
-        'description',
-        'email',
-        'vertical',
-        'websites',
-        'profile_picture_url'
-      ].join(',');
+        "about",
+        "address",
+        "description",
+        "email",
+        "vertical",
+        "websites",
+        "profile_picture_url",
+      ].join(",");
 
       const phone = await gget(`/${phone_id}`, {
         token: TOKEN,
-        qs: { fields: phoneFields }
+        qs: { fields: phoneFields },
       });
 
       const prof = await gget(`/${phone_id}/whatsapp_business_profile`, {
         token: TOKEN,
-        qs: { fields: profileFields }
+        qs: { fields: profileFields },
       });
 
-      const profile = prof?.data ? (prof.data[0] || {}) : prof || {};
+      const profile = prof?.data ? prof.data[0] || {} : prof || {};
       return reply.send({ ok: true, phone, profile });
     } catch (err) {
-      fastify.log.error({ err }, '[GET /wa/profile]');
+      fastify.log.error({ err }, "[GET /wa/profile]");
       const code =
-        err?.message === 'meta_token_missing' ? 500 :
-        err?.message === 'missing_subdomain' ? 400 :
-        err?.message === 'db_not_available' ? 500 :
-        err?.message === 'tenant_not_found' ? 404 :
-        err?.message === 'no_whatsapp_connection' ? 404 : 500;
-      return reply.code(code).send({ ok: false, error: err?.message || 'unexpected_error' });
+        err?.message === "meta_token_missing"
+          ? 500
+          : err?.message === "missing_subdomain"
+          ? 400
+          : err?.message === "db_not_available"
+          ? 500
+          : err?.message === "tenant_not_found"
+          ? 404
+          : err?.message === "no_whatsapp_connection"
+          ? 404
+          : 500;
+      return reply
+        .code(code)
+        .send({ ok: false, error: err?.message || "unexpected_error" });
     }
   });
 
   // POST /wa/profile -> update about/address/description/email/vertical/websites
-  fastify.post('/profile', async (req, reply) => {
+  fastify.post("/profile", async (req, reply) => {
+    // vamos capturar infos fora do try para conseguir auditar mesmo se falhar cedo
+    let phoneId = null;
+    let payload = {};
+
     try {
       requireToken();
-      const { phone_id } = await resolveActivePhone(req);
-      const {
-        about,
-        address,
-        description,
-        email,
-        vertical,
-        websites
-      } = req.body || {};
+      const act = await resolveActivePhone(req);
+      phoneId = act?.phone_id;
 
-      const payload = {};
-      if (about !== undefined)       payload.about = String(about).slice(0, 139);
-      if (address !== undefined)     payload.address = String(address).slice(0, 256);
-      if (description !== undefined) payload.description = String(description).slice(0, 512);
-      if (email !== undefined)       payload.email = String(email).slice(0, 128);
-      if (vertical !== undefined)    payload.vertical = sanitizeVertical(vertical);
-      if (websites !== undefined)    payload.websites = sanitizeWebsites(websites);
+      const { about, address, description, email, vertical, websites } =
+        req.body || {};
+
+      payload = {};
+      if (about !== undefined) payload.about = String(about).slice(0, 139);
+      if (address !== undefined)
+        payload.address = String(address).slice(0, 256);
+      if (description !== undefined)
+        payload.description = String(description).slice(0, 512);
+      if (email !== undefined) payload.email = String(email).slice(0, 128);
+      if (vertical !== undefined) payload.vertical = sanitizeVertical(vertical);
+      if (websites !== undefined) payload.websites = sanitizeWebsites(websites);
 
       if (!Object.keys(payload).length) {
-        return reply.code(400).send({ ok: false, error: 'no_allowed_fields' });
+        const body400 = { ok: false, error: "no_allowed_fields" };
+        await fastify.audit(req, {
+          action: "wa.profile.update.invalid",
+          resourceType: "whatsapp_profile",
+          resourceId: phoneId,
+          statusCode: 400,
+          requestBody: req.body,
+          responseBody: body400,
+          extra: { payload_keys: Object.keys(payload), phone_id: phoneId },
+        });
+        return reply.code(400).send(body400);
       }
 
       // gpost envia por padrão como form; Graph aceita form para esses campos
-      const res = await gpost(`/${phone_id}/whatsapp_business_profile`, {
+      const res = await gpost(`/${phoneId}/whatsapp_business_profile`, {
         token: TOKEN,
-        form: payload
+        form: payload,
       });
 
-      return reply.send({ ok: true, provider: res });
+      const body200 = { ok: true, provider: res };
+      await fastify.audit(req, {
+        action: "wa.profile.update",
+        resourceType: "whatsapp_profile",
+        resourceId: phoneId,
+        statusCode: 200,
+        requestBody: payload, // já sanitizado (plugin ainda redige se algo sensível)
+        responseBody: { ok: true }, // evita logar payloads enormes do provider
+        extra: {
+          phone_id: phoneId,
+          provider_summary: {
+            ok: !!res?.success,
+            keys: Object.keys(res || {}),
+          },
+        },
+      });
+
+      return reply.send(body200);
     } catch (err) {
-      fastify.log.error({ err }, '[POST /wa/profile]');
+      fastify.log.error({ err }, "[POST /wa/profile]");
+
       const code =
-        err?.message === 'meta_token_missing' ? 500 :
-        err?.message === 'missing_subdomain' ? 400 :
-        err?.message === 'db_not_available' ? 500 :
-        err?.message === 'tenant_not_found' ? 404 :
-        err?.message === 'no_whatsapp_connection' ? 404 : 500;
-      return reply.code(code).send({ ok: false, error: err?.message || 'unexpected_error' });
+        err?.message === "meta_token_missing"
+          ? 500
+          : err?.message === "missing_subdomain"
+          ? 400
+          : err?.message === "db_not_available"
+          ? 500
+          : err?.message === "tenant_not_found"
+          ? 404
+          : err?.message === "no_whatsapp_connection"
+          ? 404
+          : 500;
+
+      const bodyErr = { ok: false, error: err?.message || "unexpected_error" };
+
+      await fastify.audit(req, {
+        action: "wa.profile.update.error",
+        resourceType: "whatsapp_profile",
+        resourceId: phoneId,
+        statusCode: code,
+        requestBody: payload, // o que tentamos enviar
+        responseBody: bodyErr,
+        extra: {
+          phone_id: phoneId,
+          message: String(err?.message || err),
+          name: err?.name || null,
+        },
+      });
+
+      return reply.code(code).send(bodyErr);
     }
   });
 
   // POST /wa/profile/photo-from-url -> upload + aplicar foto
   // body: { file_url: string, type?: 'image/jpeg'|'image/png' }
-  fastify.post('/photo-from-url', async (req, reply) => {
+  fastify.post("/photo-from-url", async (req, reply) => {
+    // capturar infos para auditar mesmo se falhar cedo
+    let phoneId = null;
+    let wabaId = null;
+    let payload = {};
     try {
       requireToken();
-      const { phone_id, waba_id } = await resolveActivePhone(req);
-      const { file_url, type = 'image/jpeg' } = req.body || {};
-      if (!file_url) return reply.code(400).send({ ok: false, error: 'missing_file_url' });
+      const act = await resolveActivePhone(req);
+      phoneId = act?.phone_id;
+      wabaId = act?.waba_id;
+
+      const { file_url, type = "image/jpeg" } = req.body || {};
+      payload = { file_url, type };
+
+      if (!file_url) {
+        const body400 = { ok: false, error: "missing_file_url" };
+        await fastify.audit(req, {
+          action: "wa.profile.photo.invalid",
+          resourceType: "whatsapp_profile",
+          resourceId: phoneId,
+          statusCode: 400,
+          requestBody: req.body,
+          responseBody: body400,
+          extra: { phone_id: phoneId, waba_id: wabaId },
+        });
+        return reply.code(400).send(body400);
+      }
 
       // 1) sobe mídia na WABA
-      const up = await gpost(`/${waba_id}/media`, {
+      const up = await gpost(`/${wabaId}/media`, {
         token: TOKEN,
         form: {
-          messaging_product: 'whatsapp',
+          messaging_product: "whatsapp",
           type,
-          link: file_url
-        }
+          link: file_url,
+        },
       });
       const handle = up?.id;
-      if (!handle) return reply.code(502).send({ ok: false, error: 'upload_no_handle' });
+
+      if (!handle) {
+        const body502 = { ok: false, error: "upload_no_handle" };
+        await fastify.audit(req, {
+          action: "wa.profile.photo.upload_failed",
+          resourceType: "whatsapp_profile",
+          resourceId: phoneId,
+          statusCode: 502,
+          requestBody: payload,
+          responseBody: body502,
+          extra: {
+            phone_id: phoneId,
+            waba_id: wabaId,
+            provider_summary: Object.keys(up || {}),
+          },
+        });
+        return reply.code(502).send(body502);
+      }
 
       // 2) aplica como foto de perfil
-      const res = await gpost(`/${phone_id}/whatsapp_business_profile`, {
+      const res = await gpost(`/${phoneId}/whatsapp_business_profile`, {
         token: TOKEN,
-        form: { profile_picture_handle: handle }
+        form: { profile_picture_handle: handle },
       });
 
-      return reply.send({ ok: true, media_id: handle, provider: res });
+      const body200 = { ok: true, media_id: handle, provider: res };
+      await fastify.audit(req, {
+        action: "wa.profile.photo.set",
+        resourceType: "whatsapp_profile",
+        resourceId: phoneId,
+        statusCode: 200,
+        requestBody: { ...payload, profile_picture_handle: handle },
+        responseBody: { ok: true, media_id: handle }, // evita logar provider completo
+        extra: {
+          phone_id: phoneId,
+          waba_id: wabaId,
+          provider_summary: Object.keys(res || {}),
+        },
+      });
+
+      return reply.send(body200);
     } catch (err) {
-      fastify.log.error({ err }, '[POST /wa/profile/photo-from-url]');
+      fastify.log.error({ err }, "[POST /wa/profile/photo-from-url]");
       const code =
-        err?.message === 'meta_token_missing' ? 500 :
-        err?.message === 'missing_subdomain' ? 400 :
-        err?.message === 'db_not_available' ? 500 :
-        err?.message === 'tenant_not_found' ? 404 :
-        err?.message === 'no_whatsapp_connection' ? 404 : 500;
-      return reply.code(code).send({ ok: false, error: err?.message || 'unexpected_error' });
+        err?.message === "meta_token_missing"
+          ? 500
+          : err?.message === "missing_subdomain"
+          ? 400
+          : err?.message === "db_not_available"
+          ? 500
+          : err?.message === "tenant_not_found"
+          ? 404
+          : err?.message === "no_whatsapp_connection"
+          ? 404
+          : 500;
+
+      const bodyErr = { ok: false, error: err?.message || "unexpected_error" };
+
+      await fastify.audit(req, {
+        action: "wa.profile.photo.error",
+        resourceType: "whatsapp_profile",
+        resourceId: phoneId,
+        statusCode: code,
+        requestBody: payload,
+        responseBody: bodyErr,
+        extra: {
+          phone_id: phoneId,
+          waba_id: wabaId,
+          message: String(err?.message || err),
+          name: err?.name || null,
+        },
+      });
+
+      return reply.code(code).send(bodyErr);
     }
   });
 
   // DELETE /wa/profile/photo -> remove foto
-  fastify.delete('/profile/photo', async (req, reply) => {
+  fastify.delete("/profile/photo", async (req, reply) => {
+    let phoneId = null;
+    let payload = {};
     try {
       requireToken();
       const { phone_id } = await resolveActivePhone(req);
+      phoneId = phone_id;
+      payload = { profile_picture_handle: "" };
 
-      const res = await gpost(`/${phone_id}/whatsapp_business_profile`, {
+      const res = await gpost(`/${phoneId}/whatsapp_business_profile`, {
         token: TOKEN,
-        form: { profile_picture_handle: '' } // limpa
+        form: payload, // limpa
       });
 
-      return reply.send({ ok: true, provider: res });
+      const body200 = { ok: true, provider: res };
+
+      await fastify.audit(req, {
+        action: "wa.profile.photo.unset",
+        resourceType: "whatsapp_profile",
+        resourceId: phoneId,
+        statusCode: 200,
+        requestBody: payload,
+        responseBody: { ok: true }, // evita logar provider inteiro
+        extra: { phone_id: phoneId, provider_summary: Object.keys(res || {}) },
+      });
+
+      return reply.send(body200);
     } catch (err) {
-      fastify.log.error({ err }, '[DELETE /wa/profile/photo]');
+      fastify.log.error({ err }, "[DELETE /wa/profile/photo]");
       const code =
-        err?.message === 'meta_token_missing' ? 500 :
-        err?.message === 'missing_subdomain' ? 400 :
-        err?.message === 'db_not_available' ? 500 :
-        err?.message === 'tenant_not_found' ? 404 :
-        err?.message === 'no_whatsapp_connection' ? 404 : 500;
-      return reply.code(code).send({ ok: false, error: err?.message || 'unexpected_error' });
+        err?.message === "meta_token_missing"
+          ? 500
+          : err?.message === "missing_subdomain"
+          ? 400
+          : err?.message === "db_not_available"
+          ? 500
+          : err?.message === "tenant_not_found"
+          ? 404
+          : err?.message === "no_whatsapp_connection"
+          ? 404
+          : 500;
+
+      const bodyErr = { ok: false, error: err?.message || "unexpected_error" };
+
+      await fastify.audit(req, {
+        action: "wa.profile.photo.error",
+        resourceType: "whatsapp_profile",
+        resourceId: phoneId,
+        statusCode: code,
+        requestBody: payload,
+        responseBody: bodyErr,
+        extra: {
+          phone_id: phoneId,
+          message: String(err?.message || err),
+          name: err?.name || null,
+        },
+      });
+
+      return reply.code(code).send(bodyErr);
     }
   });
 
   // GET /wa/number -> metadados do número (UI)
-  fastify.get('/number', async (req, reply) => {
+  fastify.get("/number", async (req, reply) => {
     try {
       requireToken();
       const { phone_id } = await resolveActivePhone(req);
 
       const fields = [
-        'id',
-        'display_phone_number',
-        'verified_name',
-        'quality_rating',
-        'is_official_business_account',
-        'account_mode'
-      ].join(',');
+        "id",
+        "display_phone_number",
+        "verified_name",
+        "quality_rating",
+        "is_official_business_account",
+        "account_mode",
+      ].join(",");
 
-      const phone = await gget(`/${phone_id}`, { token: TOKEN, qs: { fields } });
+      const phone = await gget(`/${phone_id}`, {
+        token: TOKEN,
+        qs: { fields },
+      });
       return reply.send({ ok: true, phone });
     } catch (err) {
-      fastify.log.error({ err }, '[GET /wa/number]');
+      fastify.log.error({ err }, "[GET /wa/number]");
       const code =
-        err?.message === 'meta_token_missing' ? 500 :
-        err?.message === 'missing_subdomain' ? 400 :
-        err?.message === 'db_not_available' ? 500 :
-        err?.message === 'tenant_not_found' ? 404 :
-        err?.message === 'no_whatsapp_connection' ? 404 : 500;
-      return reply.code(code).send({ ok: false, error: err?.message || 'unexpected_error' });
+        err?.message === "meta_token_missing"
+          ? 500
+          : err?.message === "missing_subdomain"
+          ? 400
+          : err?.message === "db_not_available"
+          ? 500
+          : err?.message === "tenant_not_found"
+          ? 404
+          : err?.message === "no_whatsapp_connection"
+          ? 404
+          : 500;
+      return reply
+        .code(code)
+        .send({ ok: false, error: err?.message || "unexpected_error" });
     }
   });
 
-    // routes/waEmbedded.js (trecho)
-fastify.post('/embedded/es/pick-number', async (req, reply) => {
-  const { subdomain, phone_number_id } = req.body || {};
-  if (!subdomain || !phone_number_id) {
-    return reply.code(400).send({ error: 'missing_params' });
-  }
-  if (!req.db) return reply.code(500).send({ error: 'db_not_available' });
+  // routes/waEmbedded.js (trecho)
+  fastify.post("/embedded/es/pick-number", async (req, reply) => {
+    const { subdomain, phone_number_id } = req.body || {};
+    if (!subdomain || !phone_number_id) {
+      return reply.code(400).send({ error: "missing_params" });
+    }
+    if (!req.db) return reply.code(500).send({ error: "db_not_available" });
 
-  // resolve tenant
-  const tRes = await req.db.query(
-    `SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1`,
-    [subdomain]
-  );
-  const tenant = tRes.rows[0];
-  if (!tenant) return reply.code(404).send({ error: 'tenant_not_found' });
+    // resolve tenant
+    const tRes = await req.db.query(
+      `SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1`,
+      [subdomain]
+    );
+    const tenant = tRes.rows[0];
+    if (!tenant) return reply.code(404).send({ error: "tenant_not_found" });
 
-  // ✅ ativa só o escolhido; NÃO mexe nos demais
-  await req.db.query(`
+    // ✅ ativa só o escolhido; NÃO mexe nos demais
+    await req.db.query(
+      `
     UPDATE public.tenant_channel_connections
        SET is_active = true,
            updated_at = now()
@@ -288,25 +485,26 @@ fastify.post('/embedded/es/pick-number', async (req, reply) => {
        AND channel   = 'whatsapp'
        AND provider  = 'meta'
        AND external_id = $2
-  `, [tenant.id, phone_number_id]);
+  `,
+      [tenant.id, phone_number_id]
+    );
 
-  return reply.send({ ok: true, tenant_id: tenant.id, phone_number_id });
-});
-
+    return reply.send({ ok: true, tenant_id: tenant.id, phone_number_id });
+  });
 
   // ============ FINALIZE (Embedded Signup) ============
   // POST /api/v1/wa/es/finalize
-  fastify.post('/embedded/es/finalize', async (req, reply) => {
+  fastify.post("/embedded/es/finalize", async (req, reply) => {
     // subdomain: preferir do plugin; fallback do body/header
     const subdomain =
       req?.tenant?.subdomain ||
       req?.tenant?.name ||
-      req?.headers['x-tenant-subdomain'] ||
+      req?.headers["x-tenant-subdomain"] ||
       req?.body?.subdomain;
 
     const { code } = req.body || {};
     if (!code || !subdomain) {
-      return reply.code(400).send({ error: 'missing_code_or_subdomain' });
+      return reply.code(400).send({ error: "missing_code_or_subdomain" });
     }
 
     const {
@@ -316,17 +514,19 @@ fastify.post('/embedded/es/pick-number', async (req, reply) => {
       YOUR_BUSINESS_ID,
       SYSTEM_USER_ID,
       SYSTEM_USER_TOKEN,
-      SYSTEM_USER_ADMIN_TOKEN
+      SYSTEM_USER_ADMIN_TOKEN,
     } = process.env;
 
     if (!META_APP_ID || !META_APP_SECRET) {
-      return reply.code(500).send({ error: 'meta_app_credentials_missing' });
+      return reply.code(500).send({ error: "meta_app_credentials_missing" });
     }
     if (!YOUR_BUSINESS_ID || !SYSTEM_USER_ID || !SYSTEM_USER_TOKEN) {
-      return reply.code(500).send({ error: 'system_user_or_business_env_missing' });
+      return reply
+        .code(500)
+        .send({ error: "system_user_or_business_env_missing" });
     }
     if (!req.db) {
-      return reply.code(500).send({ error: 'db_not_available' });
+      return reply.code(500).send({ error: "db_not_available" });
     }
 
     try {
@@ -336,13 +536,18 @@ fastify.post('/embedded/es/pick-number', async (req, reply) => {
         [subdomain]
       );
       const tenantRow = tRes.rows[0];
-      if (!tenantRow) return reply.code(404).send({ error: 'tenant_not_found', subdomain });
+      if (!tenantRow)
+        return reply.code(404).send({ error: "tenant_not_found", subdomain });
       const tenantId = tenantRow.id;
 
       // 1) exchange code -> user access_token
-      const qs = { client_id: META_APP_ID, client_secret: META_APP_SECRET, code };
+      const qs = {
+        client_id: META_APP_ID,
+        client_secret: META_APP_SECRET,
+        code,
+      };
       if (META_REDIRECT_URI) qs.redirect_uri = META_REDIRECT_URI;
-      const tok = await gget('/oauth/access_token', { qs });
+      const tok = await gget("/oauth/access_token", { qs });
       const userToken = tok.access_token;
 
       // 2) descobrir WABA_ID
@@ -350,29 +555,34 @@ fastify.post('/embedded/es/pick-number', async (req, reply) => {
 
       // 2a) via /debug_token (granular_scopes)
       try {
-        const dbg = await gget('/debug_token', {
+        const dbg = await gget("/debug_token", {
           qs: {
             input_token: userToken,
-            access_token: `${META_APP_ID}|${META_APP_SECRET}`
-          }
+            access_token: `${META_APP_ID}|${META_APP_SECRET}`,
+          },
         });
         const gs = dbg?.data?.granular_scopes || [];
-        const mgmt = gs.find(s =>
-          s?.scope === 'whatsapp_business_management' && Array.isArray(s?.target_ids)
+        const mgmt = gs.find(
+          (s) =>
+            s?.scope === "whatsapp_business_management" &&
+            Array.isArray(s?.target_ids)
         );
         wabaId = mgmt?.target_ids?.[0] || null;
       } catch (e) {
-        fastify.log.warn({ err: e }, '[wa/es/finalize] debug_token fallback');
+        fastify.log.warn({ err: e }, "[wa/es/finalize] debug_token fallback");
       }
 
       // 2b) fallback: WABA(s) compartilhadas com seu Business
       if (!wabaId) {
-        const shared = await gget(`/${YOUR_BUSINESS_ID}/client_whatsapp_business_accounts`, {
-          token: SYSTEM_USER_TOKEN
-        });
+        const shared = await gget(
+          `/${YOUR_BUSINESS_ID}/client_whatsapp_business_accounts`,
+          {
+            token: SYSTEM_USER_TOKEN,
+          }
+        );
         wabaId = shared?.data?.[0]?.id || null;
       }
-      if (!wabaId) return reply.code(400).send({ error: 'no_waba_found' });
+      if (!wabaId) return reply.code(400).send({ error: "no_waba_found" });
 
       // 3) assinar webhooks do seu app na WABA
       await gpost(`/${wabaId}/subscribed_apps`, { token: userToken });
@@ -381,11 +591,13 @@ fastify.post('/embedded/es/pick-number', async (req, reply) => {
       await gpost(`/${wabaId}/assigned_users`, {
         token: SYSTEM_USER_ADMIN_TOKEN || SYSTEM_USER_TOKEN,
         // Graph aceita tasks como string "['MANAGE']" em x-www-form-urlencoded
-        form: { user: SYSTEM_USER_ID, tasks: "['MANAGE']" }
+        form: { user: SYSTEM_USER_ID, tasks: "['MANAGE']" },
       });
 
       // 5) listar números
-      const pn = await gget(`/${wabaId}/phone_numbers`, { token: SYSTEM_USER_TOKEN });
+      const pn = await gget(`/${wabaId}/phone_numbers`, {
+        token: SYSTEM_USER_TOKEN,
+      });
       const numbers = Array.isArray(pn?.data) ? pn.data : [];
 
       // 6) persistir conexões — insere como INATIVO; não tocar no is_active no upsert
@@ -403,9 +615,9 @@ fastify.post('/embedded/es/pick-number', async (req, reply) => {
       `;
 
       for (const num of numbers) {
-        const phoneId  = num?.id;
+        const phoneId = num?.id;
         if (!phoneId) continue;
-        const disp     = num?.display_phone_number || num?.verified_name || null;
+        const disp = num?.display_phone_number || num?.verified_name || null;
         const settings = { waba_id: wabaId, raw: num };
         await req.db.query(qUpsert, [
           tenantId,
@@ -413,7 +625,7 @@ fastify.post('/embedded/es/pick-number', async (req, reply) => {
           wabaId,
           phoneId,
           disp,
-          JSON.stringify(settings)
+          JSON.stringify(settings),
         ]);
       }
 
@@ -421,31 +633,31 @@ fastify.post('/embedded/es/pick-number', async (req, reply) => {
         subdomain,
         tenant_id: tenantId,
         waba_id: wabaId,
-        numbers
+        numbers,
       });
     } catch (err) {
-      fastify.log.error(err, '[wa/es/finalize] falha no onboarding');
+      fastify.log.error(err, "[wa/es/finalize] falha no onboarding");
       const status = Number.isInteger(err?.status) ? err.status : 500;
       return reply.code(status).send({
-        error: 'wa_embedded_finalize_failed',
-        message: err?.message || 'Erro inesperado',
-        details: err?.details
+        error: "wa_embedded_finalize_failed",
+        message: err?.message || "Erro inesperado",
+        details: err?.details,
       });
     }
   });
 
-  fastify.get('/status', async (req, reply) => {
+  fastify.get("/status", async (req, reply) => {
     const subdomain =
       req?.tenant?.subdomain ||
       req?.tenant?.name ||
-      req?.headers['x-tenant-subdomain'] ||
+      req?.headers["x-tenant-subdomain"] ||
       req?.query?.subdomain;
 
     if (!subdomain) {
-      return reply.code(400).send({ ok: false, error: 'missing_subdomain' });
+      return reply.code(400).send({ ok: false, error: "missing_subdomain" });
     }
     if (!req.db) {
-      return reply.code(500).send({ ok: false, error: 'db_not_available' });
+      return reply.code(500).send({ ok: false, error: "db_not_available" });
     }
 
     try {
@@ -467,20 +679,26 @@ fastify.post('/embedded/es/pick-number', async (req, reply) => {
       const { rows } = await req.db.query(q, [tenant.id]);
 
       if (!rows.length) {
-        return reply.send({ ok: true, connected: false, waba_id: null, numbers: [] });
+        return reply.send({
+          ok: true,
+          connected: false,
+          waba_id: null,
+          numbers: [],
+        });
       }
 
       // waba_id do primeiro registro que tiver essa info
       const waba_id =
-        rows.find(r => r?.settings?.waba_id)?.settings?.waba_id ||
+        rows.find((r) => r?.settings?.waba_id)?.settings?.waba_id ||
         rows[0]?.settings?.waba_id ||
         null;
 
-      const numbers = rows.map(r => {
+      const numbers = rows.map((r) => {
         const raw = r?.settings?.raw || {};
         return {
           id: r.external_id,
-          display_phone_number: raw.display_phone_number || r.display_name || null,
+          display_phone_number:
+            raw.display_phone_number || r.display_name || null,
           verified_name: raw.verified_name || null,
           is_active: !!r.is_active,
         };
@@ -488,13 +706,13 @@ fastify.post('/embedded/es/pick-number', async (req, reply) => {
 
       return reply.send({
         ok: true,
-        connected: true,   // existe pelo menos uma conexão salva
+        connected: true, // existe pelo menos uma conexão salva
         waba_id,
-        numbers
+        numbers,
       });
     } catch (err) {
-      fastify.log.error({ err }, '[wa/status] failed');
-      return reply.code(500).send({ ok: false, error: 'wa_status_failed' });
+      fastify.log.error({ err }, "[wa/status] failed");
+      return reply.code(500).send({ ok: false, error: "wa_status_failed" });
     }
   });
 }
