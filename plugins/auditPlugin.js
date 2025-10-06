@@ -79,7 +79,7 @@ async function auditPlugin(fastify, opts) {
 
       const sql = `
       INSERT INTO audit_logs
-        (actor_id, actor_name, method, path, status_code, ip, user_agent,
+        (actor_id, actor_user, method, path, status_code, ip, user_agent,
          action, resource_type, resource_id,
          request_body, response_body, before_data, after_data, extra)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb)
