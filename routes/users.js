@@ -1,25 +1,27 @@
 // routes/atendentes.js
-import axios from 'axios';
-import { pool } from '../services/db.js'; // pool global (public)
+import axios from "axios";
+import { pool } from "../services/db.js"; // pool global (public)
 
 // ===== Config da API externa =====
 // Token opcional para ambas as chamadas
-const AUTH_API_TOKEN = process.env.AUTH_API_TOKEN || '';
+const AUTH_API_TOKEN = process.env.AUTH_API_TOKEN || "";
 
 // Delete externo (novo): usa o serviço auth que você expõe em /api/users
-const AUTH_API_BASE = (process.env.AUTH_API_BASE || 'https://srv-auth.dkdevs.com.br').replace(/\/+$/,'');
+const AUTH_API_BASE = (
+  process.env.AUTH_API_BASE || "https://srv-auth.dkdevs.com.br"
+).replace(/\/+$/, "");
 const AUTH_DELETE_URL = `${AUTH_API_BASE}/api/users`;
 const INVITE_API_URL = `${AUTH_API_BASE}/api/invite`;
 
 // ---------- helpers HTTP ----------
 async function triggerInvite({ email, companySlug, profile }, log) {
   const headers = {
-    'Content-Type': 'application/json',
+    "Content-Type": "application/json",
     ...(AUTH_API_TOKEN ? { Authorization: `Bearer ${AUTH_API_TOKEN}` } : {}),
   };
   const payload = { email, companySlug, profile };
 
-  log?.info({ payload, url: INVITE_API_URL }, '➡️ Chamando INVITE API');
+  log?.info({ payload, url: INVITE_API_URL }, "➡️ Chamando INVITE API");
 
   const { data, status } = await axios.post(INVITE_API_URL, payload, {
     headers,
@@ -27,7 +29,7 @@ async function triggerInvite({ email, companySlug, profile }, log) {
     validateStatus: () => true,
   });
 
-  log?.info({ status, data }, '📩 Invite API respondeu');
+  log?.info({ status, data }, "📩 Invite API respondeu");
 
   if (status < 200 || status >= 300) {
     const msg = (data && (data.message || data.error)) || `HTTP ${status}`;
@@ -38,12 +40,15 @@ async function triggerInvite({ email, companySlug, profile }, log) {
 
 async function triggerExternalDelete({ email, companySlug }, log) {
   const headers = {
-    'Content-Type': 'application/json',
+    "Content-Type": "application/json",
     ...(AUTH_API_TOKEN ? { Authorization: `Bearer ${AUTH_API_TOKEN}` } : {}),
   };
   const payload = { email, companySlug };
 
-  log?.info({ payload, url: AUTH_DELETE_URL }, '➡️ Chamando AUTH DELETE /api/users');
+  log?.info(
+    { payload, url: AUTH_DELETE_URL },
+    "➡️ Chamando AUTH DELETE /api/users"
+  );
 
   const { data, status } = await axios.delete(AUTH_DELETE_URL, {
     headers,
@@ -52,7 +57,7 @@ async function triggerExternalDelete({ email, companySlug }, log) {
     data: payload, // body no DELETE
   });
 
-  log?.info({ status, data }, '🗑️ AUTH DELETE respondeu');
+  log?.info({ status, data }, "🗑️ AUTH DELETE respondeu");
 
   if (status < 200 || status >= 300) {
     const msg = (data && (data.message || data.error)) || `HTTP ${status}`;
@@ -70,44 +75,53 @@ async function detectUserColumns(req) {
        AND table_name = 'users'
   `;
   const { rows } = await req.db.query(q);
-  const cols = new Set(rows.map(r => r.column_name.toLowerCase()));
+  const cols = new Set(rows.map((r) => r.column_name.toLowerCase()));
 
   const nameCol =
-    (cols.has('name') && 'name') ||
-    (cols.has('first_name') && 'first_name') ||
-    (cols.has('nome') && 'nome') ||
+    (cols.has("name") && "name") ||
+    (cols.has("first_name") && "first_name") ||
+    (cols.has("nome") && "nome") ||
     null;
 
   const lastCol =
-    (cols.has('lastname') && 'lastname') ||
-    (cols.has('last_name') && 'last_name') ||
-    (cols.has('sobrenome') && 'sobrenome') ||
+    (cols.has("lastname") && "lastname") ||
+    (cols.has("last_name") && "last_name") ||
+    (cols.has("sobrenome") && "sobrenome") ||
     null;
 
-  const emailCol  = cols.has('email')  ? 'email'  : null;
-  const filasCol  = cols.has('filas')  ? 'filas'  : null;
+  const emailCol = cols.has("email") ? "email" : null;
+  const filasCol = cols.has("filas") ? "filas" : null;
   const perfilCol =
-    (cols.has('perfil') && 'perfil') ||
-    (cols.has('profile') && 'profile') ||
+    (cols.has("perfil") && "perfil") ||
+    (cols.has("profile") && "profile") ||
     null;
 
-  const statusCol = cols.has('status') ? 'status' : null;
-  const idCol     = cols.has('id')     ? 'id'     : null;
+  const statusCol = cols.has("status") ? "status" : null;
+  const idCol = cols.has("id") ? "id" : null;
 
-  return { idCol, nameCol, lastCol, emailCol, filasCol, perfilCol, statusCol, all: cols };
+  return {
+    idCol,
+    nameCol,
+    lastCol,
+    emailCol,
+    filasCol,
+    perfilCol,
+    statusCol,
+    all: cols,
+  };
 }
 
 function buildSelect(cols) {
   const fields = [];
-  if (cols.idCol)     fields.push(`${cols.idCol} as id`);
-  if (cols.nameCol)   fields.push(`${cols.nameCol} as name`);
-  if (cols.lastCol)   fields.push(`${cols.lastCol} as lastname`);
-  if (cols.emailCol)  fields.push(`${cols.emailCol} as email`);
+  if (cols.idCol) fields.push(`${cols.idCol} as id`);
+  if (cols.nameCol) fields.push(`${cols.nameCol} as name`);
+  if (cols.lastCol) fields.push(`${cols.lastCol} as lastname`);
+  if (cols.emailCol) fields.push(`${cols.emailCol} as email`);
   if (cols.statusCol) fields.push(`${cols.statusCol} as status`);
-  if (cols.filasCol)  fields.push(`${cols.filasCol} as filas`);
+  if (cols.filasCol) fields.push(`${cols.filasCol} as filas`);
   if (cols.perfilCol) fields.push(`${cols.perfilCol} as perfil`);
-  if (!fields.length) fields.push('*');
-  return `SELECT ${fields.join(', ')} FROM users`;
+  if (!fields.length) fields.push("*");
+  return `SELECT ${fields.join(", ")} FROM users`;
 }
 
 function buildUpsert(cols, data) {
@@ -116,20 +130,39 @@ function buildUpsert(cols, data) {
   const sets = [];
   let i = 1;
 
-  if (cols.nameCol && data.name != null)       { insertCols.push(cols.nameCol);   values.push(data.name);     sets.push(`${cols.nameCol}=EXCLUDED.${cols.nameCol}`); }
-  if (cols.lastCol && data.lastname != null)   { insertCols.push(cols.lastCol);   values.push(data.lastname); sets.push(`${cols.lastCol}=EXCLUDED.${cols.lastCol}`); }
-  if (cols.emailCol && data.email != null)     { insertCols.push(cols.emailCol);  values.push(data.email); }
-  if (cols.filasCol && data.filas != null)     { insertCols.push(cols.filasCol);  values.push(data.filas);    sets.push(`${cols.filasCol}=EXCLUDED.${cols.filasCol}`); }
-  if (cols.perfilCol && data.perfil != null)   { insertCols.push(cols.perfilCol); values.push(data.perfil);   sets.push(`${cols.perfilCol}=EXCLUDED.${cols.perfilCol}`); }
+  if (cols.nameCol && data.name != null) {
+    insertCols.push(cols.nameCol);
+    values.push(data.name);
+    sets.push(`${cols.nameCol}=EXCLUDED.${cols.nameCol}`);
+  }
+  if (cols.lastCol && data.lastname != null) {
+    insertCols.push(cols.lastCol);
+    values.push(data.lastname);
+    sets.push(`${cols.lastCol}=EXCLUDED.${cols.lastCol}`);
+  }
+  if (cols.emailCol && data.email != null) {
+    insertCols.push(cols.emailCol);
+    values.push(data.email);
+  }
+  if (cols.filasCol && data.filas != null) {
+    insertCols.push(cols.filasCol);
+    values.push(data.filas);
+    sets.push(`${cols.filasCol}=EXCLUDED.${cols.filasCol}`);
+  }
+  if (cols.perfilCol && data.perfil != null) {
+    insertCols.push(cols.perfilCol);
+    values.push(data.perfil);
+    sets.push(`${cols.perfilCol}=EXCLUDED.${cols.perfilCol}`);
+  }
 
-  const placeholders = insertCols.map(() => `$${i++}`).join(', ');
-  const conflictKey = cols.emailCol || 'email';
+  const placeholders = insertCols.map(() => `$${i++}`).join(", ");
+  const conflictKey = cols.emailCol || "email";
 
   const text = `
-    INSERT INTO users (${insertCols.join(', ')})
+    INSERT INTO users (${insertCols.join(", ")})
     VALUES (${placeholders})
     ON CONFLICT (${conflictKey}) DO UPDATE
-      SET ${sets.join(', ')}
+      SET ${sets.join(", ")}
     RETURNING *
   `;
   return { text, values };
@@ -137,85 +170,143 @@ function buildUpsert(cols, data) {
 
 async function usersRoutes(fastify, _options) {
   // Listar
-  fastify.get('/', async (req, reply) => {
+  fastify.get("/", async (req, reply) => {
     try {
       const cols = await detectUserColumns(req);
-      req.log.info({ cols }, '🔎 colunas detectadas (GET /users)');
-      const order = (cols.nameCol && cols.lastCol) ? ` ORDER BY ${cols.nameCol}, ${cols.lastCol}` : '';
+      req.log.info({ cols }, "🔎 colunas detectadas (GET /users)");
+      const order =
+        cols.nameCol && cols.lastCol
+          ? ` ORDER BY ${cols.nameCol}, ${cols.lastCol}`
+          : "";
       const sql = buildSelect(cols) + order;
       const { rows } = await req.db.query(sql);
       return reply.send(rows);
     } catch (err) {
       fastify.log.error(err);
-      return reply.code(500).send({ error: 'Erro ao listar atendentes' });
+      return reply.code(500).send({ error: "Erro ao listar atendentes" });
     }
   });
 
   // GET /users/id/:id  → busca por ID (string, uuid ou numérico)
-fastify.get('/id/:id', async (req, reply) => {
-  const { id } = req.params;
-  try {
-    const cols = await detectUserColumns(req);
-    req.log.info({ cols, id }, '🔎 colunas detectadas (GET /users/id/:id)');
-
-    if (!cols.idCol) {
-      return reply.code(500).send({ error: 'Tabela users não possui coluna de ID' });
-    }
-
-    const sql = buildSelect(cols) + ` WHERE ${cols.idCol} = $1`;
-    const { rows } = await req.db.query(sql, [String(id)]);
-    if (rows.length === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
-    return reply.send(rows[0]);
-  } catch (err) {
-    fastify.log.error(err);
-    return reply.code(500).send({ error: 'Erro ao buscar atendente por ID' });
-  }
-});
-
-
-  // Buscar por email
-  fastify.get('/:email', async (req, reply) => {
-    const { email } = req.params;
+  fastify.get("/id/:id", async (req, reply) => {
+    const { id } = req.params;
     try {
       const cols = await detectUserColumns(req);
-      req.log.info({ cols }, '🔎 colunas detectadas (GET /users/:email)');
-      if (!cols.emailCol) return reply.code(500).send({ error: 'Tabela users não possui coluna "email"' });
-      const sql = buildSelect(cols) + ` WHERE ${cols.emailCol} = $1`;
-      const { rows } = await req.db.query(sql, [email]);
-      if (rows.length === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+      req.log.info({ cols, id }, "🔎 colunas detectadas (GET /users/id/:id)");
+
+      if (!cols.idCol) {
+        return reply
+          .code(500)
+          .send({ error: "Tabela users não possui coluna de ID" });
+      }
+
+      const sql = buildSelect(cols) + ` WHERE ${cols.idCol} = $1`;
+      const { rows } = await req.db.query(sql, [String(id)]);
+      if (rows.length === 0)
+        return reply.code(404).send({ error: "Atendente não encontrado" });
       return reply.send(rows[0]);
     } catch (err) {
       fastify.log.error(err);
-      return reply.code(500).send({ error: 'Erro ao buscar atendente' });
+      return reply.code(500).send({ error: "Erro ao buscar atendente por ID" });
+    }
+  });
+
+  // Buscar por email
+  fastify.get("/:email", async (req, reply) => {
+    const { email } = req.params;
+    try {
+      const cols = await detectUserColumns(req);
+      req.log.info({ cols }, "🔎 colunas detectadas (GET /users/:email)");
+      if (!cols.emailCol)
+        return reply
+          .code(500)
+          .send({ error: 'Tabela users não possui coluna "email"' });
+      const sql = buildSelect(cols) + ` WHERE ${cols.emailCol} = $1`;
+      const { rows } = await req.db.query(sql, [email]);
+      if (rows.length === 0)
+        return reply.code(404).send({ error: "Atendente não encontrado" });
+      return reply.send(rows[0]);
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.code(500).send({ error: "Erro ao buscar atendente" });
     }
   });
 
   // Criar (tenant + public + invite)
-  fastify.post('/', async (req, reply) => {
+  fastify.post("/", async (req, reply) => {
     const { name, lastname, email, perfil, filas = [] } = req.body || {};
-    if (!email || !perfil) return reply.code(400).send({ error: 'email e perfil são obrigatórios' });
+    if (!email || !perfil) {
+      const body400 = { error: "email e perfil são obrigatórios" };
+      await fastify.audit(req, {
+        action: "user.create.invalid_payload",
+        resourceType: "user",
+        resourceId: String(email || ""),
+        statusCode: 400,
+        requestBody: {
+          email,
+          perfil,
+          filas_count: Array.isArray(filas) ? filas.length : 0,
+        },
+        responseBody: body400,
+      });
+      return reply.code(400).send(body400);
+    }
 
     const lowerEmail = String(email).toLowerCase();
     const filasToSave = Array.isArray(filas) ? filas : [];
 
     try {
       const { subdomain } = req.tenant || {};
-      if (!subdomain) return reply.code(400).send({ error: 'tenant não resolvido' });
+      if (!subdomain) {
+        const body400 = { error: "tenant não resolvido" };
+        await fastify.audit(req, {
+          action: "user.create.tenant_unresolved",
+          resourceType: "user",
+          resourceId: lowerEmail,
+          statusCode: 400,
+          responseBody: body400,
+        });
+        return reply.code(400).send(body400);
+      }
 
-      // 1) catálogo global: company_id e slug
+      // 1) catálogo global
       const qTenant = await pool.query(
         `SELECT id AS company_id, slug
-           FROM public.companies
-          WHERE slug = $1`,
+         FROM public.companies
+        WHERE slug = $1`,
         [subdomain]
       );
       const tenant = qTenant.rows[0];
-      if (!tenant) return reply.code(404).send({ error: 'tenant não encontrado no catálogo' });
+      if (!tenant) {
+        const body404 = { error: "tenant não encontrado no catálogo" };
+        await fastify.audit(req, {
+          action: "user.create.tenant_not_found",
+          resourceType: "user",
+          resourceId: lowerEmail,
+          statusCode: 404,
+          responseBody: body404,
+          extra: { subdomain },
+        });
+        return reply.code(404).send(body404);
+      }
 
       // 2) UPSERT no schema do tenant
       const cols = await detectUserColumns(req);
-      req.log.info({ cols }, '🧩 colunas detectadas (POST /users)');
-      if (!cols.emailCol) return reply.code(500).send({ error: 'Tabela users do tenant não possui coluna "email"' });
+      req.log.info({ cols }, "🧩 colunas detectadas (POST /users)");
+      if (!cols.emailCol) {
+        const body500 = {
+          error: 'Tabela users do tenant não possui coluna "email"',
+        };
+        await fastify.audit(req, {
+          action: "user.create.schema_invalid",
+          resourceType: "user",
+          resourceId: lowerEmail,
+          statusCode: 500,
+          responseBody: body500,
+          extra: { subdomain, cols },
+        });
+        return reply.code(500).send(body500);
+      }
 
       const up = buildUpsert(cols, {
         name: name ?? null,
@@ -227,22 +318,22 @@ fastify.get('/id/:id', async (req, reply) => {
       const ins = await req.db.query(up.text, up.values);
       const u = ins.rows[0] || {};
       const out = {
-        id:       u[cols.idCol]     ?? u.id     ?? null,
-        name:     u[cols.nameCol]   ?? u.name   ?? null,
-        lastname: u[cols.lastCol]   ?? u.lastname ?? null,
-        email:    u[cols.emailCol]  ?? u.email  ?? lowerEmail,
-        status:   cols.statusCol ? (u[cols.statusCol] ?? u.status ?? null) : null,
-        filas:    cols.filasCol ? (u[cols.filasCol] ?? u.filas ?? []) : [],
-        perfil:   u[cols.perfilCol] ?? u.perfil ?? perfil,
+        id: u[cols.idCol] ?? u.id ?? null,
+        name: u[cols.nameCol] ?? u.name ?? null,
+        lastname: u[cols.lastCol] ?? u.lastname ?? null,
+        email: u[cols.emailCol] ?? u.email ?? lowerEmail,
+        status: cols.statusCol ? u[cols.statusCol] ?? u.status ?? null : null,
+        filas: cols.filasCol ? u[cols.filasCol] ?? u.filas ?? [] : [],
+        perfil: u[cols.perfilCol] ?? u.perfil ?? perfil,
       };
 
       // 3) public.users — company_id, email, profile
       await pool.query(
         `INSERT INTO public.users (company_id, email, profile)
-         VALUES ($1,$2,$3)
-         ON CONFLICT (company_id, email) DO UPDATE
-           SET profile = COALESCE(EXCLUDED.profile, public.users.profile),
-               updated_at = NOW()`,
+       VALUES ($1,$2,$3)
+       ON CONFLICT (company_id, email) DO UPDATE
+         SET profile = COALESCE(EXCLUDED.profile, public.users.profile),
+             updated_at = NOW()`,
         [tenant.company_id, lowerEmail, perfil]
       );
 
@@ -250,49 +341,192 @@ fastify.get('/id/:id', async (req, reply) => {
       let invite_sent = false;
       let invite_error = null;
       try {
-        await triggerInvite({ email: lowerEmail, companySlug: tenant.slug, profile: perfil }, fastify.log);
+        await triggerInvite(
+          { email: lowerEmail, companySlug: tenant.slug, profile: perfil },
+          fastify.log
+        );
         invite_sent = true;
       } catch (e) {
-        invite_error = e.response?.data?.message || e.message || 'Falha ao enviar invite';
-        fastify.log.error({ invite_error, email: lowerEmail, companySlug: tenant.slug }, '❌ Invite falhou');
+        invite_error =
+          e?.response?.data?.message || e?.message || "Falha ao enviar invite";
+        fastify.log.error(
+          { invite_error, email: lowerEmail, companySlug: tenant.slug },
+          "❌ Invite falhou"
+        );
       }
 
-      return reply.code(201).send({ ...out, invite_sent, ...(invite_error ? { invite_error } : {}) });
+      // ✅ AUDIT SUCESSO
+      await fastify.audit(req, {
+        action: "user.create",
+        resourceType: "user",
+        resourceId: out.id || lowerEmail,
+        statusCode: 201,
+        requestBody: {
+          name,
+          lastname,
+          email: lowerEmail,
+          perfil,
+          filas_count: filasToSave.length,
+        },
+        afterData: out,
+        extra: {
+          tenant: {
+            subdomain,
+            company_id: tenant.company_id,
+            slug: tenant.slug,
+          },
+          invite_sent,
+          ...(invite_error ? { invite_error } : {}),
+        },
+      });
+
+      return reply
+        .code(201)
+        .send({
+          ...out,
+          invite_sent,
+          ...(invite_error ? { invite_error } : {}),
+        });
     } catch (err) {
       fastify.log.error(err);
-      return reply.code(500).send({ error: 'Erro ao criar atendente' });
+      // 🔴 AUDIT ERRO
+      await fastify.audit(req, {
+        action: "user.create.error",
+        resourceType: "user",
+        resourceId: String(email || ""),
+        statusCode: 500,
+        responseBody: { error: "Erro ao criar atendente" },
+        extra: { message: String(err?.message || err) },
+      });
+      return reply.code(500).send({ error: "Erro ao criar atendente" });
     }
   });
 
   // Atualizar (sincroniza public.users: apenas profile)
-  fastify.put('/:id', async (req, reply) => {
+  fastify.put("/:id", async (req, reply) => {
     const { id } = req.params;
     const { name, lastname, email, perfil, filas } = req.body || {};
-    if (!email || !perfil) return reply.code(400).send({ error: 'email e perfil são obrigatórios' });
+
+    if (!email || !perfil) {
+      const body400 = { error: "email e perfil são obrigatórios" };
+      await fastify.audit(req, {
+        action: "user.update.invalid_payload",
+        resourceType: "user",
+        resourceId: id,
+        statusCode: 400,
+        requestBody: {
+          name,
+          lastname,
+          email,
+          perfil,
+          filas_count: Array.isArray(filas) ? filas.length : 0,
+        },
+        responseBody: body400,
+      });
+      return reply.code(400).send(body400);
+    }
 
     try {
       const cols = await detectUserColumns(req);
-      if (!cols.idCol)    return reply.code(500).send({ error: 'Tabela users não possui coluna "id"' });
-      if (!cols.emailCol) return reply.code(500).send({ error: 'Tabela users não possui coluna "email"' });
+      if (!cols.idCol) {
+        const body500 = { error: 'Tabela users não possui coluna "id"' };
+        await fastify.audit(req, {
+          action: "user.update.schema_invalid",
+          resourceType: "user",
+          resourceId: id,
+          statusCode: 500,
+          responseBody: body500,
+        });
+        return reply.code(500).send(body500);
+      }
+      if (!cols.emailCol) {
+        const body500 = { error: 'Tabela users não possui coluna "email"' };
+        await fastify.audit(req, {
+          action: "user.update.schema_invalid",
+          resourceType: "user",
+          resourceId: id,
+          statusCode: 500,
+          responseBody: body500,
+        });
+        return reply.code(500).send(body500);
+      }
+
+      // snapshot "antes"
+      const rBefore = await req.db.query(
+        `SELECT * FROM users WHERE ${cols.idCol} = $1 LIMIT 1`,
+        [id]
+      );
+      const before = rBefore.rows?.[0] || null;
+      if (!before) {
+        const body404 = { error: "Atendente não encontrado" };
+        await fastify.audit(req, {
+          action: "user.update.not_found",
+          resourceType: "user",
+          resourceId: id,
+          statusCode: 404,
+          responseBody: body404,
+        });
+        return reply.code(404).send(body404);
+      }
 
       const sets = [];
       const values = [];
       let i = 1;
 
-      if (cols.nameCol   && name != null)     { sets.push(`${cols.nameCol}=$${i++}`);   values.push(name); }
-      if (cols.lastCol   && lastname != null) { sets.push(`${cols.lastCol}=$${i++}`);   values.push(lastname); }
-      if (cols.emailCol  && email != null)    { sets.push(`${cols.emailCol}=$${i++}`);  values.push(String(email).toLowerCase()); }
-      if (cols.perfilCol && perfil != null)   { sets.push(`${cols.perfilCol}=$${i++}`); values.push(perfil); }
-      if (cols.filasCol  && Array.isArray(filas)) { sets.push(`${cols.filasCol}=$${i++}`); values.push(filas); }
+      if (cols.nameCol && name != null) {
+        sets.push(`${cols.nameCol}=$${i++}`);
+        values.push(name);
+      }
+      if (cols.lastCol && lastname != null) {
+        sets.push(`${cols.lastCol}=$${i++}`);
+        values.push(lastname);
+      }
+      if (cols.emailCol && email != null) {
+        sets.push(`${cols.emailCol}=$${i++}`);
+        values.push(String(email).toLowerCase());
+      }
+      if (cols.perfilCol && perfil != null) {
+        sets.push(`${cols.perfilCol}=$${i++}`);
+        values.push(perfil);
+      }
+      if (cols.filasCol && Array.isArray(filas)) {
+        sets.push(`${cols.filasCol}=$${i++}`);
+        values.push(filas);
+      }
 
-      if (!sets.length) return reply.code(400).send({ error: 'Nada para atualizar' });
+      if (!sets.length) {
+        const body400 = { error: "Nada para atualizar" };
+        await fastify.audit(req, {
+          action: "user.update.noop",
+          resourceType: "user",
+          resourceId: id,
+          statusCode: 400,
+          requestBody: req.body,
+          responseBody: body400,
+        });
+        return reply.code(400).send(body400);
+      }
 
-      const sql = `UPDATE users SET ${sets.join(', ')} WHERE ${cols.idCol} = $${i}`;
+      const sql = `UPDATE users SET ${sets.join(", ")} WHERE ${
+        cols.idCol
+      } = $${i}`;
       values.push(id);
       const r = await req.db.query(sql, values);
-      if (r.rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+
+      if (r.rowCount === 0) {
+        const body404 = { error: "Atendente não encontrado" };
+        await fastify.audit(req, {
+          action: "user.update.not_found",
+          resourceType: "user",
+          resourceId: id,
+          statusCode: 404,
+          responseBody: body404,
+        });
+        return reply.code(404).send(body404);
+      }
 
       // sincroniza profile em public.users
+      let syncInfo = null;
       const { subdomain } = req.tenant || {};
       if (subdomain) {
         const qTenant = await pool.query(
@@ -303,67 +537,182 @@ fastify.get('/id/:id', async (req, reply) => {
         if (companyId) {
           await pool.query(
             `INSERT INTO public.users (company_id, email, profile)
-             VALUES ($1,$2,$3)
-             ON CONFLICT (company_id, email) DO UPDATE
-               SET profile = COALESCE(EXCLUDED.profile, public.users.profile),
-                   updated_at = NOW()`,
+           VALUES ($1,$2,$3)
+           ON CONFLICT (company_id, email) DO UPDATE
+             SET profile = COALESCE(EXCLUDED.profile, public.users.profile),
+                 updated_at = NOW()`,
             [companyId, String(email).toLowerCase(), perfil]
           );
+          syncInfo = { company_id: companyId, subdomain };
         }
       }
+
+      // afterData mínimo (evita SELECT extra se não precisar)
+      const after = {
+        id,
+        ...(name != null ? { name } : {}),
+        ...(lastname != null ? { lastname } : {}),
+        ...(email != null ? { email: String(email).toLowerCase() } : {}),
+        ...(perfil != null ? { perfil } : {}),
+        ...(Array.isArray(filas) ? { filas } : {}),
+      };
+
+      await fastify.audit(req, {
+        action: "user.update",
+        resourceType: "user",
+        resourceId: id,
+        statusCode: 200,
+        requestBody: req.body,
+        beforeData: before,
+        afterData: after,
+        extra: syncInfo || undefined,
+      });
 
       return reply.send({ success: true });
     } catch (err) {
       fastify.log.error(err);
-      return reply.code(500).send({ error: 'Erro ao atualizar atendente' });
+      await fastify.audit(req, {
+        action: "user.update.error",
+        resourceType: "user",
+        resourceId: id,
+        statusCode: 500,
+        responseBody: { error: "Erro ao atualizar atendente" },
+        extra: { message: String(err?.message || err) },
+      });
+      return reply.code(500).send({ error: "Erro ao atualizar atendente" });
     }
   });
 
   // Excluir (tenant) + chamada externa para remover em public.users
-  fastify.delete('/:id', async (req, reply) => {
+  fastify.delete("/:id", async (req, reply) => {
     const { id } = req.params;
+
     try {
       const cols = await detectUserColumns(req);
-      if (!cols.idCol) return reply.code(500).send({ error: 'Tabela users não possui coluna "id"' });
+      if (!cols.idCol) {
+        const body500 = { error: 'Tabela users não possui coluna "id"' };
+        await fastify.audit(req, {
+          action: "user.delete.schema_invalid",
+          resourceType: "user",
+          resourceId: id,
+          statusCode: 500,
+          responseBody: body500,
+        });
+        return reply.code(500).send(body500);
+      }
 
-      // 1) Buscar email e filas antes de excluir (email é necessário para a chamada externa)
-      const selFields = [cols.emailCol ? `${cols.emailCol} AS email` : `'__noemail__' AS email`];
+      // 1) snapshot antes (email e filas)
+      const selFields = [
+        cols.emailCol ? `${cols.emailCol} AS email` : `'__noemail__' AS email`,
+      ];
       if (cols.filasCol) selFields.push(`${cols.filasCol} AS filas`);
 
       const pre = await req.db.query(
-        `SELECT ${selFields.join(', ')} FROM users WHERE ${cols.idCol} = $1`,
+        `SELECT ${selFields.join(", ")} FROM users WHERE ${cols.idCol} = $1`,
         [id]
       );
-      if (pre.rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
-
-      const email = String(pre.rows[0].email || '').toLowerCase();
-      const filas = cols.filasCol ? (pre.rows[0]?.filas || []) : [];
-
-      if (cols.filasCol && Array.isArray(filas) && filas.length > 0) {
-        return reply.code(409).send({ error: 'Desvincule as filas antes de excluir o usuário.' });
+      if (pre.rowCount === 0) {
+        const body404 = { error: "Atendente não encontrado" };
+        await fastify.audit(req, {
+          action: "user.delete.not_found",
+          resourceType: "user",
+          resourceId: id,
+          statusCode: 404,
+          responseBody: body404,
+        });
+        return reply.code(404).send(body404);
       }
 
-      // 2) Exclui no tenant
-      const del = await req.db.query(`DELETE FROM users WHERE ${cols.idCol} = $1`, [id]);
-      if (del.rowCount === 0) return reply.code(404).send({ error: 'Atendente não encontrado' });
+      const before = pre.rows[0];
+      const email = String(before.email || "").toLowerCase();
+      const filas = cols.filasCol ? before?.filas || [] : [];
 
-      // 3) Chama o serviço externo para remover de public.users
+      if (cols.filasCol && Array.isArray(filas) && filas.length > 0) {
+        const body409 = {
+          error: "Desvincule as filas antes de excluir o usuário.",
+        };
+        await fastify.audit(req, {
+          action: "user.delete.conflict_has_queues",
+          resourceType: "user",
+          resourceId: id,
+          statusCode: 409,
+          beforeData: before,
+          responseBody: body409,
+        });
+        return reply.code(409).send(body409);
+      }
+
+      // 2) exclui no tenant
+      const del = await req.db.query(
+        `DELETE FROM users WHERE ${cols.idCol} = $1`,
+        [id]
+      );
+      if (del.rowCount === 0) {
+        const body404 = { error: "Atendente não encontrado" };
+        await fastify.audit(req, {
+          action: "user.delete.not_found_after_check",
+          resourceType: "user",
+          resourceId: id,
+          statusCode: 404,
+          beforeData: before,
+          responseBody: body404,
+        });
+        return reply.code(404).send(body404);
+      }
+
+      // 3) tenta remover no AUTH (public.users)
+      let external = { attempted: false, ok: false, message: null };
       try {
         const companySlug = req.tenant?.subdomain;
         if (email && companySlug) {
+          external.attempted = true;
           await triggerExternalDelete({ email, companySlug }, fastify.log);
+          external.ok = true;
         } else {
-          fastify.log.warn({ email, companySlug }, '⚠️ Não foi possível chamar AUTH DELETE — dados insuficientes');
+          external.message =
+            "Dados insuficientes para AUTH DELETE (email/companySlug)";
+          fastify.log.warn(
+            { email, companySlug },
+            "⚠️ Não foi possível chamar AUTH DELETE — dados insuficientes"
+          );
         }
       } catch (extErr) {
-        fastify.log.error({ err: extErr?.message }, '❌ Falha ao remover em AUTH /api/users (public.users)');
-        // Não falha a operação principal
+        external.message = String(extErr?.message || extErr);
+        fastify.log.error(
+          { err: external.message },
+          "❌ Falha ao remover em AUTH /api/users (public.users)"
+        );
+        // não bloqueia a exclusão local
       }
 
-      return reply.send({ success: true });
+      const body200 = { success: true };
+      await fastify.audit(req, {
+        action: "user.delete",
+        resourceType: "user",
+        resourceId: id,
+        statusCode: 200,
+        beforeData: before,
+        responseBody: body200,
+        extra: {
+          email,
+          had_queues_field: !!cols.filasCol,
+          external_auth_delete: external,
+        },
+      });
+
+      return reply.send(body200);
     } catch (err) {
       fastify.log.error(err);
-      return reply.code(500).send({ error: 'Erro ao excluir atendente' });
+      const body500 = { error: "Erro ao excluir atendente" };
+      await fastify.audit(req, {
+        action: "user.delete.error",
+        resourceType: "user",
+        resourceId: id,
+        statusCode: 500,
+        responseBody: body500,
+        extra: { message: String(err?.message || err) },
+      });
+      return reply.code(500).send(body500);
     }
   });
 }
