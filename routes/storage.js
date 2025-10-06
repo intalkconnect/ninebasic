@@ -1,28 +1,58 @@
-// routes/uploadPresignedRoutes.js
-import { minioClient } from '../services/minioClient.js'
+// routes/uploadPresignedRoutes.js (R2)
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { randomUUID } from 'crypto'
+
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID
+const R2_BUCKET = process.env.R2_BUCKET
+
+const s3 = new S3Client({
+  region: 'auto',
+  endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY
+  },
+})
+
+function sanitizeFilename(name = '') {
+  return String(name).replace(/[^\w.\-]+/g, '_')
+}
 
 export default async function storageRoutes(fastify) {
   fastify.get('/presigned-url', async (req, reply) => {
-    const { filename, mimetype } = req.query
-
+    const { filename, mimetype } = req.query || {}
     if (!filename || !mimetype) {
       return reply.code(400).send({ error: 'filename e mimetype são obrigatórios' })
     }
 
-    const objectName = `uploads/${Date.now()}-${filename}`
-    const bucketName = process.env.MINIO_BUCKET || 'uploads'
+    const safeName = sanitizeFilename(filename)
+    const objectKey = `uploads/${Date.now()}-${randomUUID()}-${safeName}`
 
     try {
-      const uploadUrl = await minioClient.presignedPutObject(bucketName, objectName, 300) // 5 min
-      const publicUrl = `${process.env.MINIO_ENDPOINT}/${bucketName}/${objectName}`
-
-      return reply.send({
-        uploadUrl,
-        publicUrl,
+      const putCmd = new PutObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: objectKey,
+        ContentType: mimetype,
+        CacheControl: 'public, max-age=300',
+        ContentDisposition: /^(image|audio|video)\//.test(mimetype)
+          ? 'inline'
+          : `attachment; filename="${safeName}"`
       })
+
+      const uploadUrl = await getSignedUrl(s3, putCmd, { expiresIn: 300 }) // 5 min
+      const publicBase = (process.env.R2_PUBLIC_BASE || '').replace(/\/$/, '')
+      if (!publicBase) {
+        // mantenho compat com seu front que exige publicUrl
+        return reply.code(500).send({
+          error: 'Defina R2_PUBLIC_BASE no .env para gerar publicUrl acessível'
+        })
+      }
+      const publicUrl = `${publicBase}/${objectKey}`
+
+      return reply.send({ uploadUrl, publicUrl })
     } catch (err) {
-      fastify.log.error('[presigned-url] Erro ao gerar URL:', err)
+      fastify.log.error('[presigned-url:R2] erro:', err)
       return reply.code(500).send({ error: 'Erro ao gerar URL de upload' })
     }
   })
