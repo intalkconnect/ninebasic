@@ -2,6 +2,10 @@
 // Endpoints para o "trace" do BOT - Versão Corrigida
 
 async function tracertRoutes(fastify, options) {
+
+  const actorId   = req.headers['x-user-id'] || null;
+const actorName = req.headers['x-user-name'] || null;
+const actorMail = req.headers['x-user-email'] || null;
   
   // Middleware para lidar com body vazio em POST
   fastify.addHook('onRequest', async (request, reply) => {
@@ -381,12 +385,12 @@ SELECT (SELECT MAX(entered_at)
       })
     ]);
 
-    await fastify.audit(req, {
-      action: 'session.reset',
-      resourceType: 'session',
-      resourceId: userId,
-      afterData: { start_block: startBlock, start_block_label: startBlockLabel, last_reset_at: now }
-    });
+await fastify.audit(req, {
+  action: 'flow.reset',          // ex.: “reset de fluxo”
+  resourceType: 'session',
+  resourceId: userId,
+  extra: { actorId, actorName, actorMail },
+});
 
     return reply.send({
       ok: true,
