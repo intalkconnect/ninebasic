@@ -3,10 +3,13 @@
 
 async function tracertRoutes(fastify, options) {
 
-  const actorId   = req.headers['x-user-id'] || null;
-const actorName = req.headers['x-user-name'] || null;
-const actorMail = req.headers['x-user-email'] || null;
-  
+  fastify.decorateRequest('actor', null);
+  fastify.addHook('onRequest', async (req, reply) => {
+    const actorId   = req.headers['x-user-id'] || null;
+    const actorName = req.headers['x-user-name'] || null;
+    const actorMail = req.headers['x-user-email'] || null;
+    req.actor = { id: actorId, name: actorName, email: actorMail };
+  }); 
   // Middleware para lidar com body vazio em POST
   fastify.addHook('onRequest', async (request, reply) => {
     if (request.method === 'POST' && request.headers['content-type'] === 'application/json') {
@@ -385,12 +388,13 @@ SELECT (SELECT MAX(entered_at)
       })
     ]);
 
-await fastify.audit(req, {
-  action: 'flow.reset',          // ex.: “reset de fluxo”
-  resourceType: 'session',
-  resourceId: userId,
-  extra: { actorId, actorName, actorMail },
-});
+      await fastify.audit(req, {
+        action: 'flow.reset',
+        resourceType: 'session',
+        resourceId: userId,
+        // o plugin já lê req.headers; mas se quiser persistir explícito:
+        extra: req.actor ? { actor: req.actor } : undefined,
+      });
 
     return reply.send({
       ok: true,
