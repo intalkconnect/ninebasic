@@ -381,6 +381,13 @@ SELECT (SELECT MAX(entered_at)
       })
     ]);
 
+    await fastify.audit(req, {
+      action: 'session.reset',
+      resourceType: 'session',
+      resourceId: userId,
+      afterData: { start_block: startBlock, start_block_label: startBlockLabel, last_reset_at: now }
+    });
+
     return reply.send({
       ok: true,
       last_reset_at: now,
