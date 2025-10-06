@@ -73,26 +73,26 @@ async function auditPlugin(fastify, opts) {
   });
 
   // hook automático para métodos de escrita
-  fastify.addHook('onSend', async (req, reply, payload) => {
-    try {
-      const m = req.method.toUpperCase();
-      if (!['POST','PUT','PATCH','DELETE'].includes(m)) return;
+  // fastify.addHook('onSend', async (req, reply, payload) => {
+  //   try {
+  //     const m = req.method.toUpperCase();
+  //     if (!['POST','PUT','PATCH','DELETE'].includes(m)) return;
 
-      // o payload pode ser string JSON; evite guardar respostas enormes
-      let responseBody = null;
-      if (payload && typeof payload === 'string' && payload.length < 200_000) { // ~200KB
-        try { responseBody = JSON.parse(payload); } catch { /* ignore */ }
-      }
+  //     // o payload pode ser string JSON; evite guardar respostas enormes
+  //     let responseBody = null;
+  //     if (payload && typeof payload === 'string' && payload.length < 200_000) { // ~200KB
+  //       try { responseBody = JSON.parse(payload); } catch { /* ignore */ }
+  //     }
 
-      await fastify.audit(req, {
-        statusCode: reply.statusCode,
-        requestBody: req.body && typeof req.body === 'object' ? req.body : null,
-        responseBody
-      });
-    } catch (e) {
-      reply.log.error({ err: e }, 'audit onSend failed');
-    }
-  });
+  //     await fastify.audit(req, {
+  //       statusCode: reply.statusCode,
+  //       requestBody: req.body && typeof req.body === 'object' ? req.body : null,
+  //       responseBody
+  //     });
+  //   } catch (e) {
+  //     reply.log.error({ err: e }, 'audit onSend failed');
+  //   }
+  // });
 }
 
 export default fp(auditPlugin, { name: 'auditPlugin' });
