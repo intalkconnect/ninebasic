@@ -9,6 +9,7 @@ import tenantPlugin from './plugins/tenant.js';
 import securityTokensRoutes from './routes/securityTokens.js';
 import { requireTenantBearerDb } from './plugins/tenantBearerDb.js';
 import stacksRoutes from './routes/stacks.js';
+import auditPlugin from './plugins/auditPlugin.js';
 
 
 // rotas...
@@ -52,6 +53,7 @@ async function buildServer() {
   });
 
   await fastify.register(multipart);
+  await fastify.register(auditPlugin);
 
   // 1. Registra o cookie plugin
   await fastify.register(cookie, { 
@@ -165,3 +167,4 @@ async function start() {
 }
 
 start();
+
