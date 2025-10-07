@@ -1,4 +1,4 @@
-// routes/uploadPresignedRoutes.js (R2)
+// routes/uploadPresignedRoutes.js (R2, sem headers extras na assinatura)
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { randomUUID } from 'crypto'
@@ -30,20 +30,17 @@ export default async function storageRoutes(fastify) {
     const objectKey = `uploads/${Date.now()}-${randomUUID()}-${safeName}`
 
     try {
+      // ⚠️ Assine APENAS com ContentType (o front já envia esse header)
       const putCmd = new PutObjectCommand({
         Bucket: R2_BUCKET,
         Key: objectKey,
-        ContentType: mimetype,
-        CacheControl: 'public, max-age=300',
-        ContentDisposition: /^(image|audio|video)\//.test(mimetype)
-          ? 'inline'
-          : `attachment; filename="${safeName}"`
+        ContentType: mimetype
       })
 
       const uploadUrl = await getSignedUrl(s3, putCmd, { expiresIn: 300 }) // 5 min
+
       const publicBase = (process.env.R2_PUBLIC_BASE || '').replace(/\/$/, '')
       if (!publicBase) {
-        // mantenho compat com seu front que exige publicUrl
         return reply.code(500).send({
           error: 'Defina R2_PUBLIC_BASE no .env para gerar publicUrl acessível'
         })
