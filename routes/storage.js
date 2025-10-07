@@ -1,4 +1,4 @@
-// routes/uploadPresignedRoutes.js (R2, sem headers extras na assinatura)
+// routes/uploadPresignedRoutes.js (R2, salva por tenant/)
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { randomUUID } from 'crypto'
@@ -15,8 +15,8 @@ const s3 = new S3Client({
   },
 })
 
-function sanitizeFilename(name = '') {
-  return String(name).replace(/[^\w.\-]+/g, '_')
+function sanitize(s = '') {
+  return String(s).replace(/[^\w.\-]+/g, '_')
 }
 
 export default async function storageRoutes(fastify) {
@@ -26,11 +26,15 @@ export default async function storageRoutes(fastify) {
       return reply.code(400).send({ error: 'filename e mimetype são obrigatórios' })
     }
 
-    const safeName = sanitizeFilename(filename)
-    const objectKey = `uploads/${Date.now()}-${randomUUID()}-${safeName}`
+    // ⚠️ pega o tenant do plugin (header, subdomínio, /t/:tenant, etc.)
+    const tenant = sanitize(req.tenant?.subdomain || req.query?.tenant || 'default')
+
+    const safeName = sanitize(filename)
+    // pasta por tenant
+    const objectKey = `${tenant}/${Date.now()}-${randomUUID()}-${safeName}`
 
     try {
-      // ⚠️ Assine APENAS com ContentType (o front já envia esse header)
+      // Assine APENAS com ContentType (front envia o mesmo)
       const putCmd = new PutObjectCommand({
         Bucket: R2_BUCKET,
         Key: objectKey,
