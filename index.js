@@ -38,6 +38,9 @@ import queueRulesRoutes from './routes/queueRules.js';
 // novos
 import whatsappRoutes      from './routes/whatsapp.js';
 import telegramRoutes      from './routes/telegram.js';
+import facebookRoutes from "./routes/facebook.js";
+import instagramRoutes from "./routes/instagram.js";
+import oauthCallbacks from "./routes/oauth-callbacks.js";
 
 dotenv.config();
 
@@ -54,13 +57,15 @@ async function buildServer() {
 
   await fastify.register(multipart);
   await fastify.register(auditPlugin);
+ await fastify.register(oauthCallbacks, { prefix: "/" });
+
 
   // 1. Registra o cookie plugin
   await fastify.register(cookie, { 
     secret: false, // não precisamos assinar cookies
     hook: 'onRequest' 
   });
-await fastify.register(stacksRoutes, { prefix: '/api/v1' });
+  await fastify.register(stacksRoutes, { prefix: '/api/v1' });
   // 2. Registra o tenant plugin (resolve subdomain)
   
 
@@ -81,7 +86,7 @@ await fastify.register(stacksRoutes, { prefix: '/api/v1' });
   }));
 
   // 🔒 escopo protegido /api/v1/*
-  await fastify.register(async (api) => {
+    await fastify.register(async (api) => {
     await fastify.register(tenantPlugin);
     // Hook onRequest: converte cookie defaultAssert -> Authorization header
     api.addHook('onRequest', async (req) => {
@@ -146,6 +151,8 @@ await fastify.register(stacksRoutes, { prefix: '/api/v1' });
     // novos
     api.register(whatsappRoutes, { prefix: '/api/v1/whatsapp' });
     api.register(telegramRoutes,  { prefix: '/api/v1/telegram' });
+    api.register(facebookRoutes,  { prefix: "/api/v1/facebook" });  
+    api.register(instagramRoutes, { prefix: "/api/v1/instagram" }); 
     api.register(securityTokensRoutes, { prefix: '/api/v1/security' });
     api.register(tracertRoutes, { prefix: '/api/v1/tracert' });
   });
@@ -167,5 +174,6 @@ async function start() {
 }
 
 start();
+
 
 
