@@ -1,7 +1,7 @@
 // server/routes/oauth-callbacks.js
 export default async function oauthCallbacks(fastify) {
   // GET /oauth/fb
-  fastify.get("/oauth/fb", async (req, reply) => {
+  fastify.get("/fb", async (req, reply) => {
     const { code = "", state = "" } = req.query || {};
     const html = `<!doctype html>
 <html><body>
@@ -20,7 +20,7 @@ Feche esta janela.
   });
 
   // GET /oauth/ig
-  fastify.get("/oauth/ig", async (req, reply) => {
+  fastify.get("/ig", async (req, reply) => {
     const { code = "", state = "" } = req.query || {};
     const html = `<!doctype html>
 <html><body>
