@@ -57,7 +57,7 @@ export default async function facebookRoutes(fastify) {
   }
 
   // POST /facebook/finalize { subdomain, code, redirect_uri, page_id? }
-  fastify.post("/facebook/finalize", async (req, reply) => {
+  fastify.post("/finalize", async (req, reply) => {
     const subdomain = getSubdomain(req);
     const { code, redirect_uri, page_id } = req.body || {};
     if (!subdomain || !code) return reply.code(400).send({ ok:false, error:"missing_subdomain_or_code" });
@@ -116,7 +116,7 @@ export default async function facebookRoutes(fastify) {
   });
 
   // GET /facebook/status?subdomain=TENANT
-  fastify.get("/facebook/status", async (req, reply) => {
+  fastify.get("/status", async (req, reply) => {
     const sub = getSubdomain(req);
     if (!sub) return reply.code(400).send({ ok:false, error:"missing_subdomain" });
     if (!req.db) return reply.code(500).send({ ok:false, error:"db_not_available" });
