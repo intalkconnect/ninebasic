@@ -7,7 +7,6 @@ export default async function facebookRoutes(fastify) {
     fastify.log.warn("[facebook] META_APP_ID/META_APP_SECRET ausentes");
   }
 
-  /* helpers */
   const getSubdomain = (req) =>
     req?.tenant?.subdomain ||
     req?.tenant?.name ||
@@ -29,8 +28,8 @@ export default async function facebookRoutes(fastify) {
     return t;
   }
 
-  async function upsertFacebookConnection(db, { tenantId, subdomain, pageId, pageName, pageAccessToken }) {
-    const settings = { page_name: pageName || null, page_access_token: "[SET]" }; // guarde o real no cofre/KMS
+  async function upsertFacebookConnection(db, { tenantId, subdomain, pageId, pageName }) {
+    const settings = { page_name: pageName || null, page_access_token: "[SET]" }; // PAT real: cofre/KMS
     const upsertSql = `
       INSERT INTO public.tenant_channel_connections
         (tenant_id, subdomain, channel, provider,
@@ -50,15 +49,15 @@ export default async function facebookRoutes(fastify) {
         updated_at            = now()
       RETURNING id, tenant_id, channel, provider, account_id, external_id, display_name, is_active, settings, updated_at
     `;
-    const encrypted = null; // grave o PAT cifrado aqui, se tiver KMS
+    const encrypted = null;
     const res = await db.query(upsertSql, [
       tenantId, subdomain, String(pageId), String(pageId), pageName || "", encrypted, JSON.stringify(settings)
     ]);
     return res.rows?.[0] || null;
   }
 
-  // POST /facebook/finalize
-  fastify.post("/finalize", async (req, reply) => {
+  // POST /facebook/finalize { subdomain, code, redirect_uri, page_id? }
+  fastify.post("/facebook/finalize", async (req, reply) => {
     const subdomain = getSubdomain(req);
     const { code, redirect_uri, page_id } = req.body || {};
     if (!subdomain || !code) return reply.code(400).send({ ok:false, error:"missing_subdomain_or_code" });
@@ -67,20 +66,14 @@ export default async function facebookRoutes(fastify) {
 
     try {
       const tenant = await resolveTenant(req);
-
-      // exchange code -> user token
       const qs = { client_id: META_APP_ID, client_secret: META_APP_SECRET, code };
       if (redirect_uri) qs.redirect_uri = redirect_uri;
       const tok = await gget("/oauth/access_token", { qs });
       const userToken = tok?.access_token;
       if (!userToken) throw new Error("user_token_exchange_failed");
 
-      // páginas
-      const pages = await gget("/me/accounts", {
-        token: userToken, qs: { fields: "id,name,access_token" }
-      });
+      const pages = await gget("/me/accounts", { token: userToken, qs: { fields: "id,name,access_token" } });
       const list = Array.isArray(pages?.data) ? pages.data : [];
-
       if (!page_id) {
         return reply.send({ ok:true, step:"pages_list", pages: list.map(p => ({ id:p.id, name:p.name })) });
       }
@@ -89,26 +82,26 @@ export default async function facebookRoutes(fastify) {
       if (!chosen || !chosen.access_token) {
         return reply.code(400).send({ ok:false, error:"invalid_page_id_or_missing_access_token" });
       }
-      const pageAccessToken = chosen.access_token;
       const pageName = chosen.name || null;
 
-      // assinar webhooks
       try {
         await gpost(`/${page_id}/subscribed_apps`, {
-          token: pageAccessToken, form: { subscribed_fields: "messages,messaging_postbacks" }
+          token: chosen.access_token,
+          form: { subscribed_fields: "messages,messaging_postbacks" }
         });
       } catch (e) {
         fastify.log.warn({ err:e }, "[facebook] subscribed_apps falhou (segue)");
       }
 
-      // salvar conexão
       const after = await upsertFacebookConnection(req.db, {
-        tenantId: tenant.id, subdomain, pageId: page_id, pageName, pageAccessToken
+        tenantId: tenant.id, subdomain, pageId: page_id, pageName
       });
 
       await fastify.audit(req, {
-        action: "facebook.connect.upsert", resourceType:"channel", resourceId:`facebook:${page_id}`,
-        statusCode:200, requestBody:{ subdomain, has_code:true, page_id }, responseBody:{ ok:true }, afterData:after
+        action:"facebook.connect.upsert", resourceType:"channel", resourceId:`facebook:${page_id}`,
+        statusCode:200, requestBody:{ subdomain, has_code:true, page_id },
+        responseBody:{ ok:true, page_id, page_name:pageName },
+        afterData:after
       });
 
       return reply.send({ ok:true, connected:true, page_id:String(page_id), page_name:pageName });
@@ -123,7 +116,7 @@ export default async function facebookRoutes(fastify) {
   });
 
   // GET /facebook/status?subdomain=TENANT
-  fastify.get("/status", async (req, reply) => {
+  fastify.get("/facebook/status", async (req, reply) => {
     const sub = getSubdomain(req);
     if (!sub) return reply.code(400).send({ ok:false, error:"missing_subdomain" });
     if (!req.db) return reply.code(500).send({ ok:false, error:"db_not_available" });
