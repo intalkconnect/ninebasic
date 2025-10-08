@@ -57,7 +57,7 @@ async function buildServer() {
 
   await fastify.register(multipart);
   await fastify.register(auditPlugin);
- await fastify.register(oauthCallbacks, { prefix: "/oauth" });
+  fastify.register(oauthCallbacks, { prefix: "/oauth" });
 
 
   // 1. Registra o cookie plugin
@@ -174,6 +174,7 @@ async function start() {
 }
 
 start();
+
 
 
 
