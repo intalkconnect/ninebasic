@@ -28,7 +28,7 @@ export default async function instagramRoutes(fastify) {
     return t;
   }
 
-  async function upsertInstagramConnection(db, { tenantId, subdomain, pageId, pageName, pageAccessToken, igUserId, igUsername }) {
+  async function upsertInstagramConnection(db, { tenantId, subdomain, pageId, pageName, igUserId, igUsername }) {
     const settings = { page_name: pageName || null, ig_user_id: igUserId || null, ig_username: igUsername || null, page_access_token: "[SET]" };
     const upsertSql = `
       INSERT INTO public.tenant_channel_connections
@@ -57,8 +57,7 @@ export default async function instagramRoutes(fastify) {
     return res.rows?.[0] || null;
   }
 
-  // POST /instagram/finalize
-  // Body: { subdomain, code, redirect_uri, page_id? }
+  // POST /instagram/finalize { subdomain, code, redirect_uri, page_id? }
   fastify.post("/finalize", async (req, reply) => {
     const subdomain = getSubdomain(req);
     const { code, redirect_uri, page_id } = req.body || {};
@@ -68,14 +67,12 @@ export default async function instagramRoutes(fastify) {
 
     try {
       const tenant = await resolveTenant(req);
-
       const qs = { client_id: META_APP_ID, client_secret: META_APP_SECRET, code };
       if (redirect_uri) qs.redirect_uri = redirect_uri;
       const tok = await gget("/oauth/access_token", { qs });
       const userToken = tok?.access_token;
       if (!userToken) throw new Error("user_token_exchange_failed");
 
-      // páginas + IG vinculado
       const pages = await gget("/me/accounts", {
         token: userToken,
         qs: { fields: "id,name,access_token,instagram_business_account{id,username}" }
@@ -98,17 +95,13 @@ export default async function instagramRoutes(fastify) {
       if (!chosen || !chosen.access_token) {
         return reply.code(400).send({ ok:false, error:"invalid_page_id_or_missing_access_token" });
       }
-      const pageAccessToken = chosen.access_token;
       const pageName = chosen.name || null;
 
       let igUserId = chosen?.instagram_business_account?.id || null;
       let igUsername = chosen?.instagram_business_account?.username || null;
 
       if (!igUserId) {
-        const p = await gget(`/${page_id}`, {
-          token: userToken,
-          qs: { fields: "instagram_business_account{id,username}" }
-        });
+        const p = await gget(`/${page_id}`, { token: userToken, qs: { fields: "instagram_business_account{id,username}" } });
         igUserId = p?.instagram_business_account?.id || null;
         igUsername = p?.instagram_business_account?.username || null;
       }
@@ -116,7 +109,7 @@ export default async function instagramRoutes(fastify) {
 
       try {
         await gpost(`/${page_id}/subscribed_apps`, {
-          token: pageAccessToken,
+          token: chosen.access_token,
           form: { subscribed_fields: "messages,messaging_postbacks" }
         });
       } catch (e) {
@@ -124,8 +117,7 @@ export default async function instagramRoutes(fastify) {
       }
 
       const after = await upsertInstagramConnection(req.db, {
-        tenantId: tenant.id, subdomain, pageId: page_id, pageName,
-        pageAccessToken, igUserId, igUsername
+        tenantId: tenant.id, subdomain, pageId: page_id, pageName, igUserId, igUsername
       });
 
       await fastify.audit(req, {
