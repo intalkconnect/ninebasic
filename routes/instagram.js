@@ -1,13 +1,21 @@
 // routes/instagram.js
 import { gget, gpost } from "../services/metaGraph.js";
 
+/**
+ * Instagram (Meta) – conexão por tenant
+ * POST /api/v1/instagram/finalize
+ *   Passo 1: { code, redirect_uri }  ->  { step:'pages_list', user_token, pages[] }
+ *   Passo 2: { page_id, user_token, persist_token? } -> salva no banco
+ *
+ * GET  /api/v1/instagram/status?subdomain=TENANT
+ */
 export default async function instagramRoutes(fastify) {
   const { META_APP_ID, META_APP_SECRET } = process.env;
   if (!META_APP_ID || !META_APP_SECRET) {
     fastify.log.warn("[instagram] META_APP_ID/META_APP_SECRET ausentes");
   }
 
-  // ---------- helpers ----------
+  // ----------------- helpers de tenant -----------------
   const getSubdomain = (req) =>
     req?.tenant?.subdomain ||
     req?.tenant?.name ||
@@ -29,14 +37,21 @@ export default async function instagramRoutes(fastify) {
     return t;
   }
 
+  // ----------------- upsert conexão IG -----------------
   async function upsertInstagramConnection(db, {
-    tenantId, subdomain, pageId, pageName, igUserId, igUsername, pageAccessToken
+    tenantId,
+    subdomain,
+    pageId,
+    pageName,
+    igUserId,
+    igUsername,
+    pageAccessToken, // opcional – só se persist_token=true
   }) {
     const settings = {
       page_name: pageName || null,
       ig_user_id: igUserId || null,
       ig_username: igUsername || null,
-      ...(pageAccessToken ? { page_access_token: pageAccessToken } : {}) // opcional
+      ...(pageAccessToken ? { page_access_token: pageAccessToken } : {})
     };
 
     const sql = `
@@ -61,74 +76,76 @@ export default async function instagramRoutes(fastify) {
     const res = await db.query(sql, [
       tenantId,
       subdomain,
-      String(pageId),              // account_id = PAGE_ID
-      String(igUserId),            // external_id = IG_BUSINESS_USER_ID
+      String(pageId),     // account_id  -> PAGE_ID
+      String(igUserId),   // external_id -> IG_USER_ID
       igUsername || pageName || "",
       JSON.stringify(settings)
     ]);
     return res.rows?.[0] || null;
   }
 
-  // =========================================================
-  // POST /api/v1/instagram/finalize
-  // PASSO 1: { subdomain, code, redirect_uri }
-  //   -> troca pelo user_token e devolve { step:"pages_list", user_token, pages[...] }
-  //
-  // PASSO 2: { subdomain, page_id, user_token, persist_token?: boolean }
-  //   -> assina webhooks na página e salva conexão no banco
-  // =========================================================
+  // ----------------- finalize (2 passos) -----------------
   fastify.post("/finalize", async (req, reply) => {
     const subdomain = getSubdomain(req);
-    const { code, redirect_uri, page_id, user_token, persist_token } = req.body || {};
+    // body
+    const { code, redirect_uri, page_id, persist_token } = req.body || {};
+    // aceitar user_token também por header/query
+    const bodyToken   = (req.body || {}).user_token;
+    const headerToken = req.headers["x-ig-user-token"];
+    const queryToken  = req.query?.user_token;
+    let userToken     = bodyToken || headerToken || queryToken || null;
 
-    if (!subdomain) return reply.code(400).send({ ok:false, error:"missing_subdomain" });
-    if (!req.db)     return reply.code(500).send({ ok:false, error:"db_not_available" });
+    if (!subdomain) return reply.code(400).send({ ok: false, error: "missing_subdomain" });
+    if (!req.db)     return reply.code(500).send({ ok: false, error: "db_not_available" });
     if (!META_APP_ID || !META_APP_SECRET) {
-      return reply.code(500).send({ ok:false, error:"meta_app_credentials_missing" });
+      return reply.code(500).send({ ok: false, error: "meta_app_credentials_missing" });
     }
 
     try {
       const tenant = await resolveTenant(req);
 
-      // ---------------- PASSO 1 ----------------
-      let userToken = user_token || null;
+      // ----------------- PASSO 1: trocar code -> user_token + pages -----------------
       if (!page_id) {
         if (!userToken) {
           if (!code) {
-            return reply.code(400).send({ ok:false, error:"missing_code_or_user_token" });
+            return reply.code(400).send({ ok: false, error: "missing_code_or_user_token" });
           }
+
           try {
             const qs = { client_id: META_APP_ID, client_secret: META_APP_SECRET, code };
             if (redirect_uri) qs.redirect_uri = redirect_uri;
             const tok = await gget("/oauth/access_token", { qs });
-            userToken = tok?.access_token;
+            userToken = tok?.access_token || null;
           } catch (e) {
+            // code já consumido
             const subcode = e?.details?.error_subcode;
             if (subcode === 36009) {
-              // code já usado
               return reply.code(400).send({
                 ok: false,
                 error: "oauth_code_used",
-                hint: "Faça login novamente para obter um novo code (uso único)."
+                hint: "Faça login novamente para gerar um novo code (ele é de uso único)."
               });
             }
             throw e;
           }
         }
-        if (!userToken) return reply.code(400).send({ ok:false, error:"user_token_exchange_failed" });
 
-        // Lista páginas do usuário
+        if (!userToken) {
+          return reply.code(400).send({ ok: false, error: "user_token_exchange_failed" });
+        }
+
         const pages = await gget("/me/accounts", {
           token: userToken,
           qs: { fields: "id,name,access_token,instagram_business_account{id,username}" }
         });
         const list = Array.isArray(pages?.data) ? pages.data : [];
 
+        // devolve o token para ser usado no passo 2
         return reply.send({
           ok: true,
           step: "pages_list",
-          user_token: userToken, // devolvemos para a UI mandar no passo 2
-          pages: list.map(p => ({
+          user_token: userToken,
+          pages: list.map((p) => ({
             id: p.id,
             name: p.name,
             has_instagram: !!p?.instagram_business_account?.id,
@@ -138,27 +155,29 @@ export default async function instagramRoutes(fastify) {
         });
       }
 
-      // ---------------- PASSO 2 ----------------
+      // ----------------- PASSO 2: concluir com page_id + user_token -----------------
       if (!userToken) {
-        return reply.code(400).send({ ok:false, error:"missing_user_token_for_finalize" });
+        return reply.code(400).send({ ok: false, error: "missing_user_token_for_finalize" });
       }
 
-      // confirma a página escolhida usando o user_token
+      // Carrega páginas novamente com o mesmo user_token
       const pages = await gget("/me/accounts", {
         token: userToken,
         qs: { fields: "id,name,access_token,instagram_business_account{id,username}" }
       });
       const list = Array.isArray(pages?.data) ? pages.data : [];
-      const chosen = list.find(p => String(p.id) === String(page_id));
+      const chosen = list.find((p) => String(p.id) === String(page_id));
+
       if (!chosen || !chosen.access_token) {
-        return reply.code(400).send({ ok:false, error:"invalid_page_id_or_missing_access_token" });
+        return reply.code(400).send({ ok: false, error: "invalid_page_id_or_missing_access_token" });
       }
 
-      const pageName   = chosen.name || null;
-      let igUserId     = chosen?.instagram_business_account?.id || null;
-      let igUsername   = chosen?.instagram_business_account?.username || null;
-      const pageToken  = chosen.access_token;
+      const pageAccessToken = chosen.access_token;                   // PAT da página
+      const pageName        = chosen.name || null;
+      let igUserId          = chosen?.instagram_business_account?.id || null;
+      let igUsername        = chosen?.instagram_business_account?.username || null;
 
+      // fallback: página não mostrava o ig vinculado
       if (!igUserId) {
         const p = await gget(`/${page_id}`, {
           token: userToken,
@@ -168,28 +187,28 @@ export default async function instagramRoutes(fastify) {
         igUsername = p?.instagram_business_account?.username || null;
       }
       if (!igUserId) {
-        return reply.code(400).send({ ok:false, error:"page_not_linked_to_instagram" });
+        return reply.code(400).send({ ok: false, error: "page_not_linked_to_instagram" });
       }
 
-      // assina webhooks necessários (usa PAGE TOKEN)
+      // Assina webhooks do app nessa Página (mensagens/postbacks)
       try {
         await gpost(`/${page_id}/subscribed_apps`, {
-          token: pageToken,
+          token: pageAccessToken,
           form: { subscribed_fields: "messages,messaging_postbacks" }
         });
       } catch (e) {
-        fastify.log.warn({ err:e }, "[instagram] subscribed_apps falhou (segue)");
+        fastify.log.warn({ err: e }, "[instagram] subscribed_apps falhou (segue)");
       }
 
-      // upsert conexão; se persist_token=true, guarda o PAT nos settings
-      const after = await upsertInstagramConnection(req.db, {
+      // Persiste conexão (com PAT apenas se persist_token=true)
+      const saved = await upsertInstagramConnection(req.db, {
         tenantId: tenant.id,
         subdomain,
         pageId: page_id,
         pageName,
         igUserId,
         igUsername,
-        pageAccessToken: persist_token ? pageToken : undefined
+        pageAccessToken: persist_token ? pageAccessToken : undefined
       });
 
       await fastify.audit(req, {
@@ -197,9 +216,24 @@ export default async function instagramRoutes(fastify) {
         resourceType: "channel",
         resourceId: `instagram:${igUserId}`,
         statusCode: 200,
-        requestBody: { subdomain, step: "finalize", page_id, persist_token: !!persist_token },
-        responseBody: { ok:true, page_id, ig_user_id: igUserId, ig_username: igUsername },
-        afterData: after
+        requestBody: {
+          subdomain,
+          step: "finalize",
+          page_id,
+          persist_token: !!persist_token
+        },
+        responseBody: {
+          ok: true,
+          page_id,
+          ig_user_id: igUserId,
+          ig_username: igUsername,
+          token_persisted: !!persist_token
+        },
+        afterData: {
+          id: saved?.id,
+          account_id: saved?.account_id,
+          external_id: saved?.external_id
+        }
       });
 
       return reply.send({
@@ -225,82 +259,55 @@ export default async function instagramRoutes(fastify) {
     }
   });
 
-  // GET /api/v1/instagram/status?subdomain=TENANT
+  // ----------------- status -----------------
   fastify.get("/status", async (req, reply) => {
     const sub = getSubdomain(req);
-    if (!sub) return reply.code(400).send({ ok:false, error:"missing_subdomain" });
-    if (!req.db) return reply.code(500).send({ ok:false, error:"db_not_available" });
+    if (!sub) return reply.code(400).send({ ok: false, error: "missing_subdomain" });
+    if (!req.db) return reply.code(500).send({ ok: false, error: "db_not_available" });
 
     try {
-      const tRes = await req.db.query(`SELECT id FROM public.tenants WHERE subdomain=$1 LIMIT 1`, [sub]);
+      const tRes = await req.db.query(
+        `SELECT id FROM public.tenants WHERE subdomain=$1 LIMIT 1`,
+        [sub]
+      );
       const t = tRes.rows[0];
-      if (!t) return reply.send({ ok:true, connected:false });
+      if (!t) return reply.send({ ok: true, connected: false });
 
       const q = `
         SELECT account_id AS page_id,
                external_id AS ig_user_id,
-               is_active, settings, display_name
+               is_active,
+               settings,
+               display_name
           FROM public.tenant_channel_connections
          WHERE tenant_id=$1 AND channel='instagram' AND provider='meta'
-         LIMIT 1`;
+         ORDER BY updated_at DESC
+         LIMIT 1
+      `;
       const { rows } = await req.db.query(q, [t.id]);
       const row = rows[0];
 
       if (!row) {
         return reply.send({
-          ok:true, connected:false, page_id:null, ig_user_id:null, ig_username:null
+          ok: true,
+          connected: false,
+          page_id: null,
+          ig_user_id: null,
+          ig_username: null
         });
       }
 
       return reply.send({
-        ok:true,
+        ok: true,
         connected: !!row.is_active,
         page_id: row.page_id,
         ig_user_id: row.ig_user_id,
         ig_username: row?.settings?.ig_username || row.display_name || null,
-        page_name: row?.settings?.page_name || null,
-        has_token: !!row?.settings?.page_access_token
+        page_name: row?.settings?.page_name || null
       });
     } catch (err) {
       fastify.log.error({ err }, "[GET /instagram/status]");
-      return reply.code(500).send({ ok:false, error:"ig_status_failed" });
-    }
-  });
-
-  // POST /api/v1/instagram/disconnect { subdomain }
-  // Desativa e limpa token dos settings (se houver)
-  fastify.post("/disconnect", async (req, reply) => {
-    const sub = getSubdomain(req);
-    if (!sub) return reply.code(400).send({ ok:false, error:"missing_subdomain" });
-    if (!req.db) return reply.code(500).send({ ok:false, error:"db_not_available" });
-
-    try {
-      const tRes = await req.db.query(`SELECT id FROM public.tenants WHERE subdomain=$1 LIMIT 1`, [sub]);
-      const t = tRes.rows[0];
-      if (!t) return reply.send({ ok:true });
-
-      const sql = `
-        UPDATE public.tenant_channel_connections
-           SET is_active=false,
-               settings = COALESCE(settings,'{}'::jsonb) - 'page_access_token',
-               updated_at=now()
-         WHERE tenant_id=$1 AND channel='instagram' AND provider='meta'
-      `;
-      await req.db.query(sql, [t.id]);
-
-      await fastify.audit(req, {
-        action: "instagram.disconnect",
-        resourceType: "channel",
-        resourceId: `instagram:${t.id}`,
-        statusCode: 200,
-        requestBody: { subdomain: sub },
-        responseBody: { ok:true }
-      });
-
-      return reply.send({ ok:true });
-    } catch (err) {
-      fastify.log.error({ err }, "[POST /instagram/disconnect]");
-      return reply.code(500).send({ ok:false, error:"ig_disconnect_failed" });
+      return reply.code(500).send({ ok: false, error: "ig_status_failed" });
     }
   });
 }
