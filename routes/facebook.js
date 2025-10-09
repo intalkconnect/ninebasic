@@ -1,4 +1,4 @@
-// server/routes/facebook.js
+// routes/facebook.js
 import { gget, gpost } from "../services/metaGraph.js";
 
 export default async function facebookRoutes(fastify) {
@@ -28,8 +28,14 @@ export default async function facebookRoutes(fastify) {
     return t;
   }
 
-  async function upsertFacebookConnection(db, { tenantId, subdomain, pageId, pageName }) {
-    const settings = { page_name: pageName || null, page_access_token: "[SET]" }; // PAT real: cofre/KMS
+  async function upsertFacebookConnection(db, {
+    tenantId, subdomain, pageId, pageName, pageAccessToken
+  }) {
+    const settings = {
+      page_name: pageName || null,
+      page_access_token: pageAccessToken || null
+    };
+
     const upsertSql = `
       INSERT INTO public.tenant_channel_connections
         (tenant_id, subdomain, channel, provider,
@@ -37,8 +43,8 @@ export default async function facebookRoutes(fastify) {
          auth_mode, credentials_encrypted, settings, is_active)
       VALUES
         ($1::uuid, $2::text, 'facebook'::channel_type, 'meta'::text,
-         $3::text, $4::text, $5::text,
-         'page_token'::auth_mode, $6::bytea, $7::jsonb, true)
+         $3::text, $3::text, $4::text,
+         'page_token'::auth_mode, $5::bytea, $6::jsonb, true)
       ON CONFLICT (tenant_id, channel, external_id)
       DO UPDATE SET
         account_id            = EXCLUDED.account_id,
@@ -47,16 +53,23 @@ export default async function facebookRoutes(fastify) {
         credentials_encrypted = COALESCE(EXCLUDED.credentials_encrypted, public.tenant_channel_connections.credentials_encrypted),
         settings              = COALESCE(public.tenant_channel_connections.settings,'{}'::jsonb) || EXCLUDED.settings,
         updated_at            = now()
-      RETURNING id, tenant_id, channel, provider, account_id, external_id, display_name, is_active, settings, updated_at
+      RETURNING id, tenant_id, channel, provider, account_id, external_id,
+                display_name, is_active, settings, updated_at
     `;
-    const encrypted = null;
+    const encrypted = null; // encripte se preferir
     const res = await db.query(upsertSql, [
-      tenantId, subdomain, String(pageId), String(pageId), pageName || "", encrypted, JSON.stringify(settings)
+      tenantId,
+      subdomain,
+      String(pageId),     // account_id & external_id = PAGE ID (Messenger)
+      pageName || "",
+      encrypted,
+      JSON.stringify(settings),
     ]);
     return res.rows?.[0] || null;
   }
 
-  // POST /facebook/finalize { subdomain, code, redirect_uri, page_id? }
+  // POST /api/v1/facebook/finalize
+  // body: { subdomain, code, redirect_uri, page_id? }
   fastify.post("/finalize", async (req, reply) => {
     const subdomain = getSubdomain(req);
     const { code, redirect_uri, page_id } = req.body || {};
@@ -66,35 +79,48 @@ export default async function facebookRoutes(fastify) {
 
     try {
       const tenant = await resolveTenant(req);
+
+      // 1) troca code -> user_access_token
       const qs = { client_id: META_APP_ID, client_secret: META_APP_SECRET, code };
       if (redirect_uri) qs.redirect_uri = redirect_uri;
       const tok = await gget("/oauth/access_token", { qs });
       const userToken = tok?.access_token;
       if (!userToken) throw new Error("user_token_exchange_failed");
 
-      const pages = await gget("/me/accounts", { token: userToken, qs: { fields: "id,name,access_token" } });
+      // 2) lista páginas do usuário
+      const pages = await gget("/me/accounts", {
+        token: userToken,
+        qs: { fields: "id,name,access_token" }
+      });
       const list = Array.isArray(pages?.data) ? pages.data : [];
+
       if (!page_id) {
-        return reply.send({ ok:true, step:"pages_list", pages: list.map(p => ({ id:p.id, name:p.name })) });
+        return reply.send({
+          ok:true, step:"pages_list",
+          pages: list.map(p => ({ id:p.id, name:p.name }))
+        });
       }
 
       const chosen = list.find(p => String(p.id) === String(page_id));
       if (!chosen || !chosen.access_token) {
         return reply.code(400).send({ ok:false, error:"invalid_page_id_or_missing_access_token" });
       }
-      const pageName = chosen.name || null;
+      const pageAccessToken = chosen.access_token;
+      const pageName        = chosen.name || null;
 
+      // 3) assina app na Página (mensagens)
       try {
         await gpost(`/${page_id}/subscribed_apps`, {
-          token: chosen.access_token,
+          token: pageAccessToken,
           form: { subscribed_fields: "messages,messaging_postbacks" }
         });
       } catch (e) {
         fastify.log.warn({ err:e }, "[facebook] subscribed_apps falhou (segue)");
       }
 
+      // 4) upsert conexão
       const after = await upsertFacebookConnection(req.db, {
-        tenantId: tenant.id, subdomain, pageId: page_id, pageName
+        tenantId: tenant.id, subdomain, pageId: page_id, pageName, pageAccessToken
       });
 
       await fastify.audit(req, {
@@ -115,7 +141,7 @@ export default async function facebookRoutes(fastify) {
     }
   });
 
-  // GET /facebook/status?subdomain=TENANT
+  // GET /api/v1/facebook/status?subdomain=TENANT
   fastify.get("/status", async (req, reply) => {
     const sub = getSubdomain(req);
     if (!sub) return reply.code(400).send({ ok:false, error:"missing_subdomain" });
@@ -125,17 +151,19 @@ export default async function facebookRoutes(fastify) {
       const t = tRes.rows[0]; if (!t) return reply.send({ ok:true, connected:false });
 
       const q = `
-        SELECT account_id AS page_id, display_name AS page_name, is_active, settings
+        SELECT account_id AS page_id, is_active, settings, display_name
           FROM public.tenant_channel_connections
          WHERE tenant_id=$1 AND channel='facebook' AND provider='meta'
          LIMIT 1`;
       const { rows } = await req.db.query(q, [t.id]);
       const row = rows[0];
-      if (!row) return reply.send({ ok:true, connected:false, page_id:null, page_name:null });
+      if (!row) return reply.send({ ok:true, connected:false, page_id:null });
 
       return reply.send({
-        ok:true, connected: !!row.is_active,
-        page_id: row.page_id, page_name: row?.settings?.page_name || row.page_name || null
+        ok:true,
+        connected: !!row.is_active,
+        page_id: row.page_id,
+        page_name: row?.settings?.page_name || row.display_name || null
       });
     } catch (err) {
       fastify.log.error({ err }, "[GET /facebook/status]");
