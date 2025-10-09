@@ -4,8 +4,10 @@ import { gget, gpost } from "../services/metaGraph.js";
 /**
  * Instagram (Meta) – conexão por tenant
  * POST /api/v1/instagram/finalize
- *   Passo 1: { code, redirect_uri }  ->  { step:'pages_list', user_token, pages[] }
- *   Passo 2: { page_id, user_token, persist_token? } -> salva no banco
+ *   Passo 1: { subdomain, code, redirect_uri }
+ *            → { ok, step:'pages_list', user_token, pages[] }
+ *   Passo 2: { subdomain, page_id, user_token, persist_token? }
+ *            → salva conexão no banco e assina webhooks (Página + IG User)
  *
  * GET  /api/v1/instagram/status?subdomain=TENANT
  */
@@ -37,6 +39,20 @@ export default async function instagramRoutes(fastify) {
     return t;
   }
 
+  // Verifica se o enum auth_mode tem "page_token"; senão, usa "oauth_page"
+  async function pickAuthMode(db) {
+    try {
+      const { rows } = await db.query(
+        `SELECT unnest(enum_range(NULL::auth_mode))::text AS v`
+      );
+      const vals = rows.map(r => r.v);
+      return vals.includes("page_token") ? "page_token" : "oauth_page";
+    } catch {
+      // se não conseguir inspecionar, assume 'page_token'
+      return "page_token";
+    }
+  }
+
   // ----------------- upsert conexão IG -----------------
   async function upsertInstagramConnection(db, {
     tenantId,
@@ -47,6 +63,8 @@ export default async function instagramRoutes(fastify) {
     igUsername,
     pageAccessToken, // opcional – só se persist_token=true
   }) {
+    const authMode = await pickAuthMode(db);
+
     const settings = {
       page_name: pageName || null,
       ig_user_id: igUserId || null,
@@ -62,7 +80,7 @@ export default async function instagramRoutes(fastify) {
       VALUES
         ($1::uuid, $2::text, 'instagram'::channel_type, 'meta'::text,
          $3::text, $4::text, $5::text,
-         'page_token'::auth_mode, NULL, $6::jsonb, true)
+         '${authMode}'::auth_mode, NULL, $6::jsonb, true)
       ON CONFLICT (tenant_id, channel, external_id)
       DO UPDATE SET
         account_id   = EXCLUDED.account_id,
@@ -87,9 +105,9 @@ export default async function instagramRoutes(fastify) {
   // ----------------- finalize (2 passos) -----------------
   fastify.post("/finalize", async (req, reply) => {
     const subdomain = getSubdomain(req);
-    // body
+
     const { code, redirect_uri, page_id, persist_token } = req.body || {};
-    // aceitar user_token também por header/query
+    // aceitar user_token por body/header/query
     const bodyToken   = (req.body || {}).user_token;
     const headerToken = req.headers["x-ig-user-token"];
     const queryToken  = req.query?.user_token;
@@ -110,14 +128,12 @@ export default async function instagramRoutes(fastify) {
           if (!code) {
             return reply.code(400).send({ ok: false, error: "missing_code_or_user_token" });
           }
-
           try {
             const qs = { client_id: META_APP_ID, client_secret: META_APP_SECRET, code };
             if (redirect_uri) qs.redirect_uri = redirect_uri;
             const tok = await gget("/oauth/access_token", { qs });
             userToken = tok?.access_token || null;
           } catch (e) {
-            // code já consumido
             const subcode = e?.details?.error_subcode;
             if (subcode === 36009) {
               return reply.code(400).send({
@@ -140,11 +156,10 @@ export default async function instagramRoutes(fastify) {
         });
         const list = Array.isArray(pages?.data) ? pages.data : [];
 
-        // devolve o token para ser usado no passo 2
         return reply.send({
           ok: true,
           step: "pages_list",
-          user_token: userToken,
+          user_token: userToken,   // devolvemos p/ front enviar no PASSO 2
           pages: list.map((p) => ({
             id: p.id,
             name: p.name,
@@ -160,24 +175,23 @@ export default async function instagramRoutes(fastify) {
         return reply.code(400).send({ ok: false, error: "missing_user_token_for_finalize" });
       }
 
-      // Carrega páginas novamente com o mesmo user_token
       const pages = await gget("/me/accounts", {
         token: userToken,
         qs: { fields: "id,name,access_token,instagram_business_account{id,username}" }
       });
-      const list = Array.isArray(pages?.data) ? pages.data : [];
+      const list   = Array.isArray(pages?.data) ? pages.data : [];
       const chosen = list.find((p) => String(p.id) === String(page_id));
 
       if (!chosen || !chosen.access_token) {
         return reply.code(400).send({ ok: false, error: "invalid_page_id_or_missing_access_token" });
       }
 
-      const pageAccessToken = chosen.access_token;                   // PAT da página
+      const pageAccessToken = chosen.access_token;              // PAT
       const pageName        = chosen.name || null;
       let igUserId          = chosen?.instagram_business_account?.id || null;
       let igUsername        = chosen?.instagram_business_account?.username || null;
 
-      // fallback: página não mostrava o ig vinculado
+      // fallback: obter IG vinculado via Page
       if (!igUserId) {
         const p = await gget(`/${page_id}`, {
           token: userToken,
@@ -190,17 +204,27 @@ export default async function instagramRoutes(fastify) {
         return reply.code(400).send({ ok: false, error: "page_not_linked_to_instagram" });
       }
 
-      // Assina webhooks do app nessa Página (mensagens/postbacks)
+      // 1) Assina webhooks da Página (Messenger)
       try {
         await gpost(`/${page_id}/subscribed_apps`, {
           token: pageAccessToken,
           form: { subscribed_fields: "messages,messaging_postbacks" }
         });
       } catch (e) {
-        fastify.log.warn({ err: e }, "[instagram] subscribed_apps falhou (segue)");
+        fastify.log.warn({ err: e }, "[instagram] subscribed_apps (page) falhou (segue)");
       }
 
-      // Persiste conexão (com PAT apenas se persist_token=true)
+      // 2) ✅ Assina webhooks do IG Business Account (Instagram)
+      try {
+        await gpost(`/${igUserId}/subscribed_apps`, {
+          token: pageAccessToken, // PAT também autoriza a IGBA vinculada
+          form: { subscribed_fields: "messages,messaging_postbacks,messaging_seen,message_reactions" }
+        });
+      } catch (e) {
+        fastify.log.warn({ err: e }, "[instagram] subscribed_apps (ig_user) falhou (segue)");
+      }
+
+      // Persiste conexão (PAT somente se persist_token=true)
       const saved = await upsertInstagramConnection(req.db, {
         tenantId: tenant.id,
         subdomain,
