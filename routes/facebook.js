@@ -28,7 +28,6 @@ export default async function facebookRoutes(fastify) {
     return t;
   }
 
-  // Upsert conexão de Página (Messenger). account_id/external_id = PAGE_ID
   async function upsertFacebookConnection(db, {
     tenantId, subdomain, pageId, pageName, pageAccessToken
   }) {
@@ -56,26 +55,28 @@ export default async function facebookRoutes(fastify) {
       RETURNING id, tenant_id, channel, provider, account_id, external_id,
                 display_name, is_active, settings, updated_at
     `;
-    const res = await db.query(sql, [
-      tenantId,
-      subdomain,
-      String(pageId),
-      pageName || "",
-      JSON.stringify(settings),
-    ]);
-    return res.rows?.[0] || null;
+
+    try {
+      const res = await db.query(sql, [
+        tenantId,
+        subdomain,
+        String(pageId),
+        pageName || "",
+        JSON.stringify(settings),
+      ]);
+      return res.rows?.[0] || null;
+    } catch (e) {
+      // Log explícito para facilitar diagnóstico
+      fastify.log.error({ err:e, pageId, subdomain }, "[facebook] upsert DB failed");
+      throw e;
+    }
   }
 
-  /**
-   * POST /api/v1/facebook/finalize
-   * Passo 1: { subdomain, code, redirect_uri } → { ok, step:'pages_list', user_token, pages[] }
-   * Passo 2: { subdomain, page_id, user_token, persist_token? } → assina e salva
-   */
+  // POST /api/v1/facebook/finalize (2 passos)
   fastify.post("/finalize", async (req, reply) => {
     const subdomain = getSubdomain(req);
     const { code, redirect_uri, page_id, persist_token } = req.body || {};
 
-    // user_token por body/header/query (mesma convenção do IG)
     const bodyToken   = req.body?.user_token;
     const headerToken = req.headers["x-fb-user-token"];
     const queryToken  = req.query?.user_token;
@@ -89,7 +90,7 @@ export default async function facebookRoutes(fastify) {
     try {
       const tenant = await resolveTenant(req);
 
-      // PASSO 1 — troca code → user_token e lista páginas
+      // PASSO 1
       if (!page_id) {
         if (!userToken) {
           if (!code) return reply.code(400).send({ ok:false, error:"missing_code_or_user_token" });
@@ -114,7 +115,7 @@ export default async function facebookRoutes(fastify) {
         });
       }
 
-      // PASSO 2 — finalizar com page_id + user_token
+      // PASSO 2
       if (!userToken)
         return reply.code(400).send({ ok:false, error:"missing_user_token_for_finalize" });
 
@@ -130,7 +131,6 @@ export default async function facebookRoutes(fastify) {
       const pageAccessToken = chosen.access_token;
       const pageName        = chosen.name || null;
 
-      // Assina somente o necessário para mensagens do Messenger
       try {
         await gpost(`/${page_id}/subscribed_apps`, {
           token: pageAccessToken,
@@ -140,7 +140,6 @@ export default async function facebookRoutes(fastify) {
         fastify.log.warn({ err:e }, "[facebook] subscribed_apps falhou (segue)");
       }
 
-      // Salva/Atualiza a conexão
       const saved = await upsertFacebookConnection(req.db, {
         tenantId: tenant.id,
         subdomain,
@@ -176,7 +175,7 @@ export default async function facebookRoutes(fastify) {
     }
   });
 
-  // GET /api/v1/facebook/status?subdomain=TENANT
+  // GET /api/v1/facebook/status
   fastify.get("/status", async (req, reply) => {
     const sub = getSubdomain(req);
     if (!sub) return reply.code(400).send({ ok:false, error:"missing_subdomain" });
