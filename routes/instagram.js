@@ -120,7 +120,7 @@ export default async function instagramRoutes(fastify) {
 
         const pages = await gget("/me/accounts", {
           token: userToken,
-          qs: { fields: "id,name,perms,access_token,instagram_business_account{id,username}" }
+          qs: { fields: "id,name,access_token,instagram_business_account{id,username}" }
         });
         const list = Array.isArray(pages?.data) ? pages.data : [];
 
