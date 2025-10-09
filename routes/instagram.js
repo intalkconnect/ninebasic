@@ -1,4 +1,3 @@
-// routes/instagram.js
 import { gget, gpost } from "../services/metaGraph.js";
 
 export default async function instagramRoutes(fastify) {
@@ -21,7 +20,9 @@ export default async function instagramRoutes(fastify) {
     return rows[0];
   }
 
-  async function upsertIG(db, { tenantId, subdomain, pageId, pageName, igUserId, igUsername, pageAccessToken }) {
+  async function upsertIG(db, {
+    tenantId, subdomain, pageId, pageName, igUserId, igUsername, pageAccessToken
+  }) {
     const settings = {
       page_name: pageName || null,
       ig_user_id: igUserId || null,
@@ -73,7 +74,7 @@ export default async function instagramRoutes(fastify) {
     try {
       const tenant = await resolveTenant(req);
 
-      // Passo 1: troca code -> user_token e lista páginas
+      // Passo 1: trocar code -> user_token e listar páginas
       if (!page_id) {
         if (!userToken) {
           if (!code) return reply.code(400).send({ ok:false, error:"missing_code_or_user_token" });
@@ -136,18 +137,31 @@ export default async function instagramRoutes(fastify) {
       if (!igUserId)
         return reply.code(400).send({ ok:false, error:"page_not_linked_to_instagram" });
 
-      // ✅ Assinar IG DMs (é no IG USER!)
+      // ✅ Assinar IG DMs no IG USER (não a Página)
+      let igSubscribed = false;
       try {
-        await gpost(`/${igUserId}/subscribed_apps`, {
-          token: pageAccessToken, // PAT da página
-          form: { subscribed_fields: "messages" }
+        const subRes = await gpost(`/${igUserId}/subscribed_apps`, {
+          token: pageAccessToken,               // PAT da Página
+          form:  { subscribed_fields: "messages" }
         });
+        igSubscribed = !!(subRes && (subRes.success === true || subRes.result === "success"));
       } catch (e) {
-        fastify.log.warn({ err:e }, "[instagram] subscribe IG user failed (segue)");
+        fastify.log.error({ err:e, igUserId }, "[instagram] subscribe IG user failed");
+        return reply.code(400).send({
+          ok:false,
+          error:"ig_user_subscribe_failed",
+          details:e?.details || e?.message || null
+        });
+      }
+      if (!igSubscribed) {
+        return reply.code(400).send({ ok:false, error:"ig_user_subscribe_not_confirmed" });
       }
 
-      // (opcional) ainda pode assinar a Página para Messenger, se quiser ambos:
-      // await gpost(`/${page_id}/subscribed_apps`, { token: pageAccessToken, form:{subscribed_fields:"messages,messaging_postbacks"} });
+      // (opcional) Se também quiser Messenger, assine a Página aqui:
+      // await gpost(`/${page_id}/subscribed_apps`, {
+      //   token: pageAccessToken,
+      //   form: { subscribed_fields: "messages,messaging_postbacks" }
+      // });
 
       const saved = await upsertIG(req.db, {
         tenantId: tenant.id,
