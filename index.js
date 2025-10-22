@@ -13,6 +13,7 @@ import auditPlugin from './plugins/auditPlugin.js';
 
 
 // rotas...
+import auditLogsRoutes     from "./routes/auditLogs.js";
 import messagesRoutes      from './routes/messages.js';
 import flowsRoutes         from './routes/flows.js';
 import storageRoutes       from './routes/storage.js';
@@ -155,6 +156,7 @@ async function buildServer() {
     api.register(instagramRoutes, { prefix: "/api/v1/instagram" }); 
     api.register(securityTokensRoutes, { prefix: '/api/v1/security' });
     api.register(tracertRoutes, { prefix: '/api/v1/tracert' });
+    api.register(auditLogsRoutes, { prefix: "/api/v1/audit" });
   });
 
   return fastify;
@@ -174,6 +176,7 @@ async function start() {
 }
 
 start();
+
 
 
 
