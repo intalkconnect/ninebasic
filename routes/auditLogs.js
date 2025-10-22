@@ -13,7 +13,7 @@ export default async function auditLogsRoutes(fastify) {
    *  - from, to (ISO date/time) — intervalo de ts
    *  - limit (default 25, max 100), offset (default 0)
    */
-  fastify.get("/audit/logs", async (req, reply) => {
+  fastify.get("/logs", async (req, reply) => {
     const {
       q,
       actor_id,
@@ -101,7 +101,7 @@ export default async function auditLogsRoutes(fastify) {
    * GET /audit/logs/:id
    * Retorna o registro completo (inclui JSONs)
    */
-  fastify.get("/audit/logs/:id", async (req, reply) => {
+  fastify.get("/logs/:id", async (req, reply) => {
     const { id } = req.params;
     try {
       const { rows } = await req.db.query(
