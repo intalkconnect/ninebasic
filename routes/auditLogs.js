@@ -4,20 +4,22 @@ export default async function auditLogsRoutes(fastify) {
    * GET /audit/logs
    * Query params:
    *  - q: texto livre (action, path, actor_user, resource_type/id)
-   *  - actor_id, actor_user
+   *  - actor_id, actor_user, author (alias de actor_user)
    *  - action
    *  - method (GET/POST/PUT/DELETE…)
-   *  - status (status_code)
+   *  - status (pode ser: 200 | 2xx | success | fail | csv de valores)
    *  - resource_type, resource_id
    *  - ip
    *  - from, to (ISO date/time) — intervalo de ts
    *  - limit (default 25, max 100), offset (default 0)
+   *  - order (asc|desc)
    */
   fastify.get("/logs", async (req, reply) => {
     const {
       q,
       actor_id,
       actor_user,
+      author, // alias
       action,
       method,
       status,
@@ -33,29 +35,94 @@ export default async function auditLogsRoutes(fastify) {
 
     const where = [];
     const params = [];
-    const push = (sql, val) => { params.push(val); where.push(sql.replace(/\$(\d+)/g, () => `$${params.length}`)); };
+
+    const add = (sqlFrag, ...vals) => {
+      // Ex.: add("actor_id = $?", actor_id)
+      // Substitui cada $? pelo próximo índice de param.
+      let frag = sqlFrag;
+      vals.forEach((v) => {
+        params.push(v);
+        frag = frag.replace("$?", `$${params.length}`);
+      });
+      where.push(frag);
+    };
 
     if (q) {
       const like = `%${q}%`;
       params.push(like, like, like, like, like);
       where.push(
         `(action ILIKE $${params.length - 4} ` +
-        `OR path ILIKE $${params.length - 3} ` +
-        `OR actor_user ILIKE $${params.length - 2} ` +
-        `OR resource_type ILIKE $${params.length - 1} ` +
-        `OR resource_id ILIKE $${params.length})`
+          `OR path ILIKE $${params.length - 3} ` +
+          `OR actor_user ILIKE $${params.length - 2} ` +
+          `OR resource_type ILIKE $${params.length - 1} ` +
+          `OR resource_id ILIKE $${params.length})`
       );
     }
-    if (actor_id)      push(`actor_id = $1`, actor_id);
-    if (actor_user)    push(`actor_user ILIKE $1`, `%${actor_user}%`);
-    if (action)        push(`action ILIKE $1`, `%${action}%`);
-    if (method)        push(`method = $1`, String(method).toUpperCase());
-    if (status)        push(`status_code = $1`, Number(status));
-    if (resource_type) push(`resource_type = $1`, resource_type);
-    if (resource_id)   push(`resource_id = $1`, resource_id);
-    if (ip)            push(`ip = $1`, ip);
-    if (from)          push(`ts >= $1`, new Date(from));
-    if (to)            push(`ts <= $1`, new Date(to));
+
+    if (actor_id) add(`actor_id = $?`, actor_id);
+    const actorLike = author || actor_user;
+    if (actorLike) add(`actor_user ILIKE $?`, `%${actorLike}%`);
+    if (action) add(`action ILIKE $?`, `%${action}%`);
+    if (method) add(`method = $?`, String(method).toUpperCase());
+    if (resource_type) add(`resource_type = $?`, resource_type);
+    if (resource_id) add(`resource_id = $?`, resource_id);
+    if (ip) add(`ip = $?`, ip);
+    if (from) add(`ts >= $?`, new Date(from));
+    if (to) add(`ts <= $?`, new Date(to));
+
+    // -------- STATUS FLEXÍVEL --------
+    // suporta: 200 | 2xx | success | fail | csv (ex.: "2xx,404,success")
+    const parseStatusTokens = (raw) => {
+      if (!raw) return [];
+      const tokens = String(raw)
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+      return tokens;
+    };
+
+    const statusTokens = parseStatusTokens(status);
+    if (statusTokens.length) {
+      const orClauses = [];
+
+      statusTokens.forEach((tok) => {
+        if (/^\d{3}$/.test(tok)) {
+          // exato: 200
+          params.push(Number(tok));
+          orClauses.push(`status_code = $${params.length}`);
+          return;
+        }
+
+        if (/^[1-5]xx$/.test(tok)) {
+          // classe HTTP: 2xx, 4xx…
+          const cls = Number(tok[0]);
+          const min = cls * 100;
+          const max = min + 99;
+          params.push(min, max);
+          orClauses.push(`(status_code BETWEEN $${params.length - 1} AND $${params.length})`);
+          return;
+        }
+
+        if (["success", "ok", "sucesso"].includes(tok)) {
+          // sucesso: 2xx e 3xx
+          params.push(200, 399);
+          orClauses.push(`(status_code BETWEEN $${params.length - 1} AND $${params.length})`);
+          return;
+        }
+
+        if (["fail", "falha", "error", "erro"].includes(tok)) {
+          // falha: <200 ou >=400
+          params.push(200, 400);
+          orClauses.push(`(status_code < $${params.length - 1} OR status_code >= $${params.length})`);
+          return;
+        }
+        // token desconhecido => ignora
+      });
+
+      if (orClauses.length) {
+        where.push(`(${orClauses.join(" OR ")})`);
+      }
+    }
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const lim = Math.min(Math.max(parseInt(limit, 10) || 25, 1), 100);
@@ -63,14 +130,12 @@ export default async function auditLogsRoutes(fastify) {
     const ord = String(order).toLowerCase() === "asc" ? "ASC" : "DESC";
 
     try {
-      // total
       const countQ = await req.db.query(
         `SELECT count(*)::int AS total FROM hmg.audit_logs ${whereSql}`,
         params
       );
       const total = countQ.rows[0]?.total ?? 0;
 
-      // dados (sem os JSONs pesados por padrão)
       const dataQ = await req.db.query(
         `
         SELECT
@@ -93,13 +158,15 @@ export default async function auditLogsRoutes(fastify) {
       });
     } catch (err) {
       req.log.error(err, "Erro ao listar audit logs");
-      return reply.code(500).send({ error: "Erro ao listar logs", detail: err.message });
+      return reply
+        .code(500)
+        .send({ error: "Erro ao listar logs", detail: err.message });
     }
   });
 
   /**
    * GET /audit/logs/:id
-   * Retorna o registro completo (inclui JSONs)
+   * Retorna o registro completo (inclui JSONs pesados)
    */
   fastify.get("/logs/:id", async (req, reply) => {
     const { id } = req.params;
@@ -120,7 +187,9 @@ export default async function auditLogsRoutes(fastify) {
       return reply.send(rows[0]);
     } catch (err) {
       req.log.error(err, "Erro ao buscar audit log");
-      return reply.code(500).send({ error: "Erro ao buscar log", detail: err.message });
+      return reply
+        .code(500)
+        .send({ error: "Erro ao buscar log", detail: err.message });
     }
   });
 }
