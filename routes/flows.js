@@ -379,4 +379,129 @@ export default async function flowsRoutes(fastify) {
       return reply.code(500).send({ error: 'Erro ao salvar sessão', detail: error.message });
     }
   });
+
+  // ====== FLOW CHANNELS (por fluxo) ======
+
+// GET /api/v1/flows/:flow_id/channels
+fastify.get('/:flow_id/channels', async (req, reply) => {
+  const { flow_id } = req.params;
+  try {
+    const { rows } = await req.db.query(
+      `SELECT id, flow_id, channel_key, channel_type, display_name, is_active, created_at, updated_at
+         FROM flow_channels
+        WHERE flow_id = $1
+        ORDER BY created_at DESC`,
+      [flow_id]
+    );
+    return reply.send(rows);
+  } catch (e) {
+    req.log.error(e);
+    return reply.code(500).send({ error: 'erro ao listar canais do flow', detail: e.message });
+  }
+});
+
+// POST /api/v1/flows/:flow_id/channels  body: { channel_key, channel_type, display_name? }
+fastify.post('/:flow_id/channels', async (req, reply) => {
+  const { flow_id } = req.params;
+  const { channel_key, channel_type, display_name = null } = req.body || {};
+  if (!channel_key || !channel_type) {
+    return reply.code(400).send({ error: 'channel_key e channel_type são obrigatórios' });
+  }
+  try {
+    const { rows } = await req.db.query(
+      `INSERT INTO flow_channels (flow_id, channel_key, channel_type, display_name)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (channel_key) DO UPDATE SET
+         flow_id = EXCLUDED.flow_id,
+         channel_type = EXCLUDED.channel_type,
+         display_name = COALESCE(EXCLUDED.display_name, flow_channels.display_name),
+         is_active = true,
+         updated_at = NOW()
+       RETURNING id, flow_id, channel_key, channel_type, display_name, is_active`,
+      [flow_id, channel_key, channel_type, display_name]
+    );
+    return reply.send(rows[0]);
+  } catch (e) {
+    req.log.error(e);
+    return reply.code(500).send({ error: 'erro ao vincular canal ao flow', detail: e.message });
+  }
+});
+
+// DELETE /api/v1/flows/:flow_id/channels/:channel_key
+fastify.delete('/:flow_id/channels/:channel_key', async (req, reply) => {
+  const { flow_id, channel_key } = req.params;
+  try {
+    const { rowCount } = await req.db.query(
+      `DELETE FROM flow_channels WHERE flow_id = $1 AND channel_key = $2`,
+      [flow_id, channel_key]
+    );
+    if (!rowCount) return reply.code(404).send({ error: 'canal não encontrado para este flow' });
+    return reply.send({ ok: true });
+  } catch (e) {
+    req.log.error(e);
+    return reply.code(500).send({ error: 'erro ao desvincular canal', detail: e.message });
+  }
+});
+
+// PATCH /api/v1/flows/:flow_id/channels/:channel_key { is_active?: boolean, display_name?: string }
+fastify.patch('/:flow_id/channels/:channel_key', async (req, reply) => {
+  const { flow_id, channel_key } = req.params;
+  const { is_active, display_name } = req.body || {};
+  try {
+    const { rows } = await req.db.query(
+      `UPDATE flow_channels
+          SET is_active = COALESCE($3, is_active),
+              display_name = COALESCE($4, display_name),
+              updated_at = NOW()
+        WHERE flow_id = $1 AND channel_key = $2
+        RETURNING id, flow_id, channel_key, channel_type, display_name, is_active`,
+      [flow_id, channel_key, is_active, display_name]
+    );
+    if (!rows.length) return reply.code(404).send({ error: 'canal não encontrado para este flow' });
+    return reply.send(rows[0]);
+  } catch (e) {
+    req.log.error(e);
+    return reply.code(500).send({ error: 'erro ao atualizar canal do flow', detail: e.message });
+  }
+});
+
+// ====== RESOLVE FLOW BY CHANNEL (para o worker) ======
+// GET /api/v1/flows/resolve-by-channel?key=whatsapp:5511999999999
+fastify.get('/resolve-by-channel', async (req, reply) => {
+  const { key } = req.query || {};
+  if (!key) return reply.code(400).send({ error: 'key é obrigatório (channel_key)' });
+  try {
+    const { rows } = await req.db.query(
+      `WITH fc AS (
+         SELECT flow_id, channel_key, channel_type
+           FROM flow_channels
+          WHERE channel_key = $1 AND is_active = true
+          LIMIT 1
+       ),
+       last_active AS (
+         SELECT d.flow_id, d.version_id, v.version, d.channel, d.activated_at
+           FROM flow_deployments d
+           JOIN flow_versions v ON v.id = d.version_id
+           JOIN fc ON fc.flow_id = d.flow_id
+          WHERE d.is_active = true
+          ORDER BY d.activated_at DESC
+          LIMIT 1
+       )
+       SELECT f.id AS flow_id, f.name, f.description,
+              fc.channel_key, fc.channel_type,
+              la.version_id, la.version, la.channel AS deployed_channel
+         FROM flows f
+         JOIN fc ON fc.flow_id = f.id
+         LEFT JOIN last_active la ON la.flow_id = f.id
+         LIMIT 1`,
+      [key]
+    );
+    if (!rows.length) return reply.code(404).send({ error: 'nenhum flow vinculado ao channel_key informado' });
+    return reply.send(rows[0]);
+  } catch (e) {
+    req.log.error(e);
+    return reply.code(500).send({ error: 'erro ao resolver flow por canal', detail: e.message });
+  }
+});
+
 }
