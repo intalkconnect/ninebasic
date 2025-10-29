@@ -38,10 +38,83 @@ async function whatsappRoutes(fastify) {
     return t;
   }
 
-  // Pega o phone_number_id do canal WhatsApp/Meta do tenant.
-  // Preferência: is_active = true; fallback: o mais recente.
-  async function resolveActivePhone(req) {
+  /**
+   * Resolve o phone_id obedecendo a prioridade:
+   * 1) phone_id explícito (query/body)
+   * 2) flow_id (canal vinculado ao flow)
+   * 3) fallback: número "ativo" do tenant
+   */
+  async function resolvePhoneForRequest(req) {
     const tenant = await resolveTenant(req);
+
+    const phoneIdParam =
+      req?.query?.phone_id || req?.body?.phone_id || null;
+    const flowIdParam =
+      req?.query?.flow_id || req?.body?.flow_id || null;
+
+    // 1) phone_id explícito
+    if (phoneIdParam) {
+      const q = `
+        SELECT external_id AS phone_id, settings, is_active
+          FROM public.tenant_channel_connections
+         WHERE tenant_id = $1
+           AND channel   = 'whatsapp'
+           AND provider  = 'meta'
+           AND external_id = $2
+         LIMIT 1
+      `;
+      const { rows } = await req.db.query(q, [tenant.id, String(phoneIdParam)]);
+      const row = rows[0];
+      if (!row?.phone_id) throw new Error("phone_not_found_for_tenant");
+
+      const waba_id =
+        row?.settings?.waba_id ||
+        (row?.settings && typeof row.settings === "string"
+          ? (() => { try { return JSON.parse(row.settings)?.waba_id; } catch { return null; } })()
+          : null);
+
+      return { tenant, phone_id: row.phone_id, waba_id };
+    }
+
+    // 2) via flow_id
+    if (flowIdParam) {
+      // pega channel_key do flow (phone_id)
+      const bq = `
+        SELECT fc.channel_key AS phone_id
+          FROM flow_channels fc
+         WHERE fc.flow_id = $1
+           AND fc.channel_type = 'whatsapp'
+           AND fc.is_active = true
+         LIMIT 1
+      `;
+      const { rows: bRows } = await req.db.query(bq, [String(flowIdParam)]);
+      const phoneFromFlow = bRows?.[0]?.phone_id || null;
+      if (!phoneFromFlow) throw new Error("flow_not_bound_to_whatsapp");
+
+      // valida que o phone_id pertence ao tenant
+      const vq = `
+        SELECT settings
+          FROM public.tenant_channel_connections
+         WHERE tenant_id = $1
+           AND channel   = 'whatsapp'
+           AND provider  = 'meta'
+           AND external_id = $2
+         LIMIT 1
+      `;
+      const { rows: vRows } = await req.db.query(vq, [tenant.id, phoneFromFlow]);
+      const v = vRows[0];
+      if (!v) throw new Error("phone_not_found_for_tenant");
+
+      const waba_id =
+        v?.settings?.waba_id ||
+        (v?.settings && typeof v.settings === "string"
+          ? (() => { try { return JSON.parse(v.settings)?.waba_id; } catch { return null; } })()
+          : null);
+
+      return { tenant, phone_id: phoneFromFlow, waba_id };
+    }
+
+    // 3) fallback: “ativo”/mais recente no tenant
     const q = `
       SELECT external_id AS phone_id, settings, is_active
         FROM public.tenant_channel_connections
@@ -58,13 +131,7 @@ async function whatsappRoutes(fastify) {
     const waba_id =
       row?.settings?.waba_id ||
       (row?.settings && typeof row.settings === "string"
-        ? (() => {
-            try {
-              return JSON.parse(row.settings)?.waba_id;
-            } catch {
-              return null;
-            }
-          })()
+        ? (() => { try { return JSON.parse(row.settings)?.waba_id; } catch { return null; } })()
         : null);
 
     return { tenant, phone_id: row.phone_id, waba_id };
@@ -73,21 +140,18 @@ async function whatsappRoutes(fastify) {
   const sanitizeWebsites = (raw) => {
     if (!raw) return [];
     const arr = Array.isArray(raw) ? raw : String(raw).split(/[,\s]+/);
-    return arr
-      .map(String)
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .slice(0, 2);
+    return arr.map(String).map((s) => s.trim()).filter(Boolean).slice(0, 2);
   };
   const sanitizeVertical = (v) => (v ? String(v).toUpperCase() : undefined);
 
   // ---------- ENDPOINTS ----------
 
   // GET /wa/profile -> phone + business profile
+  // Aceita: subdomain & (phone_id | flow_id)
   fastify.get("/profile", async (req, reply) => {
     try {
       requireToken();
-      const { phone_id } = await resolveActivePhone(req);
+      const { phone_id } = await resolvePhoneForRequest(req);
 
       const phoneFields = [
         "id",
@@ -124,43 +188,32 @@ async function whatsappRoutes(fastify) {
     } catch (err) {
       fastify.log.error({ err }, "[GET /wa/profile]");
       const code =
-        err?.message === "meta_token_missing"
-          ? 500
-          : err?.message === "missing_subdomain"
-          ? 400
-          : err?.message === "db_not_available"
-          ? 500
-          : err?.message === "tenant_not_found"
-          ? 404
-          : err?.message === "no_whatsapp_connection"
-          ? 404
-          : 500;
-      return reply
-        .code(code)
-        .send({ ok: false, error: err?.message || "unexpected_error" });
+        err?.message === "meta_token_missing" ? 500 :
+        err?.message === "missing_subdomain" ? 400 :
+        err?.message === "db_not_available" ? 500 :
+        err?.message === "tenant_not_found" ? 404 :
+        err?.message === "flow_not_bound_to_whatsapp" ? 404 :
+        err?.message === "phone_not_found_for_tenant" ? 404 :
+        err?.message === "no_whatsapp_connection" ? 404 : 500;
+      return reply.code(code).send({ ok: false, error: err?.message || "unexpected_error" });
     }
   });
 
   // POST /wa/profile -> update about/address/description/email/vertical/websites
+  // Body: subdomain, (phone_id|flow_id), campos
   fastify.post("/profile", async (req, reply) => {
-    // vamos capturar infos fora do try para conseguir auditar mesmo se falhar cedo
     let phoneId = null;
     let payload = {};
-
     try {
       requireToken();
-      const act = await resolveActivePhone(req);
+      const act = await resolvePhoneForRequest(req);
       phoneId = act?.phone_id;
 
-      const { about, address, description, email, vertical, websites } =
-        req.body || {};
-
+      const { about, address, description, email, vertical, websites } = req.body || {};
       payload = {};
       if (about !== undefined) payload.about = String(about).slice(0, 139);
-      if (address !== undefined)
-        payload.address = String(address).slice(0, 256);
-      if (description !== undefined)
-        payload.description = String(description).slice(0, 512);
+      if (address !== undefined) payload.address = String(address).slice(0, 256);
+      if (description !== undefined) payload.description = String(description).slice(0, 512);
       if (email !== undefined) payload.email = String(email).slice(0, 128);
       if (vertical !== undefined) payload.vertical = sanitizeVertical(vertical);
       if (websites !== undefined) payload.websites = sanitizeWebsites(websites);
@@ -179,7 +232,6 @@ async function whatsappRoutes(fastify) {
         return reply.code(400).send(body400);
       }
 
-      // gpost envia por padrão como form; Graph aceita form para esses campos
       const res = await gpost(`/${phoneId}/whatsapp_business_profile`, {
         token: TOKEN,
         form: payload,
@@ -191,33 +243,25 @@ async function whatsappRoutes(fastify) {
         resourceType: "whatsapp_profile",
         resourceId: phoneId,
         statusCode: 200,
-        requestBody: payload, // já sanitizado (plugin ainda redige se algo sensível)
-        responseBody: { ok: true }, // evita logar payloads enormes do provider
+        requestBody: payload,
+        responseBody: { ok: true },
         extra: {
           phone_id: phoneId,
-          provider_summary: {
-            ok: !!res?.success,
-            keys: Object.keys(res || {}),
-          },
+          provider_summary: { ok: !!res?.success, keys: Object.keys(res || {}) },
         },
       });
 
       return reply.send(body200);
     } catch (err) {
       fastify.log.error({ err }, "[POST /wa/profile]");
-
       const code =
-        err?.message === "meta_token_missing"
-          ? 500
-          : err?.message === "missing_subdomain"
-          ? 400
-          : err?.message === "db_not_available"
-          ? 500
-          : err?.message === "tenant_not_found"
-          ? 404
-          : err?.message === "no_whatsapp_connection"
-          ? 404
-          : 500;
+        err?.message === "meta_token_missing" ? 500 :
+        err?.message === "missing_subdomain" ? 400 :
+        err?.message === "db_not_available" ? 500 :
+        err?.message === "tenant_not_found" ? 404 :
+        err?.message === "flow_not_bound_to_whatsapp" ? 404 :
+        err?.message === "phone_not_found_for_tenant" ? 404 :
+        err?.message === "no_whatsapp_connection" ? 404 : 500;
 
       const bodyErr = { ok: false, error: err?.message || "unexpected_error" };
 
@@ -226,7 +270,7 @@ async function whatsappRoutes(fastify) {
         resourceType: "whatsapp_profile",
         resourceId: phoneId,
         statusCode: code,
-        requestBody: payload, // o que tentamos enviar
+        requestBody: payload,
         responseBody: bodyErr,
         extra: {
           phone_id: phoneId,
@@ -240,17 +284,16 @@ async function whatsappRoutes(fastify) {
   });
 
   // POST /wa/profile/photo-from-url -> upload + aplicar foto
-  // body: { file_url: string, type?: 'image/jpeg'|'image/png' }
+  // body: { subdomain, file_url, type?, phone_id?|flow_id? }
   fastify.post("/photo-from-url", async (req, reply) => {
-    // capturar infos para auditar mesmo se falhar cedo
     let phoneId = null;
     let wabaId = null;
     let payload = {};
     try {
       requireToken();
-      const act = await resolveActivePhone(req);
+      const act = await resolvePhoneForRequest(req);
       phoneId = act?.phone_id;
-      wabaId = act?.waba_id;
+      wabaId  = act?.waba_id;
 
       const { file_url, type = "image/jpeg" } = req.body || {};
       payload = { file_url, type };
@@ -269,17 +312,11 @@ async function whatsappRoutes(fastify) {
         return reply.code(400).send(body400);
       }
 
-      // 1) sobe mídia na WABA
       const up = await gpost(`/${wabaId}/media`, {
         token: TOKEN,
-        form: {
-          messaging_product: "whatsapp",
-          type,
-          link: file_url,
-        },
+        form: { messaging_product: "whatsapp", type, link: file_url },
       });
       const handle = up?.id;
-
       if (!handle) {
         const body502 = { ok: false, error: "upload_no_handle" };
         await fastify.audit(req, {
@@ -298,7 +335,6 @@ async function whatsappRoutes(fastify) {
         return reply.code(502).send(body502);
       }
 
-      // 2) aplica como foto de perfil
       const res = await gpost(`/${phoneId}/whatsapp_business_profile`, {
         token: TOKEN,
         form: { profile_picture_handle: handle },
@@ -311,7 +347,7 @@ async function whatsappRoutes(fastify) {
         resourceId: phoneId,
         statusCode: 200,
         requestBody: { ...payload, profile_picture_handle: handle },
-        responseBody: { ok: true, media_id: handle }, // evita logar provider completo
+        responseBody: { ok: true, media_id: handle },
         extra: {
           phone_id: phoneId,
           waba_id: wabaId,
@@ -323,17 +359,13 @@ async function whatsappRoutes(fastify) {
     } catch (err) {
       fastify.log.error({ err }, "[POST /wa/profile/photo-from-url]");
       const code =
-        err?.message === "meta_token_missing"
-          ? 500
-          : err?.message === "missing_subdomain"
-          ? 400
-          : err?.message === "db_not_available"
-          ? 500
-          : err?.message === "tenant_not_found"
-          ? 404
-          : err?.message === "no_whatsapp_connection"
-          ? 404
-          : 500;
+        err?.message === "meta_token_missing" ? 500 :
+        err?.message === "missing_subdomain" ? 400 :
+        err?.message === "db_not_available" ? 500 :
+        err?.message === "tenant_not_found" ? 404 :
+        err?.message === "flow_not_bound_to_whatsapp" ? 404 :
+        err?.message === "phone_not_found_for_tenant" ? 404 :
+        err?.message === "no_whatsapp_connection" ? 404 : 500;
 
       const bodyErr = { ok: false, error: err?.message || "unexpected_error" };
 
@@ -357,18 +389,19 @@ async function whatsappRoutes(fastify) {
   });
 
   // DELETE /wa/profile/photo -> remove foto
+  // body/query: subdomain, (phone_id|flow_id)
   fastify.delete("/profile/photo", async (req, reply) => {
     let phoneId = null;
     let payload = {};
     try {
       requireToken();
-      const { phone_id } = await resolveActivePhone(req);
+      const { phone_id } = await resolvePhoneForRequest(req);
       phoneId = phone_id;
       payload = { profile_picture_handle: "" };
 
       const res = await gpost(`/${phoneId}/whatsapp_business_profile`, {
         token: TOKEN,
-        form: payload, // limpa
+        form: payload,
       });
 
       const body200 = { ok: true, provider: res };
@@ -379,7 +412,7 @@ async function whatsappRoutes(fastify) {
         resourceId: phoneId,
         statusCode: 200,
         requestBody: payload,
-        responseBody: { ok: true }, // evita logar provider inteiro
+        responseBody: { ok: true },
         extra: { phone_id: phoneId, provider_summary: Object.keys(res || {}) },
       });
 
@@ -387,17 +420,13 @@ async function whatsappRoutes(fastify) {
     } catch (err) {
       fastify.log.error({ err }, "[DELETE /wa/profile/photo]");
       const code =
-        err?.message === "meta_token_missing"
-          ? 500
-          : err?.message === "missing_subdomain"
-          ? 400
-          : err?.message === "db_not_available"
-          ? 500
-          : err?.message === "tenant_not_found"
-          ? 404
-          : err?.message === "no_whatsapp_connection"
-          ? 404
-          : 500;
+        err?.message === "meta_token_missing" ? 500 :
+        err?.message === "missing_subdomain" ? 400 :
+        err?.message === "db_not_available" ? 500 :
+        err?.message === "tenant_not_found" ? 404 :
+        err?.message === "flow_not_bound_to_whatsapp" ? 404 :
+        err?.message === "phone_not_found_for_tenant" ? 404 :
+        err?.message === "no_whatsapp_connection" ? 404 : 500;
 
       const bodyErr = { ok: false, error: err?.message || "unexpected_error" };
 
@@ -420,10 +449,11 @@ async function whatsappRoutes(fastify) {
   });
 
   // GET /wa/number -> metadados do número (UI)
+  // Aceita: subdomain & (phone_id | flow_id)
   fastify.get("/number", async (req, reply) => {
     try {
       requireToken();
-      const { phone_id } = await resolveActivePhone(req);
+      const { phone_id } = await resolvePhoneForRequest(req);
 
       const fields = [
         "id",
@@ -434,218 +464,23 @@ async function whatsappRoutes(fastify) {
         "account_mode",
       ].join(",");
 
-      const phone = await gget(`/${phone_id}`, {
-        token: TOKEN,
-        qs: { fields },
-      });
+      const phone = await gget(`/${phone_id}`, { token: TOKEN, qs: { fields } });
       return reply.send({ ok: true, phone });
     } catch (err) {
       fastify.log.error({ err }, "[GET /wa/number]");
       const code =
-        err?.message === "meta_token_missing"
-          ? 500
-          : err?.message === "missing_subdomain"
-          ? 400
-          : err?.message === "db_not_available"
-          ? 500
-          : err?.message === "tenant_not_found"
-          ? 404
-          : err?.message === "no_whatsapp_connection"
-          ? 404
-          : 500;
-      return reply
-        .code(code)
-        .send({ ok: false, error: err?.message || "unexpected_error" });
+        err?.message === "meta_token_missing" ? 500 :
+        err?.message === "missing_subdomain" ? 400 :
+        err?.message === "db_not_available" ? 500 :
+        err?.message === "tenant_not_found" ? 404 :
+        err?.message === "flow_not_bound_to_whatsapp" ? 404 :
+        err?.message === "phone_not_found_for_tenant" ? 404 :
+        err?.message === "no_whatsapp_connection" ? 404 : 500;
+      return reply.code(code).send({ ok: false, error: err?.message || "unexpected_error" });
     }
   });
 
-  // routes/waEmbedded.js (trecho)
-  fastify.post("/embedded/es/pick-number", async (req, reply) => {
-    const { subdomain, phone_number_id } = req.body || {};
-    if (!subdomain || !phone_number_id) {
-      return reply.code(400).send({ error: "missing_params" });
-    }
-    if (!req.db) return reply.code(500).send({ error: "db_not_available" });
-
-    // resolve tenant
-    const tRes = await req.db.query(
-      `SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1`,
-      [subdomain]
-    );
-    const tenant = tRes.rows[0];
-    if (!tenant) return reply.code(404).send({ error: "tenant_not_found" });
-
-    // ✅ ativa só o escolhido; NÃO mexe nos demais
-    await req.db.query(
-      `
-    UPDATE public.tenant_channel_connections
-       SET is_active = true,
-           updated_at = now()
-     WHERE tenant_id = $1
-       AND channel   = 'whatsapp'
-       AND provider  = 'meta'
-       AND external_id = $2
-  `,
-      [tenant.id, phone_number_id]
-    );
-
-    return reply.send({ ok: true, tenant_id: tenant.id, phone_number_id });
-  });
-
-  // ============ FINALIZE (Embedded Signup) ============
-  // POST /api/v1/wa/es/finalize
-  fastify.post("/embedded/es/finalize", async (req, reply) => {
-    // subdomain: preferir do plugin; fallback do body/header
-    const subdomain =
-      req?.tenant?.subdomain ||
-      req?.tenant?.name ||
-      req?.headers["x-tenant-subdomain"] ||
-      req?.body?.subdomain;
-
-    const { code } = req.body || {};
-    if (!code || !subdomain) {
-      return reply.code(400).send({ error: "missing_code_or_subdomain" });
-    }
-
-    const {
-      META_APP_ID,
-      META_APP_SECRET,
-      META_REDIRECT_URI,
-      YOUR_BUSINESS_ID,
-      SYSTEM_USER_ID,
-      SYSTEM_USER_TOKEN,
-      SYSTEM_USER_ADMIN_TOKEN,
-    } = process.env;
-
-    if (!META_APP_ID || !META_APP_SECRET) {
-      return reply.code(500).send({ error: "meta_app_credentials_missing" });
-    }
-    if (!YOUR_BUSINESS_ID || !SYSTEM_USER_ID || !SYSTEM_USER_TOKEN) {
-      return reply
-        .code(500)
-        .send({ error: "system_user_or_business_env_missing" });
-    }
-    if (!req.db) {
-      return reply.code(500).send({ error: "db_not_available" });
-    }
-
-    try {
-      // 0) resolver tenant_id
-      const tRes = await req.db.query(
-        `SELECT id, subdomain FROM public.tenants WHERE subdomain = $1 LIMIT 1`,
-        [subdomain]
-      );
-      const tenantRow = tRes.rows[0];
-      if (!tenantRow)
-        return reply.code(404).send({ error: "tenant_not_found", subdomain });
-      const tenantId = tenantRow.id;
-
-      // 1) exchange code -> user access_token
-      const qs = {
-        client_id: META_APP_ID,
-        client_secret: META_APP_SECRET,
-        code,
-      };
-      if (META_REDIRECT_URI) qs.redirect_uri = META_REDIRECT_URI;
-      const tok = await gget("/oauth/access_token", { qs });
-      const userToken = tok.access_token;
-
-      // 2) descobrir WABA_ID
-      let wabaId = null;
-
-      // 2a) via /debug_token (granular_scopes)
-      try {
-        const dbg = await gget("/debug_token", {
-          qs: {
-            input_token: userToken,
-            access_token: `${META_APP_ID}|${META_APP_SECRET}`,
-          },
-        });
-        const gs = dbg?.data?.granular_scopes || [];
-        const mgmt = gs.find(
-          (s) =>
-            s?.scope === "whatsapp_business_management" &&
-            Array.isArray(s?.target_ids)
-        );
-        wabaId = mgmt?.target_ids?.[0] || null;
-      } catch (e) {
-        fastify.log.warn({ err: e }, "[wa/es/finalize] debug_token fallback");
-      }
-
-      // 2b) fallback: WABA(s) compartilhadas com seu Business
-      if (!wabaId) {
-        const shared = await gget(
-          `/${YOUR_BUSINESS_ID}/client_whatsapp_business_accounts`,
-          {
-            token: SYSTEM_USER_TOKEN,
-          }
-        );
-        wabaId = shared?.data?.[0]?.id || null;
-      }
-      if (!wabaId) return reply.code(400).send({ error: "no_waba_found" });
-
-      // 3) assinar webhooks do seu app na WABA
-      await gpost(`/${wabaId}/subscribed_apps`, { token: userToken });
-
-      // 4) dar MANAGE ao seu System User
-      await gpost(`/${wabaId}/assigned_users`, {
-        token: SYSTEM_USER_ADMIN_TOKEN || SYSTEM_USER_TOKEN,
-        // Graph aceita tasks como string "['MANAGE']" em x-www-form-urlencoded
-        form: { user: SYSTEM_USER_ID, tasks: "['MANAGE']" },
-      });
-
-      // 5) listar números
-      const pn = await gget(`/${wabaId}/phone_numbers`, {
-        token: SYSTEM_USER_TOKEN,
-      });
-      const numbers = Array.isArray(pn?.data) ? pn.data : [];
-
-      // 6) persistir conexões — insere como INATIVO; não tocar no is_active no upsert
-      const qUpsert = `
-        INSERT INTO public.tenant_channel_connections
-          (tenant_id, subdomain, channel, provider, account_id, external_id, display_name, auth_mode, settings, is_active)
-        VALUES
-          ($1,        $2,        'whatsapp','meta',  $3,         $4,          $5,           'system_user', $6,       true)
-        ON CONFLICT (tenant_id, channel, external_id)
-        DO UPDATE SET
-          account_id  = EXCLUDED.account_id,
-          display_name= EXCLUDED.display_name,
-          settings    = COALESCE(public.tenant_channel_connections.settings,'{}'::jsonb) || EXCLUDED.settings,
-          updated_at  = now()
-      `;
-
-      for (const num of numbers) {
-        const phoneId = num?.id;
-        if (!phoneId) continue;
-        const disp = num?.display_phone_number || num?.verified_name || null;
-        const settings = { waba_id: wabaId, raw: num };
-        await req.db.query(qUpsert, [
-          tenantId,
-          subdomain,
-          wabaId,
-          phoneId,
-          disp,
-          JSON.stringify(settings),
-        ]);
-      }
-
-      return reply.send({
-        subdomain,
-        tenant_id: tenantId,
-        waba_id: wabaId,
-        numbers,
-      });
-    } catch (err) {
-      fastify.log.error(err, "[wa/es/finalize] falha no onboarding");
-      const status = Number.isInteger(err?.status) ? err.status : 500;
-      return reply.code(status).send({
-        error: "wa_embedded_finalize_failed",
-        message: err?.message || "Erro inesperado",
-        details: err?.details,
-      });
-    }
-  });
-
+  // status do tenant (mantido)
   fastify.get("/status", async (req, reply) => {
     const subdomain =
       req?.tenant?.subdomain ||
@@ -668,7 +503,6 @@ async function whatsappRoutes(fastify) {
       const tenant = tRes.rows[0];
       if (!tenant) return reply.send({ ok: true, connected: false });
 
-      // Todas as conexões WA/Meta do tenant
       const q = `
         SELECT external_id, display_name, is_active, settings
           FROM public.tenant_channel_connections
@@ -687,7 +521,6 @@ async function whatsappRoutes(fastify) {
         });
       }
 
-      // waba_id do primeiro registro que tiver essa info
       const waba_id =
         rows.find((r) => r?.settings?.waba_id)?.settings?.waba_id ||
         rows[0]?.settings?.waba_id ||
@@ -706,7 +539,7 @@ async function whatsappRoutes(fastify) {
 
       return reply.send({
         ok: true,
-        connected: true, // existe pelo menos uma conexão salva
+        connected: true,
         waba_id,
         numbers,
       });
