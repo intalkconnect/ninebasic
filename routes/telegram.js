@@ -1,19 +1,10 @@
-// routes/telegram.js
 export default async function telegramRoutes(fastify) {
-  const WEBHOOK_URL = process.env.WEBHOOK_BASE_URL; // ex.: https://hmg.ninechat.com.br
+  const WEBHOOK_URL = process.env.WEBHOOK_BASE_URL;
   if (!WEBHOOK_URL) fastify.log.warn("PUBLIC_BASE_URL não definido");
 
-  // ---------------------------
   // POST /telegram/connect
-  // Body:
-  //  - subdomain (obrigatório)
-  //  - botToken  (obrigatório se ainda não houver conexão no tenant)
-  //  - secret    (obrigatório)
-  //  - flow_id   (opcional) → se presente, já vincula ao flow em flow_channels
-  // ---------------------------
   fastify.post("/connect", async (req, reply) => {
     const { subdomain, botToken, secret, flow_id } = req.body || {};
-
     const safeReqBody = { subdomain, hasFlow: !!flow_id };
 
     if (!subdomain || !secret) {
@@ -28,7 +19,6 @@ export default async function telegramRoutes(fastify) {
       });
       return reply.code(400).send(body400);
     }
-
     if (!req.db) {
       const body500 = { error: "db_not_available" };
       await fastify.audit?.(req, {
@@ -41,13 +31,11 @@ export default async function telegramRoutes(fastify) {
       });
       return reply.code(500).send(body500);
     }
+    if (!botToken) return reply.code(400).send({ error: "missing_bot_token" });
 
     try {
-      // 1) tenant
-      const tRes = await req.db.query(
-        `SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1`,
-        [subdomain]
-      );
+      // tenant
+      const tRes = await req.db.query(`SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1`, [subdomain]);
       const tenant = tRes.rows[0];
       if (!tenant) {
         const body404 = { error: "tenant_not_found" };
@@ -62,91 +50,68 @@ export default async function telegramRoutes(fastify) {
         return reply.code(404).send(body404);
       }
 
-      // 2) verifica se já existe conexão ativa para este tenant
-      const existingQ = `
-        SELECT external_id AS bot_id, display_name AS username, is_active, settings
-          FROM public.tenant_channel_connections
-         WHERE tenant_id = $1
-           AND channel   = 'telegram'
-           AND provider  = 'telegram'
-         ORDER BY updated_at DESC
-         LIMIT 1
-      `;
-      const existing = await req.db.query(existingQ, [tenant.id]);
-      let botId   = existing.rows?.[0]?.bot_id || null;
-      let username= existing.rows?.[0]?.username || null;
-
-      // 3) se não houver conexão ainda, precisamos do token para criar
-      if (!botId) {
-        if (!botToken) {
-          return reply.code(400).send({ error: "missing_bot_token" });
-        }
-        // valida token (getMe)
-        const meRes = await fetch(`https://api.telegram.org/bot${botToken}/getMe`);
-        const me = await meRes.json();
-        if (!me?.ok || !me?.result?.id) {
-          const body400 = { error: "invalid_bot_token", details: me };
-          await fastify.audit?.(req, {
-            action: "telegram.connect.invalid_token",
-            resourceType: "channel",
-            resourceId: subdomain,
-            statusCode: 400,
-            requestBody: safeReqBody,
-            responseBody: body400,
-            extra: { tenantId: tenant.id },
-          });
-          return reply.code(400).send(body400);
-        }
-        botId    = String(me.result.id);
-        username = me.result.username || null;
-
-        // configura webhook
-        const swRes = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            url: WEBHOOK_URL,
-            secret_token: secret,
-            allowed_updates: ["message", "callback_query"],
-          }),
+      // getMe do TOKEN informado (sempre nova conexão para ESTE bot)
+      const meRes = await fetch(`https://api.telegram.org/bot${botToken}/getMe`);
+      const me = await meRes.json();
+      if (!me?.ok || !me?.result?.id) {
+        const body400 = { error: "invalid_bot_token", details: me };
+        await fastify.audit?.(req, {
+          action: "telegram.connect.invalid_token",
+          resourceType: "channel",
+          resourceId: subdomain,
+          statusCode: 400,
+          requestBody: safeReqBody,
+          responseBody: body400,
+          extra: { tenantId: tenant.id },
         });
-        const sw = await swRes.json();
-        if (!sw?.ok) {
-          fastify.log.warn({ sw }, "[tg/connect] setWebhook falhou");
-        }
-
-        // upsert conexão do tenant
-        const AUTH_MODE = "bot_token";
-        const settings = {
-          secret_token: "[SET]",
-          webhook_url: WEBHOOK_URL,
-          bot_username: username,
-          raw: { getMe: me?.result },
-        };
-
-        const upsertSql = `
-          INSERT INTO public.tenant_channel_connections
-            (tenant_id, subdomain, channel, provider, account_id, external_id, display_name, auth_mode, credentials_encrypted, settings, is_active)
-          VALUES
-            ($1::uuid, $2::text, 'telegram'::channel_type, 'telegram'::text,
-             $3::text, $4::text, $5::text, $6::auth_mode, $7::bytea, $8::jsonb, true)
-          ON CONFLICT (tenant_id, channel, external_id)
-          DO UPDATE SET
-            account_id            = EXCLUDED.account_id,
-            display_name          = EXCLUDED.display_name,
-            auth_mode             = EXCLUDED.auth_mode,
-            credentials_encrypted = EXCLUDED.credentials_encrypted,
-            settings              = COALESCE(public.tenant_channel_connections.settings,'{}'::jsonb) || EXCLUDED.settings,
-            updated_at            = now()
-          RETURNING id, tenant_id, channel, provider, account_id, external_id,
-                    display_name, auth_mode, is_active, settings, updated_at
-        `;
-        await req.db.query(upsertSql, [
-          tenant.id, subdomain, botId, botId, username, AUTH_MODE, null, JSON.stringify(settings),
-        ]);
+        return reply.code(400).send(body400);
       }
+      const botId = String(me.result.id);
+      const username = me.result.username || null;
 
-      // 4) se foi enviado flow_id, vincula (ou reatribui) este bot ao flow
+      // setWebhook para ESTE bot
+      const swRes = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          url: WEBHOOK_URL,
+          secret_token: secret,
+          allowed_updates: ["message", "callback_query"],
+        }),
+      });
+      const sw = await swRes.json();
+      if (!sw?.ok) fastify.log.warn({ sw }, "[tg/connect] setWebhook falhou");
+
+      // upsert conexão do tenant — POR external_id (permite vários bots; não reaproveita outro)
+      const AUTH_MODE = "bot_token";
+      const settings = {
+        secret_token: "[SET]",
+        webhook_url: WEBHOOK_URL,
+        bot_username: username,
+        raw: { getMe: me?.result },
+      };
+
+      const upsertSql = `
+        INSERT INTO public.tenant_channel_connections
+          (tenant_id, subdomain, channel, provider, account_id, external_id, display_name, auth_mode, credentials_encrypted, settings, is_active)
+        VALUES
+          ($1::uuid, $2::text, 'telegram'::channel_type, 'telegram'::text,
+           $3::text, $4::text, $5::text, $6::auth_mode, $7::bytea, $8::jsonb, true)
+        ON CONFLICT (tenant_id, channel, external_id)
+        DO UPDATE SET
+          account_id            = EXCLUDED.account_id,
+          display_name          = EXCLUDED.display_name,
+          auth_mode             = EXCLUDED.auth_mode,
+          credentials_encrypted = EXCLUDED.credentials_encrypted,
+          settings              = COALESCE(public.tenant_channel_connections.settings,'{}'::jsonb) || EXCLUDED.settings,
+          updated_at            = now()
+        RETURNING id
+      `;
+      await req.db.query(upsertSql, [
+        tenant.id, subdomain, botId, botId, username, AUTH_MODE, null, JSON.stringify(settings),
+      ]);
+
+      // vincular ao flow (se enviado)
       if (flow_id) {
         const bindSql = `
           INSERT INTO flow_channels (flow_id, channel_key, channel_type, display_name, is_active)
@@ -158,15 +123,13 @@ export default async function telegramRoutes(fastify) {
             display_name = COALESCE(EXCLUDED.display_name, flow_channels.display_name),
             is_active    = true,
             updated_at   = NOW()
-          RETURNING id, flow_id, channel_key, channel_type, display_name, is_active
         `;
         await req.db.query(bindSql, [flow_id, botId, username || "Telegram"]);
       }
 
       const resp = { ok: true, bot_id: botId, username, webhook_url: WEBHOOK_URL, bound: !!flow_id };
-
       await fastify.audit?.(req, {
-        action: existing.rows?.length ? "telegram.connect.update" : "telegram.connect.create",
+        action: "telegram.connect.upsert",
         resourceType: "channel",
         resourceId: `telegram:${botId}`,
         statusCode: 200,
@@ -174,12 +137,10 @@ export default async function telegramRoutes(fastify) {
         responseBody: resp,
         extra: { tenantId: tenant.id, subdomain, hasFlow: !!flow_id },
       });
-
       return reply.send(resp);
     } catch (err) {
       fastify.log.error({ err }, "[tg/connect] failed");
       const body500 = { error: "tg_connect_failed", message: err?.message };
-
       await fastify.audit?.(req, {
         action: "telegram.connect.error",
         resourceType: "channel",
@@ -189,16 +150,11 @@ export default async function telegramRoutes(fastify) {
         responseBody: body500,
         extra: { message: String(err?.message || err) },
       });
-
       return reply.code(500).send(body500);
     }
   });
 
-  // ---------------------------
   // GET /telegram/status?subdomain=...&flow_id=...
-  // - connected: status no tenant
-  // - bound: se o bot atual está vinculado ao flow_id informado
-  // ---------------------------
   fastify.get("/status", async (req, reply) => {
     const subdomain =
       req?.tenant?.subdomain ||
@@ -212,18 +168,12 @@ export default async function telegramRoutes(fastify) {
     if (!req.db)     return reply.code(500).send({ ok: false, error: "db_not_available" });
 
     try {
-      const tRes = await req.db.query(
-        `SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1`,
-        [subdomain]
-      );
+      const tRes = await req.db.query(`SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1`, [subdomain]);
       const tenant = tRes.rows[0];
       if (!tenant) return reply.send({ ok: true, connected: false, bound: false });
 
       const q = `
-        SELECT external_id AS bot_id,
-               display_name AS username,
-               is_active,
-               settings
+        SELECT external_id AS bot_id, display_name AS username, is_active, settings
           FROM public.tenant_channel_connections
          WHERE tenant_id = $1
            AND channel   = 'telegram'
@@ -235,28 +185,15 @@ export default async function telegramRoutes(fastify) {
       const row = rows[0];
 
       if (!row) {
-        return reply.send({
-          ok: true,
-          connected: false,
-          bound: false,
-          bot_id: null,
-          username: null,
-          webhook_url: null,
-        });
+        return reply.send({ ok: true, connected: false, bound: false, bot_id: null, username: null, webhook_url: null });
       }
-
       const webhook_url = row?.settings?.webhook_url || null;
 
-      // verifica vínculo com flow_id (se fornecido)
       let bound = false;
       if (flowId) {
         const bq = `
-          SELECT 1
-            FROM flow_channels
-           WHERE flow_id = $1
-             AND channel_type = 'telegram'
-             AND channel_key  = $2
-             AND is_active    = true
+          SELECT 1 FROM flow_channels
+           WHERE flow_id = $1 AND channel_type = 'telegram' AND channel_key  = $2 AND is_active = true
            LIMIT 1
         `;
         const bres = await req.db.query(bq, [flowId, row.bot_id]);
