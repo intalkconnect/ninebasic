@@ -22,14 +22,14 @@ export default async function flowsRoutes(fastify) {
       let v = version;
       if (!v) {
         const { rows } = await req.db.query(
-          `SELECT COALESCE(MAX(version),0)+1 AS next FROM hmg.flow_versions WHERE flow_id = $1`,
+          `SELECT COALESCE(MAX(version),0)+1 AS next FROM flow_versions WHERE flow_id = $1`,
           [flow_id]
         );
         v = rows[0].next || 1;
       }
 
       const { rows: ins } = await req.db.query(
-        `INSERT INTO hmg.flow_versions (flow_id, version, data, status, created_by, created_at)
+        `INSERT INTO flow_versions (flow_id, version, data, status, created_by, created_at)
          VALUES ($1,$2,$3,$4,$5,NOW())
          RETURNING id, flow_id, version, status`,
         [flow_id, v, data, status, created_by]
@@ -54,7 +54,7 @@ export default async function flowsRoutes(fastify) {
 
     try {
       const { rows } = await req.db.query(
-        `UPDATE hmg.flow_versions
+        `UPDATE flow_versions
             SET status = $3,
                 published_at = CASE WHEN $3='published' THEN NOW() ELSE published_at END
           WHERE flow_id = $1 AND version = $2
@@ -82,7 +82,7 @@ export default async function flowsRoutes(fastify) {
     try {
       // resolve version_id
       const { rows: vRows } = await req.db.query(
-        `SELECT id FROM hmg.flow_versions WHERE flow_id = $1 AND version = $2`,
+        `SELECT id FROM flow_versions WHERE flow_id = $1 AND version = $2`,
         [flow_id, Number(version)]
       );
       if (!vRows.length) return reply.code(404).send({ error: 'versão não encontrada' });
@@ -91,7 +91,7 @@ export default async function flowsRoutes(fastify) {
 
       // cria deployment ativo (a trigger garante 1 ativo por flow/channel/env)
       const { rows: dRows } = await req.db.query(
-        `INSERT INTO hmg.flow_deployments
+        `INSERT INTO flow_deployments
            (flow_id, version_id, channel, environment, is_active, activated_at, rollout_notes)
          VALUES ($1, $2, $3, $4, true, NOW(), $5)
          RETURNING id, flow_id, version_id, channel, environment, is_active, activated_at`,
@@ -112,7 +112,7 @@ export default async function flowsRoutes(fastify) {
     try {
       const { rows } = await req.db.query(
         `SELECT id, flow_id, version, status, created_at, published_at
-           FROM hmg.flow_versions
+           FROM flow_versions
           WHERE flow_id = $1
           ORDER BY version DESC`,
         [flow_id]
@@ -133,9 +133,9 @@ export default async function flowsRoutes(fastify) {
         `
         SELECT d.id, d.flow_id, d.version_id, d.channel, d.environment, d.is_active, d.activated_at,
                v.version, f.name
-          FROM hmg.flow_deployments d
-          JOIN hmg.flow_versions v ON v.id = d.version_id
-          JOIN hmg.flows f ON f.id = d.flow_id
+          FROM flow_deployments d
+          JOIN flow_versions v ON v.id = d.version_id
+          JOIN flows f ON f.id = d.flow_id
          WHERE ($1::text IS NULL OR d.channel = $1)
            AND d.environment = $2
          ORDER BY d.channel, d.activated_at DESC
@@ -155,7 +155,7 @@ export default async function flowsRoutes(fastify) {
     const { version_id } = req.params;
     try {
       const { rows } = await req.db.query(
-        `SELECT data FROM hmg.flow_versions WHERE id = $1`,
+        `SELECT data FROM flow_versions WHERE id = $1`,
         [version_id]
       );
       if (!rows.length) return reply.code(404).send({ error: 'versão não encontrada' });
@@ -171,7 +171,7 @@ export default async function flowsRoutes(fastify) {
     const { user_id } = req.params;
     try {
       const { rows } = await req.db.query(
-        "SELECT * FROM hmg.sessions WHERE user_id = $1 LIMIT 1",
+        "SELECT * FROM sessions WHERE user_id = $1 LIMIT 1",
         [user_id]
       );
       if (!rows.length) return reply.code(404).send({ error: 'Sessão não encontrada' });
@@ -188,7 +188,7 @@ export default async function flowsRoutes(fastify) {
     try {
       const beforeQ = await req.db.query(
         `SELECT user_id, current_block, last_flow_id, vars, updated_at
-           FROM hmg.sessions
+           FROM sessions
           WHERE user_id = $1
           LIMIT 1`,
         [user_id]
@@ -196,7 +196,7 @@ export default async function flowsRoutes(fastify) {
       const beforeRow = beforeQ.rows?.[0] || null;
 
       const upsertQ = await req.db.query(
-        `INSERT INTO hmg.sessions(user_id, current_block, last_flow_id, vars, updated_at)
+        `INSERT INTO sessions(user_id, current_block, last_flow_id, vars, updated_at)
          VALUES($1, $2, $3, $4, NOW())
          ON CONFLICT (user_id) DO UPDATE SET
            current_block = EXCLUDED.current_block,
