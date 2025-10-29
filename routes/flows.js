@@ -1,351 +1,236 @@
-export default async function flowsRoutes(fastify, opts) {
-  fastify.post("/publish", async (req, reply) => {
-    const { data } = req.body;
+// routes/flows.js
+import dotenv from 'dotenv';
+dotenv.config();
 
-    // 400 — payload inválido
-    if (!data || typeof data !== "object") {
-      const resp400 = { error: "Fluxo inválido ou ausente." };
-      await fastify.audit(req, {
-        action: "flow.publish.bad_request",
-        resourceType: "flow",
-        resourceId: null,
-        statusCode: 400,
-        requestBody: { preview: typeof data, hasData: !!data },
-        responseBody: resp400,
-      });
-      return reply.code(400).send(resp400);
+const FLOW_ENV = (process.env.FLOW_ENV || 'prod').toLowerCase(); // 'prod' | 'hmg'
+
+export default async function flowsRoutes(fastify) {
+
+  // ====== criar versão (draft) ======
+  // POST /api/v1/flows/:flow_id/versions
+  // body: { data, version?:number, status?:'draft'|'published', created_by?:string }
+  fastify.post('/:flow_id/versions', async (req, reply) => {
+    const { flow_id } = req.params;
+    const { data, version, status = 'draft', created_by = null } = req.body || {};
+
+    if (!data || typeof data !== 'object') {
+      return reply.code(400).send({ error: 'data é obrigatório (JSON)' });
     }
 
     try {
-      // snapshot "antes": fluxos ativos (ids e total)
-      const beforeQ = await req.db.query(
-        `SELECT id FROM flows WHERE active = true ORDER BY id DESC`
+      // se version não veio, define próximo número
+      let v = version;
+      if (!v) {
+        const { rows } = await req.db.query(
+          `SELECT COALESCE(MAX(version),0)+1 AS next FROM hmg.flow_versions WHERE flow_id = $1`,
+          [flow_id]
+        );
+        v = rows[0].next || 1;
+      }
+
+      const { rows: ins } = await req.db.query(
+        `INSERT INTO hmg.flow_versions (flow_id, version, data, status, created_by, created_at)
+         VALUES ($1,$2,$3,$4,$5,NOW())
+         RETURNING id, flow_id, version, status`,
+        [flow_id, v, data, status, created_by]
       );
-      const beforeActiveIds = (beforeQ.rows || []).map((r) => r.id);
 
-      // Faz a publicação dentro de transação e retorna dados para auditoria
-      const txResult = await req.db.tx(async (client) => {
-        // 1) desativar todos
-        const upd = await client.query(
-          `UPDATE flows SET active = false WHERE active = true`
-        );
-        const deactivatedCount = upd.rowCount || 0;
-
-        // 2) inserir novo ativo
-        const ins = await client.query(
-          `INSERT INTO flows(data, created_at, active)
-         VALUES($1, now(), true)
-         RETURNING id`,
-          [data]
-        );
-        const insertedId = ins.rows[0].id;
-
-        // 3) snapshot "depois"
-        const afterQ = await client.query(
-          `SELECT id FROM flows WHERE active = true ORDER BY id DESC`
-        );
-        const afterActiveIds = (afterQ.rows || []).map((r) => r.id);
-
-        return { insertedId, deactivatedCount, afterActiveIds };
-      });
-
-      const responseBody = {
-        message: "Fluxo publicado e ativado com sucesso.",
-        id: txResult.insertedId,
-      };
-
-      // Auditoria de sucesso
-      await fastify.audit(req, {
-        action: "flow.publish",
-        resourceType: "flow",
-        resourceId: txResult.insertedId,
-        statusCode: 200,
-        requestBody: {
-          /* cuidado com payload grande; o plugin já redige chaves sensíveis */
-          // opcional: mandar só um resumo para não inflar o log
-          hasData: true,
-        },
-        responseBody,
-        beforeData: {
-          active_flow_ids: beforeActiveIds,
-        },
-        afterData: {
-          published_id: txResult.insertedId,
-          deactivated_count: txResult.deactivatedCount,
-          active_flow_ids: txResult.afterActiveIds,
-        },
-      });
-
-      return reply.send(responseBody);
-    } catch (error) {
-      req.log.error(error, "Erro ao publicar fluxo");
-      const resp500 = {
-        error: "Erro ao publicar fluxo",
-        detail: error.message,
-      };
-
-      await fastify.audit(req, {
-        action: "flow.publish.error",
-        resourceType: "flow",
-        resourceId: null,
-        statusCode: 500,
-        responseBody: resp500,
-        extra: { message: error?.message },
-      });
-
-      return reply.code(500).send(resp500);
+      return reply.send({ ok: true, version: ins[0] });
+    } catch (e) {
+      req.log.error(e, 'erro ao criar versão');
+      return reply.code(500).send({ error: 'erro ao criar versão', detail: e.message });
     }
   });
 
-  fastify.get("/sessions/:user_id", async (req, reply) => {
-    const { user_id } = req.params;
+  // ====== publicar / alterar status de versão ======
+  // PUT /api/v1/flows/:flow_id/versions/:version/status
+  // body: { status: 'draft'|'published'|'deprecated' }
+  fastify.put('/:flow_id/versions/:version/status', async (req, reply) => {
+    const { flow_id, version } = req.params;
+    const { status } = req.body || {};
+    if (!['draft','published','deprecated'].includes(String(status))) {
+      return reply.code(400).send({ error: 'status inválido' });
+    }
 
     try {
       const { rows } = await req.db.query(
-        "SELECT * FROM sessions WHERE user_id = $1 LIMIT 1",
-        [user_id]
+        `UPDATE hmg.flow_versions
+            SET status = $3,
+                published_at = CASE WHEN $3='published' THEN NOW() ELSE published_at END
+          WHERE flow_id = $1 AND version = $2
+          RETURNING id, flow_id, version, status, published_at`,
+        [flow_id, Number(version), status]
       );
-
-      if (rows.length === 0) {
-        reply.code(404).send({ error: "Sessão não encontrada" });
-      } else {
-        reply.send(rows[0]);
-      }
-    } catch (error) {
-      fastify.log.error(error);
-      reply
-        .code(500)
-        .send({ error: "Erro ao buscar sessão", detail: error.message });
+      if (!rows.length) return reply.code(404).send({ error: 'versão não encontrada' });
+      return reply.send({ ok: true, version: rows[0] });
+    } catch (e) {
+      req.log.error(e, 'erro ao atualizar status');
+      return reply.code(500).send({ error: 'erro ao atualizar status', detail: e.message });
     }
   });
 
-  fastify.post("/sessions/:user_id", async (req, reply) => {
-    const { user_id } = req.params;
-    const { current_block, flow_id, vars } = req.body || {};
+  // ====== ativar deployment ======
+  // POST /api/v1/flows/:flow_id/deploy
+  // body: { version:number, channel:string, environment?:'prod'|'hmg', rollout_notes?:string }
+  fastify.post('/:flow_id/deploy', async (req, reply) => {
+    const { flow_id } = req.params;
+    const { version, channel, environment = FLOW_ENV, rollout_notes = null } = req.body || {};
+    if (!version || !channel) {
+      return reply.code(400).send({ error: 'version e channel são obrigatórios' });
+    }
 
     try {
-      // snapshot "antes"
+      // resolve version_id
+      const { rows: vRows } = await req.db.query(
+        `SELECT id FROM hmg.flow_versions WHERE flow_id = $1 AND version = $2`,
+        [flow_id, Number(version)]
+      );
+      if (!vRows.length) return reply.code(404).send({ error: 'versão não encontrada' });
+
+      const version_id = vRows[0].id;
+
+      // cria deployment ativo (a trigger garante 1 ativo por flow/channel/env)
+      const { rows: dRows } = await req.db.query(
+        `INSERT INTO hmg.flow_deployments
+           (flow_id, version_id, channel, environment, is_active, activated_at, rollout_notes)
+         VALUES ($1, $2, $3, $4, true, NOW(), $5)
+         RETURNING id, flow_id, version_id, channel, environment, is_active, activated_at`,
+        [flow_id, version_id, channel, environment, rollout_notes]
+      );
+
+      return reply.send({ ok: true, deployment: dRows[0] });
+    } catch (e) {
+      req.log.error(e, 'erro ao ativar deployment');
+      return reply.code(500).send({ error: 'erro ao ativar deployment', detail: e.message });
+    }
+  });
+
+  // ====== listar versões ======
+  // GET /api/v1/flows/:flow_id/versions
+  fastify.get('/:flow_id/versions', async (req, reply) => {
+    const { flow_id } = req.params;
+    try {
+      const { rows } = await req.db.query(
+        `SELECT id, flow_id, version, status, created_at, published_at
+           FROM hmg.flow_versions
+          WHERE flow_id = $1
+          ORDER BY version DESC`,
+        [flow_id]
+      );
+      return reply.send(rows);
+    } catch (e) {
+      req.log.error(e);
+      return reply.code(500).send({ error: 'erro ao listar versões', detail: e.message });
+    }
+  });
+
+  // ====== listar deployments por canal/env ======
+  // GET /api/v1/deployments?channel=whatsapp&environment=prod
+  fastify.get('/deployments', async (req, reply) => {
+    const { channel, environment = FLOW_ENV } = req.query || {};
+    try {
+      const { rows } = await req.db.query(
+        `
+        SELECT d.id, d.flow_id, d.version_id, d.channel, d.environment, d.is_active, d.activated_at,
+               v.version, f.name
+          FROM hmg.flow_deployments d
+          JOIN hmg.flow_versions v ON v.id = d.version_id
+          JOIN hmg.flows f ON f.id = d.flow_id
+         WHERE ($1::text IS NULL OR d.channel = $1)
+           AND d.environment = $2
+         ORDER BY d.channel, d.activated_at DESC
+        `,
+        [channel || null, environment]
+      );
+      return reply.send(rows);
+    } catch (e) {
+      req.log.error(e);
+      return reply.code(500).send({ error: 'erro ao listar deployments', detail: e.message });
+    }
+  });
+
+  // ====== pegar dados do flow por version_id ======
+  // GET /api/v1/flows/data-by-version/:version_id
+  fastify.get('/data-by-version/:version_id', async (req, reply) => {
+    const { version_id } = req.params;
+    try {
+      const { rows } = await req.db.query(
+        `SELECT data FROM hmg.flow_versions WHERE id = $1`,
+        [version_id]
+      );
+      if (!rows.length) return reply.code(404).send({ error: 'versão não encontrada' });
+      return reply.send(rows[0].data);
+    } catch (e) {
+      req.log.error(e);
+      return reply.code(500).send({ error: 'erro ao buscar dados da versão', detail: e.message });
+    }
+  });
+
+  // ====== compat: sessão do usuário (mantive, só qualifiquei schema) ======
+  fastify.get('/sessions/:user_id', async (req, reply) => {
+    const { user_id } = req.params;
+    try {
+      const { rows } = await req.db.query(
+        "SELECT * FROM hmg.sessions WHERE user_id = $1 LIMIT 1",
+        [user_id]
+      );
+      if (!rows.length) return reply.code(404).send({ error: 'Sessão não encontrada' });
+      return reply.send(rows[0]);
+    } catch (error) {
+      fastify.log.error(error);
+      return reply.code(500).send({ error: 'Erro ao buscar sessão', detail: error.message });
+    }
+  });
+
+  fastify.post('/sessions/:user_id', async (req, reply) => {
+    const { user_id } = req.params;
+    const { current_block, flow_id, vars } = req.body || {};
+    try {
       const beforeQ = await req.db.query(
         `SELECT user_id, current_block, last_flow_id, vars, updated_at
-         FROM sessions
-        WHERE user_id = $1
-        LIMIT 1`,
+           FROM hmg.sessions
+          WHERE user_id = $1
+          LIMIT 1`,
         [user_id]
       );
       const beforeRow = beforeQ.rows?.[0] || null;
 
-      // upsert + retorna "depois"
       const upsertQ = await req.db.query(
-        `INSERT INTO sessions(user_id, current_block, last_flow_id, vars, updated_at)
-       VALUES($1, $2, $3, $4, NOW())
-       ON CONFLICT (user_id) DO UPDATE SET
-         current_block = EXCLUDED.current_block,
-         last_flow_id  = EXCLUDED.last_flow_id,
-         vars          = EXCLUDED.vars,
-         updated_at    = NOW()
-       RETURNING user_id, current_block, last_flow_id, vars, updated_at`,
+        `INSERT INTO hmg.sessions(user_id, current_block, last_flow_id, vars, updated_at)
+         VALUES($1, $2, $3, $4, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET
+           current_block = EXCLUDED.current_block,
+           last_flow_id  = EXCLUDED.last_flow_id,
+           vars          = EXCLUDED.vars,
+           updated_at    = NOW()
+         RETURNING user_id, current_block, last_flow_id, vars, updated_at`,
         [user_id, current_block, flow_id, vars]
       );
       const afterRow = upsertQ.rows[0];
 
-      const responseBody = { message: "Sessão salva com sucesso." };
-
-      // auditoria de sucesso
-      await fastify.audit(req, {
-        action: "session.upsert",
-        resourceType: "session",
+      await fastify.audit?.(req, {
+        action: 'session.upsert',
+        resourceType: 'session',
         resourceId: user_id,
         statusCode: 200,
-        requestBody: {
-          current_block: current_block ?? null,
-          flow_id: flow_id ?? null,
-          has_vars: !!vars,
-        },
-        responseBody,
+        requestBody: { current_block: current_block ?? null, flow_id: flow_id ?? null, has_vars: !!vars },
+        responseBody: { message: 'Sessão salva com sucesso.' },
         beforeData: beforeRow,
-        afterData: afterRow,
+        afterData: afterRow
       });
 
-      return reply.send(responseBody);
+      return reply.send({ message: 'Sessão salva com sucesso.' });
     } catch (error) {
-      req.log.error(error, "Erro ao salvar sessão");
-
-      const resp500 = { error: "Erro ao salvar sessão", detail: error.message };
-
-      // auditoria de erro
-      await fastify.audit(req, {
-        action: "session.upsert.error",
-        resourceType: "session",
+      fastify.log.error(error, 'Erro ao salvar sessão');
+      await fastify.audit?.(req, {
+        action: 'session.upsert.error',
+        resourceType: 'session',
         resourceId: user_id,
         statusCode: 500,
-        requestBody: {
-          current_block: current_block ?? null,
-          flow_id: flow_id ?? null,
-          has_vars: !!vars,
-        },
-        responseBody: resp500,
-        extra: { message: error?.message },
+        requestBody: { current_block: current_block ?? null, flow_id: flow_id ?? null, has_vars: !!vars },
+        responseBody: { error: 'Erro ao salvar sessão', detail: error.message }
       });
-
-      return reply.code(500).send(resp500);
-    }
-  });
-
-  fastify.post("/activate", async (req, reply) => {
-    const { id } = req.body || {};
-    if (!id) {
-      const resp400 = { error: "id é obrigatório" };
-      await fastify.audit(req, {
-        action: "flow.activate.error",
-        resourceType: "flow",
-        resourceId: null,
-        statusCode: 400,
-        requestBody: { id: id ?? null },
-        responseBody: resp400,
-      });
-      return reply.code(400).send(resp400);
-    }
-
-    let beforeActives = [];
-    let afterActives = [];
-    let updatedCount = 0;
-
-    try {
-      // transação
-      await req.db.tx(async (client) => {
-        // snapshot antes (quais estão ativos)
-        const b = await client.query(
-          "SELECT id FROM flows WHERE active = true ORDER BY created_at DESC"
-        );
-        beforeActives = b.rows || [];
-
-        // desativa todos
-        await client.query("UPDATE flows SET active = false");
-
-        // ativa o específico
-        const up = await client.query(
-          "UPDATE flows SET active = true WHERE id = $1 RETURNING id",
-          [id]
-        );
-        updatedCount = up.rowCount;
-
-        // snapshot depois
-        const a = await client.query(
-          "SELECT id FROM flows WHERE active = true ORDER BY created_at DESC"
-        );
-        afterActives = a.rows || [];
-      });
-
-      if (updatedCount === 0) {
-        const resp404 = { error: "Fluxo não encontrado", id };
-        await fastify.audit(req, {
-          action: "flow.activate.not_found",
-          resourceType: "flow",
-          resourceId: id,
-          statusCode: 404,
-          requestBody: { id },
-          responseBody: resp404,
-          beforeData: { active_before: beforeActives },
-          afterData: { active_after: afterActives },
-        });
-        return reply.code(404).send(resp404);
-      }
-
-      const resp200 = {
-        success: true,
-        active_ids: afterActives.map((r) => r.id),
-      };
-
-      // auditoria de sucesso
-      await fastify.audit(req, {
-        action: "flow.activate",
-        resourceType: "flow",
-        resourceId: id,
-        statusCode: 200,
-        requestBody: { id },
-        responseBody: resp200,
-        beforeData: { active_before: beforeActives },
-        afterData: { active_after: afterActives },
-      });
-
-      return reply.code(200).send(resp200);
-    } catch (error) {
-      req.log.error(error, "Erro ao ativar fluxo");
-
-      const resp500 = { error: "Erro ao ativar fluxo", detail: error.message };
-      await fastify.audit(req, {
-        action: "flow.activate.error",
-        resourceType: "flow",
-        resourceId: id || null,
-        statusCode: 500,
-        requestBody: { id: id ?? null },
-        responseBody: resp500,
-        beforeData: { active_before: beforeActives },
-        afterData: { active_after: afterActives },
-        extra: { message: error?.message },
-      });
-
-      return reply.code(500).send(resp500);
-    }
-  });
-
-  fastify.get("/latest", async (req, reply) => {
-    try {
-      const { rows } = await req.db.query(`
-      SELECT id, active, created_at 
-      FROM flows 
-      WHERE active = true 
-      `);
-
-      return reply.code(200).send(rows);
-    } catch (error) {
-      fastify.log.error(error);
-      return reply.code(500).send({
-        error: "Falha ao buscar últimos fluxos",
-        detail: error.message,
-      });
-    }
-  });
-
-  fastify.get("/history", async (req, reply) => {
-    try {
-      const { rows } = await req.db.query(`
-      SELECT id, active, created_at 
-      FROM flows 
-      ORDER BY created_at DESC 
-      LIMIT 10
-    `);
-
-      return reply.code(200).send(rows);
-    } catch (error) {
-      fastify.log.error(error);
-      return reply.code(500).send({
-        error: "Erro ao buscar histórico de versões",
-        detail: error.message,
-      });
-    }
-  });
-
-  fastify.get("/data/:id", async (req, reply) => {
-    const { id } = req.params;
-
-    try {
-      const { rows } = await req.db.query(
-        "SELECT data FROM flows WHERE id = $1",
-        [id]
-      );
-
-      if (rows.length === 0) {
-        return reply.code(404).send({ error: "Fluxo não encontrado" });
-      }
-
-      return reply.code(200).send(rows[0].data);
-    } catch (error) {
-      fastify.log.error(error);
-      return reply.code(500).send({
-        error: "Erro ao buscar fluxo",
-        detail: error.message,
-      });
+      return reply.code(500).send({ error: 'Erro ao salvar sessão', detail: error.message });
     }
   });
 }
