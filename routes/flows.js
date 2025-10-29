@@ -261,25 +261,29 @@ fastify.get('/meta', async (req, reply) => {
   });
 
   // GET /api/v1/flows/deployments?channel=whatsapp
-  fastify.get('/deployments', async (req, reply) => {
-    const { channel } = req.query || {};
-    try {
-      const { rows } = await req.db.query(
-        `SELECT d.id, d.flow_id, d.version_id, d.channel, d.is_active, d.activated_at,
-                v.version, f.name
-           FROM flow_deployments d
-           JOIN flow_versions v ON v.id = d.version_id
-           JOIN flows f ON f.id = d.flow_id
-          WHERE ($1::text IS NULL OR d.channel = $1)
-          ORDER BY d.channel, d.activated_at DESC`,
-        [channel || null]
-      );
-      return reply.send(rows);
-    } catch (e) {
-      req.log.error(e);
-      return reply.code(500).send({ error: 'erro ao listar deployments', detail: e.message });
-    }
-  });
+fastify.get('/deployments', async (req, reply) => {
+  const { flow_id, channel } = req.query || {};
+  try {
+    const { rows } = await req.db.query(
+      `
+      SELECT d.id, d.flow_id, d.version_id, d.channel, d.is_active, d.activated_at,
+             v.version, f.name
+        FROM flow_deployments d
+        JOIN flow_versions v ON v.id = d.version_id
+        JOIN flows f ON f.id = d.flow_id
+       WHERE ($1::uuid IS NULL OR d.flow_id = $1)
+         AND ($2::text IS NULL OR d.channel = $2)
+       ORDER BY d.activated_at DESC
+      `,
+      [flow_id || null, channel || null]
+    );
+    return reply.send(rows);
+  } catch (e) {
+    req.log.error(e);
+    return reply.code(500).send({ error: 'erro ao listar deployments', detail: e.message });
+  }
+});
+
 
   /* ========================
    * SESSIONS (compat)
