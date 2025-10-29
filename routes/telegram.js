@@ -155,6 +155,7 @@ export default async function telegramRoutes(fastify) {
   });
 
   // GET /telegram/status?subdomain=...&flow_id=...
+  // AJUSTE: quando flow_id for fornecido, priorizamos o bot VINCULADO ao flow.
   fastify.get("/status", async (req, reply) => {
     const subdomain =
       req?.tenant?.subdomain ||
@@ -172,7 +173,47 @@ export default async function telegramRoutes(fastify) {
       const tenant = tRes.rows[0];
       if (!tenant) return reply.send({ ok: true, connected: false, bound: false });
 
-      const q = `
+      // Se flow_id foi informado, tenta pegar o bot vinculado a ESTE flow
+      if (flowId) {
+        const fbq = `
+          SELECT channel_key AS bot_id, display_name
+            FROM flow_channels
+           WHERE flow_id = $1
+             AND channel_type = 'telegram'
+             AND is_active = true
+           LIMIT 1
+        `;
+        const { rows: frows } = await req.db.query(fbq, [String(flowId)]);
+        const boundBot = frows?.[0] || null;
+
+        if (boundBot?.bot_id) {
+          // Busca a conexão específica desse bot no tenant
+          const cq = `
+            SELECT external_id AS bot_id, display_name AS username, is_active, settings
+              FROM public.tenant_channel_connections
+             WHERE tenant_id = $1
+               AND channel   = 'telegram'
+               AND provider  = 'telegram'
+               AND external_id = $2
+             LIMIT 1
+          `;
+          const { rows: crows } = await req.db.query(cq, [tenant.id, boundBot.bot_id]);
+          const conn = crows?.[0] || null;
+
+          return reply.send({
+            ok: true,
+            connected: !!conn?.is_active,
+            bound: true,
+            bot_id: boundBot.bot_id,
+            username: (conn?.username || boundBot.display_name || null),
+            webhook_url: conn?.settings?.webhook_url || null,
+          });
+        }
+        // Se não houver vínculo, caímos para o comportamento de tenant (bound=false)
+      }
+
+      // Sem flow vinculado: retorna a conexão mais recente do tenant (sem marcar bound)
+      const tq = `
         SELECT external_id AS bot_id, display_name AS username, is_active, settings
           FROM public.tenant_channel_connections
          WHERE tenant_id = $1
@@ -181,32 +222,22 @@ export default async function telegramRoutes(fastify) {
          ORDER BY updated_at DESC
          LIMIT 1
       `;
-      const { rows } = await req.db.query(q, [tenant.id]);
+      const { rows } = await req.db.query(tq, [tenant.id]);
       const row = rows[0];
 
       if (!row) {
-        return reply.send({ ok: true, connected: false, bound: false, bot_id: null, username: null, webhook_url: null });
-      }
-      const webhook_url = row?.settings?.webhook_url || null;
-
-      let bound = false;
-      if (flowId) {
-        const bq = `
-          SELECT 1 FROM flow_channels
-           WHERE flow_id = $1 AND channel_type = 'telegram' AND channel_key  = $2 AND is_active = true
-           LIMIT 1
-        `;
-        const bres = await req.db.query(bq, [flowId, row.bot_id]);
-        bound = !!bres.rowCount;
+        return reply.send({
+          ok: true, connected: false, bound: false, bot_id: null, username: null, webhook_url: null
+        });
       }
 
       return reply.send({
         ok: true,
         connected: !!row.is_active,
-        bound,
+        bound: false,
         bot_id: row.bot_id || null,
         username: row.username || null,
-        webhook_url,
+        webhook_url: row?.settings?.webhook_url || null,
       });
     } catch (err) {
       fastify.log.error({ err }, "[tg/status] failed");
