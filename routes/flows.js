@@ -2,23 +2,71 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-const FLOW_ENV = (process.env.FLOW_ENV || 'prod').toLowerCase(); // 'prod' | 'hmg'
-
 export default async function flowsRoutes(fastify) {
+  /* ========================
+   * FLOWS (metadados)
+   * ======================== */
 
-  // ====== criar versão (draft) ======
+  // POST /api/v1/flows
+  // body: { name: string, description?: string }
+  fastify.post('/', async (req, reply) => {
+    const { name, description = null } = req.body || {};
+    if (!name) return reply.code(400).send({ error: 'name é obrigatório' });
+    try {
+      const { rows } = await req.db.query(
+        `INSERT INTO flows (name, description, created_at, updated_at)
+         VALUES ($1,$2,NOW(),NOW())
+         RETURNING id, name, description, created_at, updated_at`,
+        [name, description]
+      );
+      return reply.send(rows[0]);
+    } catch (e) {
+      req.log.error(e, 'erro ao criar flow');
+      return reply.code(500).send({ error: 'erro ao criar flow', detail: e.message });
+    }
+  });
+
+  // GET /api/v1/flows
+  fastify.get('/', async (req, reply) => {
+    try {
+      const { rows } = await req.db.query(
+        `SELECT id, name, description, created_at, updated_at FROM flows ORDER BY created_at DESC`
+      );
+      return reply.send(rows);
+    } catch (e) {
+      req.log.error(e, 'erro ao listar flows');
+      return reply.code(500).send({ error: 'erro ao listar flows', detail: e.message });
+    }
+  });
+
+  // GET /api/v1/flows/:flow_id
+  fastify.get('/:flow_id', async (req, reply) => {
+    const { flow_id } = req.params;
+    try {
+      const { rows } = await req.db.query(
+        `SELECT id, name, description, created_at, updated_at FROM flows WHERE id = $1`,
+        [flow_id]
+      );
+      if (!rows.length) return reply.code(404).send({ error: 'flow não encontrado' });
+      return reply.send(rows[0]);
+    } catch (e) {
+      req.log.error(e, 'erro ao buscar flow');
+      return reply.code(500).send({ error: 'erro ao buscar flow', detail: e.message });
+    }
+  });
+
+  /* ========================
+   * VERSIONS
+   * ======================== */
+
   // POST /api/v1/flows/:flow_id/versions
-  // body: { data, version?:number, status?:'draft'|'published', created_by?:string }
   fastify.post('/:flow_id/versions', async (req, reply) => {
     const { flow_id } = req.params;
     const { data, version, status = 'draft', created_by = null } = req.body || {};
-
     if (!data || typeof data !== 'object') {
       return reply.code(400).send({ error: 'data é obrigatório (JSON)' });
     }
-
     try {
-      // se version não veio, define próximo número
       let v = version;
       if (!v) {
         const { rows } = await req.db.query(
@@ -27,14 +75,12 @@ export default async function flowsRoutes(fastify) {
         );
         v = rows[0].next || 1;
       }
-
       const { rows: ins } = await req.db.query(
         `INSERT INTO flow_versions (flow_id, version, data, status, created_by, created_at)
          VALUES ($1,$2,$3,$4,$5,NOW())
-         RETURNING id, flow_id, version, status`,
+         RETURNING id, flow_id, version, status, created_at, published_at`,
         [flow_id, v, data, status, created_by]
       );
-
       return reply.send({ ok: true, version: ins[0] });
     } catch (e) {
       req.log.error(e, 'erro ao criar versão');
@@ -42,16 +88,13 @@ export default async function flowsRoutes(fastify) {
     }
   });
 
-  // ====== publicar / alterar status de versão ======
   // PUT /api/v1/flows/:flow_id/versions/:version/status
-  // body: { status: 'draft'|'published'|'deprecated' }
   fastify.put('/:flow_id/versions/:version/status', async (req, reply) => {
     const { flow_id, version } = req.params;
     const { status } = req.body || {};
     if (!['draft','published','deprecated'].includes(String(status))) {
       return reply.code(400).send({ error: 'status inválido' });
     }
-
     try {
       const { rows } = await req.db.query(
         `UPDATE flow_versions
@@ -69,43 +112,6 @@ export default async function flowsRoutes(fastify) {
     }
   });
 
-  // ====== ativar deployment ======
-  // POST /api/v1/flows/:flow_id/deploy
-  // body: { version:number, channel:string, environment?:'prod'|'hmg', rollout_notes?:string }
-  fastify.post('/:flow_id/deploy', async (req, reply) => {
-    const { flow_id } = req.params;
-    const { version, channel, environment = FLOW_ENV, rollout_notes = null } = req.body || {};
-    if (!version || !channel) {
-      return reply.code(400).send({ error: 'version e channel são obrigatórios' });
-    }
-
-    try {
-      // resolve version_id
-      const { rows: vRows } = await req.db.query(
-        `SELECT id FROM flow_versions WHERE flow_id = $1 AND version = $2`,
-        [flow_id, Number(version)]
-      );
-      if (!vRows.length) return reply.code(404).send({ error: 'versão não encontrada' });
-
-      const version_id = vRows[0].id;
-
-      // cria deployment ativo (a trigger garante 1 ativo por flow/channel/env)
-      const { rows: dRows } = await req.db.query(
-        `INSERT INTO flow_deployments
-           (flow_id, version_id, channel, environment, is_active, activated_at, rollout_notes)
-         VALUES ($1, $2, $3, $4, true, NOW(), $5)
-         RETURNING id, flow_id, version_id, channel, environment, is_active, activated_at`,
-        [flow_id, version_id, channel, environment, rollout_notes]
-      );
-
-      return reply.send({ ok: true, deployment: dRows[0] });
-    } catch (e) {
-      req.log.error(e, 'erro ao ativar deployment');
-      return reply.code(500).send({ error: 'erro ao ativar deployment', detail: e.message });
-    }
-  });
-
-  // ====== listar versões ======
   // GET /api/v1/flows/:flow_id/versions
   fastify.get('/:flow_id/versions', async (req, reply) => {
     const { flow_id } = req.params;
@@ -124,32 +130,6 @@ export default async function flowsRoutes(fastify) {
     }
   });
 
-  // ====== listar deployments por canal/env ======
-  // GET /api/v1/deployments?channel=whatsapp&environment=prod
-  fastify.get('/deployments', async (req, reply) => {
-    const { channel, environment = FLOW_ENV } = req.query || {};
-    try {
-      const { rows } = await req.db.query(
-        `
-        SELECT d.id, d.flow_id, d.version_id, d.channel, d.environment, d.is_active, d.activated_at,
-               v.version, f.name
-          FROM flow_deployments d
-          JOIN flow_versions v ON v.id = d.version_id
-          JOIN flows f ON f.id = d.flow_id
-         WHERE ($1::text IS NULL OR d.channel = $1)
-           AND d.environment = $2
-         ORDER BY d.channel, d.activated_at DESC
-        `,
-        [channel || null, environment]
-      );
-      return reply.send(rows);
-    } catch (e) {
-      req.log.error(e);
-      return reply.code(500).send({ error: 'erro ao listar deployments', detail: e.message });
-    }
-  });
-
-  // ====== pegar dados do flow por version_id ======
   // GET /api/v1/flows/data-by-version/:version_id
   fastify.get('/data-by-version/:version_id', async (req, reply) => {
     const { version_id } = req.params;
@@ -166,7 +146,99 @@ export default async function flowsRoutes(fastify) {
     }
   });
 
-  // ====== compat: sessão do usuário (mantive, só qualifiquei schema) ======
+  /* ========================
+   * DEPLOYMENTS (prod only)
+   * ======================== */
+
+  // POST /api/v1/flows/:flow_id/deploy
+  // body: { version:number, channel:string, rollout_notes?:string }
+  fastify.post('/:flow_id/deploy', async (req, reply) => {
+    const { flow_id } = req.params;
+    const { version, channel, rollout_notes = null } = req.body || {};
+    if (!version || !channel) {
+      return reply.code(400).send({ error: 'version e channel são obrigatórios' });
+    }
+    try {
+      const { rows: vRows } = await req.db.query(
+        `SELECT id FROM flow_versions WHERE flow_id = $1 AND version = $2`,
+        [flow_id, Number(version)]
+      );
+      if (!vRows.length) return reply.code(404).send({ error: 'versão não encontrada' });
+
+      const version_id = vRows[0].id;
+
+      // desativa o ativo anterior (1 ativo por flow/channel)
+      await req.db.query(
+        `UPDATE flow_deployments
+            SET is_active = false
+          WHERE flow_id = $1 AND channel = $2 AND is_active = true`,
+        [flow_id, channel]
+      );
+
+      const { rows: dRows } = await req.db.query(
+        `INSERT INTO flow_deployments
+           (flow_id, version_id, channel, is_active, activated_at, rollout_notes)
+         VALUES ($1, $2, $3, true, NOW(), $4)
+         RETURNING id, flow_id, version_id, channel, is_active, activated_at`,
+        [flow_id, version_id, channel, rollout_notes]
+      );
+      return reply.send({ ok: true, deployment: dRows[0] });
+    } catch (e) {
+      req.log.error(e, 'erro ao ativar deployment');
+      return reply.code(500).send({ error: 'erro ao ativar deployment', detail: e.message });
+    }
+  });
+
+  // GET /api/v1/flows/:flow_id/active-deployment?channel=whatsapp
+  fastify.get('/:flow_id/active-deployment', async (req, reply) => {
+    const { flow_id } = req.params;
+    const { channel } = req.query || {};
+    try {
+      const { rows } = await req.db.query(
+        `SELECT d.id, d.flow_id, d.version_id, d.channel, d.is_active, d.activated_at,
+                v.version
+           FROM flow_deployments d
+           JOIN flow_versions v ON v.id = d.version_id
+          WHERE d.flow_id = $1
+            AND ($2::text IS NULL OR d.channel = $2)
+            AND d.is_active = true
+          ORDER BY d.activated_at DESC
+          LIMIT 1`,
+        [flow_id, channel || null]
+      );
+      if (!rows.length) return reply.send(null);
+      return reply.send(rows[0]);
+    } catch (e) {
+      req.log.error(e, 'erro ao buscar active deployment');
+      return reply.code(500).send({ error: 'erro ao buscar active deployment', detail: e.message });
+    }
+  });
+
+  // GET /api/v1/flows/deployments?channel=whatsapp
+  fastify.get('/deployments', async (req, reply) => {
+    const { channel } = req.query || {};
+    try {
+      const { rows } = await req.db.query(
+        `SELECT d.id, d.flow_id, d.version_id, d.channel, d.is_active, d.activated_at,
+                v.version, f.name
+           FROM flow_deployments d
+           JOIN flow_versions v ON v.id = d.version_id
+           JOIN flows f ON f.id = d.flow_id
+          WHERE ($1::text IS NULL OR d.channel = $1)
+          ORDER BY d.channel, d.activated_at DESC`,
+        [channel || null]
+      );
+      return reply.send(rows);
+    } catch (e) {
+      req.log.error(e);
+      return reply.code(500).send({ error: 'erro ao listar deployments', detail: e.message });
+    }
+  });
+
+  /* ========================
+   * SESSIONS (compat)
+   * ======================== */
+
   fastify.get('/sessions/:user_id', async (req, reply) => {
     const { user_id } = req.params;
     try {
