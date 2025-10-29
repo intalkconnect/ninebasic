@@ -9,35 +9,40 @@ export default async function flowsRoutes(fastify) {
 
   // POST /api/v1/flows
   // body: { name: string, description?: string }
-  fastify.post('/', async (req, reply) => {
-    const { name, description = null } = req.body || {};
-    if (!name) return reply.code(400).send({ error: 'name é obrigatório' });
-    try {
-      const { rows } = await req.db.query(
-        `INSERT INTO flows (name, description, created_at, updated_at)
-         VALUES ($1,$2,NOW(),NOW())
-         RETURNING id, name, description, created_at, updated_at`,
-        [name, description]
-      );
-      return reply.send(rows[0]);
-    } catch (e) {
-      req.log.error(e, 'erro ao criar flow');
-      return reply.code(500).send({ error: 'erro ao criar flow', detail: e.message });
-    }
-  });
+fastify.post('/', async (req, reply) => {
+  const { name, description = null } = req.body || {};
+  if (!name || !String(name).trim()) {
+    return reply.code(400).send({ error: 'name é obrigatório' });
+  }
+  try {
+    const { rows } = await req.db.query(
+      `INSERT INTO flows(name, description, created_at, updated_at)
+       VALUES($1,$2,NOW(),NOW())
+       RETURNING id, name, description, created_at, updated_at`,
+      [String(name).trim(), description]
+    );
+    return reply.send(rows[0]);
+  } catch (e) {
+    req.log.error(e);
+    return reply.code(500).send({ error: 'erro ao criar flow', detail: e.message });
+  }
+});
 
   // GET /api/v1/flows
-  fastify.get('/', async (req, reply) => {
-    try {
-      const { rows } = await req.db.query(
-        `SELECT id, name, description, created_at, updated_at FROM flows ORDER BY created_at DESC`
-      );
-      return reply.send(rows);
-    } catch (e) {
-      req.log.error(e, 'erro ao listar flows');
-      return reply.code(500).send({ error: 'erro ao listar flows', detail: e.message });
-    }
-  });
+fastify.get('/', async (req, reply) => {
+  try {
+    const { rows } = await req.db.query(
+      `SELECT id, name, description, created_at, updated_at
+         FROM flows
+        WHERE name IS NOT NULL
+        ORDER BY created_at DESC`
+    );
+    return reply.send(rows);
+  } catch (e) {
+    req.log.error(e);
+    return reply.code(500).send({ error: 'erro ao listar flows', detail: e.message });
+  }
+});
 
   // GET /api/v1/flows/:flow_id
   fastify.get('/:flow_id', async (req, reply) => {
@@ -152,6 +157,47 @@ export default async function flowsRoutes(fastify) {
 
   // POST /api/v1/flows/:flow_id/deploy
   // body: { version:number, channel:string, rollout_notes?:string }
+
+  // GET /api/v1/flows/meta  -> lista flows com meta (últimas versões e deploys)
+fastify.get('/meta', async (req, reply) => {
+  try {
+    const { rows } = await req.db.query(`
+      WITH last_versions AS (
+        SELECT flow_id,
+               MAX(version) FILTER (WHERE status='published') AS last_published,
+               MAX(version) AS last_version
+        FROM flow_versions
+        GROUP BY flow_id
+      ),
+      active_deploys AS (
+        SELECT d.flow_id,
+               json_agg(json_build_object(
+                 'id', d.id,
+                 'channel', d.channel,
+                 'version', v.version,
+                 'activated_at', d.activated_at
+               ) ORDER BY d.activated_at DESC) AS deploys
+        FROM flow_deployments d
+        JOIN flow_versions v ON v.id = d.version_id
+        WHERE d.is_active = true
+        GROUP BY d.flow_id
+      )
+      SELECT f.id, f.name, f.description,
+             lv.last_published, lv.last_version,
+             COALESCE(ad.deploys, '[]'::json) AS active_deploys
+      FROM flows f
+      LEFT JOIN last_versions lv ON lv.flow_id = f.id
+      LEFT JOIN active_deploys ad ON ad.flow_id = f.id
+      ORDER BY f.created_at DESC
+    `);
+    return reply.send(rows);
+  } catch (e) {
+    req.log.error(e);
+    return reply.code(500).send({ error:'erro ao listar flows/meta', detail:e.message });
+  }
+});
+
+  
   fastify.post('/:flow_id/deploy', async (req, reply) => {
     const { flow_id } = req.params;
     const { version, channel, rollout_notes = null } = req.body || {};
