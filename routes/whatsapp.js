@@ -40,32 +40,30 @@ async function whatsappRoutes(fastify) {
 
   /**
    * Resolve o phone_id obedecendo a prioridade:
-   * 1) phone_id explícito (query/body)
-   * 2) flow_id (canal vinculado ao flow)
+   * 1) phone_id explícito (query/body) -> aceita external_id OU id (UUID) e normaliza para external_id
+   * 2) flow_id (canal vinculado ao flow) -> aceita channel_key como external_id OU id (UUID) e normaliza para external_id
    * 3) fallback: número "ativo" do tenant
    */
   async function resolvePhoneForRequest(req) {
     const tenant = await resolveTenant(req);
 
-    const phoneIdParam =
-      req?.query?.phone_id || req?.body?.phone_id || null;
-    const flowIdParam =
-      req?.query?.flow_id || req?.body?.flow_id || null;
+    const phoneIdParam = req?.query?.phone_id || req?.body?.phone_id || null;
+    const flowIdParam  = req?.query?.flow_id  || req?.body?.flow_id  || null;
 
-    // 1) phone_id explícito
+    // 1) phone_id explícito (pode ser external_id ou UUID interno)
     if (phoneIdParam) {
       const q = `
-        SELECT external_id AS phone_id, settings, is_active
+        SELECT id, external_id, settings, is_active
           FROM public.tenant_channel_connections
          WHERE tenant_id = $1
            AND channel   = 'whatsapp'
            AND provider  = 'meta'
-           AND external_id = $2
+           AND (external_id = $2 OR id::text = $2)
          LIMIT 1
       `;
       const { rows } = await req.db.query(q, [tenant.id, String(phoneIdParam)]);
       const row = rows[0];
-      if (!row?.phone_id) throw new Error("phone_not_found_for_tenant");
+      if (!row?.external_id) throw new Error("phone_not_found_for_tenant");
 
       const waba_id =
         row?.settings?.waba_id ||
@@ -73,12 +71,11 @@ async function whatsappRoutes(fastify) {
           ? (() => { try { return JSON.parse(row.settings)?.waba_id; } catch { return null; } })()
           : null);
 
-      return { tenant, phone_id: row.phone_id, waba_id };
+      return { tenant, phone_id: row.external_id, waba_id };
     }
 
-    // 2) via flow_id
+    // 2) via flow_id (flow_channels.channel_key pode ser external_id ou UUID interno)
     if (flowIdParam) {
-      // pega channel_key do flow (phone_id)
       const bq = `
         SELECT fc.channel_key AS phone_id
           FROM flow_channels fc
@@ -91,19 +88,19 @@ async function whatsappRoutes(fastify) {
       const phoneFromFlow = bRows?.[0]?.phone_id || null;
       if (!phoneFromFlow) throw new Error("flow_not_bound_to_whatsapp");
 
-      // valida que o phone_id pertence ao tenant
+      // valida que o phone pertence ao tenant e normalize para external_id
       const vq = `
-        SELECT settings
+        SELECT external_id, settings
           FROM public.tenant_channel_connections
          WHERE tenant_id = $1
            AND channel   = 'whatsapp'
            AND provider  = 'meta'
-           AND external_id = $2
+           AND (external_id = $2 OR id::text = $2)
          LIMIT 1
       `;
-      const { rows: vRows } = await req.db.query(vq, [tenant.id, phoneFromFlow]);
+      const { rows: vRows } = await req.db.query(vq, [tenant.id, String(phoneFromFlow)]);
       const v = vRows[0];
-      if (!v) throw new Error("phone_not_found_for_tenant");
+      if (!v?.external_id) throw new Error("phone_not_found_for_tenant");
 
       const waba_id =
         v?.settings?.waba_id ||
@@ -111,7 +108,7 @@ async function whatsappRoutes(fastify) {
           ? (() => { try { return JSON.parse(v.settings)?.waba_id; } catch { return null; } })()
           : null);
 
-      return { tenant, phone_id: phoneFromFlow, waba_id };
+      return { tenant, phone_id: v.external_id, waba_id };
     }
 
     // 3) fallback: “ativo”/mais recente no tenant
@@ -146,7 +143,7 @@ async function whatsappRoutes(fastify) {
 
   // ---------- ENDPOINTS ----------
 
-  // GET /wa/profile -> phone + business profile
+  // GET /whatsapp/profile -> phone + business profile
   // Aceita: subdomain & (phone_id | flow_id)
   fastify.get("/profile", async (req, reply) => {
     try {
@@ -186,7 +183,7 @@ async function whatsappRoutes(fastify) {
       const profile = prof?.data ? prof.data[0] || {} : prof || {};
       return reply.send({ ok: true, phone, profile });
     } catch (err) {
-      fastify.log.error({ err }, "[GET /wa/profile]");
+      fastify.log.error({ err }, "[GET /whatsapp/profile]");
       const code =
         err?.message === "meta_token_missing" ? 500 :
         err?.message === "missing_subdomain" ? 400 :
@@ -199,7 +196,7 @@ async function whatsappRoutes(fastify) {
     }
   });
 
-  // POST /wa/profile -> update about/address/description/email/vertical/websites
+  // POST /whatsapp/profile -> update about/address/description/email/vertical/websites
   // Body: subdomain, (phone_id|flow_id), campos
   fastify.post("/profile", async (req, reply) => {
     let phoneId = null;
@@ -220,7 +217,7 @@ async function whatsappRoutes(fastify) {
 
       if (!Object.keys(payload).length) {
         const body400 = { ok: false, error: "no_allowed_fields" };
-        await fastify.audit(req, {
+        await fastify.audit?.(req, {
           action: "wa.profile.update.invalid",
           resourceType: "whatsapp_profile",
           resourceId: phoneId,
@@ -238,7 +235,7 @@ async function whatsappRoutes(fastify) {
       });
 
       const body200 = { ok: true, provider: res };
-      await fastify.audit(req, {
+      await fastify.audit?.(req, {
         action: "wa.profile.update",
         resourceType: "whatsapp_profile",
         resourceId: phoneId,
@@ -253,7 +250,7 @@ async function whatsappRoutes(fastify) {
 
       return reply.send(body200);
     } catch (err) {
-      fastify.log.error({ err }, "[POST /wa/profile]");
+      fastify.log.error({ err }, "[POST /whatsapp/profile]");
       const code =
         err?.message === "meta_token_missing" ? 500 :
         err?.message === "missing_subdomain" ? 400 :
@@ -265,7 +262,7 @@ async function whatsappRoutes(fastify) {
 
       const bodyErr = { ok: false, error: err?.message || "unexpected_error" };
 
-      await fastify.audit(req, {
+      await fastify.audit?.(req, {
         action: "wa.profile.update.error",
         resourceType: "whatsapp_profile",
         resourceId: phoneId,
@@ -283,7 +280,7 @@ async function whatsappRoutes(fastify) {
     }
   });
 
-  // POST /wa/profile/photo-from-url -> upload + aplicar foto
+  // POST /whatsapp/photo-from-url -> upload + aplicar foto
   // body: { subdomain, file_url, type?, phone_id?|flow_id? }
   fastify.post("/photo-from-url", async (req, reply) => {
     let phoneId = null;
@@ -300,7 +297,7 @@ async function whatsappRoutes(fastify) {
 
       if (!file_url) {
         const body400 = { ok: false, error: "missing_file_url" };
-        await fastify.audit(req, {
+        await fastify.audit?.(req, {
           action: "wa.profile.photo.invalid",
           resourceType: "whatsapp_profile",
           resourceId: phoneId,
@@ -319,7 +316,7 @@ async function whatsappRoutes(fastify) {
       const handle = up?.id;
       if (!handle) {
         const body502 = { ok: false, error: "upload_no_handle" };
-        await fastify.audit(req, {
+        await fastify.audit?.(req, {
           action: "wa.profile.photo.upload_failed",
           resourceType: "whatsapp_profile",
           resourceId: phoneId,
@@ -341,7 +338,7 @@ async function whatsappRoutes(fastify) {
       });
 
       const body200 = { ok: true, media_id: handle, provider: res };
-      await fastify.audit(req, {
+      await fastify.audit?.(req, {
         action: "wa.profile.photo.set",
         resourceType: "whatsapp_profile",
         resourceId: phoneId,
@@ -357,7 +354,7 @@ async function whatsappRoutes(fastify) {
 
       return reply.send(body200);
     } catch (err) {
-      fastify.log.error({ err }, "[POST /wa/profile/photo-from-url]");
+      fastify.log.error({ err }, "[POST /whatsapp/photo-from-url]");
       const code =
         err?.message === "meta_token_missing" ? 500 :
         err?.message === "missing_subdomain" ? 400 :
@@ -369,7 +366,7 @@ async function whatsappRoutes(fastify) {
 
       const bodyErr = { ok: false, error: err?.message || "unexpected_error" };
 
-      await fastify.audit(req, {
+      await fastify.audit?.(req, {
         action: "wa.profile.photo.error",
         resourceType: "whatsapp_profile",
         resourceId: phoneId,
@@ -388,7 +385,7 @@ async function whatsappRoutes(fastify) {
     }
   });
 
-  // DELETE /wa/profile/photo -> remove foto
+  // DELETE /whatsapp/profile/photo -> remove foto
   // body/query: subdomain, (phone_id|flow_id)
   fastify.delete("/profile/photo", async (req, reply) => {
     let phoneId = null;
@@ -406,7 +403,7 @@ async function whatsappRoutes(fastify) {
 
       const body200 = { ok: true, provider: res };
 
-      await fastify.audit(req, {
+      await fastify.audit?.(req, {
         action: "wa.profile.photo.unset",
         resourceType: "whatsapp_profile",
         resourceId: phoneId,
@@ -418,7 +415,7 @@ async function whatsappRoutes(fastify) {
 
       return reply.send(body200);
     } catch (err) {
-      fastify.log.error({ err }, "[DELETE /wa/profile/photo]");
+      fastify.log.error({ err }, "[DELETE /whatsapp/profile/photo]");
       const code =
         err?.message === "meta_token_missing" ? 500 :
         err?.message === "missing_subdomain" ? 400 :
@@ -430,7 +427,7 @@ async function whatsappRoutes(fastify) {
 
       const bodyErr = { ok: false, error: err?.message || "unexpected_error" };
 
-      await fastify.audit(req, {
+      await fastify.audit?.(req, {
         action: "wa.profile.photo.error",
         resourceType: "whatsapp_profile",
         resourceId: phoneId,
@@ -448,7 +445,7 @@ async function whatsappRoutes(fastify) {
     }
   });
 
-  // GET /wa/number -> metadados do número (UI)
+  // GET /whatsapp/number -> metadados do número (UI)
   // Aceita: subdomain & (phone_id | flow_id)
   fastify.get("/number", async (req, reply) => {
     try {
@@ -467,7 +464,7 @@ async function whatsappRoutes(fastify) {
       const phone = await gget(`/${phone_id}`, { token: TOKEN, qs: { fields } });
       return reply.send({ ok: true, phone });
     } catch (err) {
-      fastify.log.error({ err }, "[GET /wa/number]");
+      fastify.log.error({ err }, "[GET /whatsapp/number]");
       const code =
         err?.message === "meta_token_missing" ? 500 :
         err?.message === "missing_subdomain" ? 400 :
