@@ -385,9 +385,7 @@ async function queuesRoutes(fastify, options) {
     }
   });
 
-  // ✂️ coloca depois do PUT /queues/:id
-
-// 🗑️ DELETE /queues/:id  (aceita número ou nome; opcional ?flow_id= para validar)
+// 🗑️ DELETE /queues/:id  (aceita número ou nome; impede se houver atendente vinculado)
 fastify.delete("/:id", async (req, reply) => {
   const raw = String(req.params?.id || "").trim();
   if (!raw) {
@@ -432,8 +430,77 @@ fastify.delete("/:id", async (req, reply) => {
       return reply.code(404).send(body404);
     }
 
-    // 2) Deleta pela PK (id)
-    await req.db.query(`DELETE FROM filas WHERE id = $1`, [before.id]);
+    // 2) Verifica se existe atendente vinculado à fila (pelo nome da fila)
+    const rAgents = await req.db.query(
+      `
+      SELECT 1
+        FROM users
+       WHERE $1 = ANY(filas)
+       LIMIT 1
+      `,
+      [before.nome]
+    );
+
+    if (rAgents.rowCount > 0) {
+      const body409 = {
+        error:
+          "Não é possível excluir a fila: existem atendentes vinculados a ela.",
+      };
+      await fastify.audit(req, {
+        action: "queue.delete.blocked_agents",
+        resourceType: "queue",
+        resourceId: String(before.id),
+        statusCode: 409,
+        requestBody: null,
+        beforeData: before,
+        responseBody: body409,
+      });
+      return reply.code(409).send(body409);
+    }
+
+    // 3) Apaga regras de roteamento (queue_rules) dessa fila/flow
+    //    (ajuste o WHERE se sua tabela ainda não tiver coluna flow_id)
+    await req.db.query(
+      `
+      DELETE FROM queue_rules
+       WHERE queue_name = $1
+         AND (flow_id IS NOT DISTINCT FROM $2 OR $2 IS NULL)
+      `,
+      [before.nome, flowId]
+    );
+
+    // 4) Apaga horários da fila (queue_hours), o que deve CASCADE para
+    //    queue_hours_rules e queue_holidays (via FK ON DELETE CASCADE)
+    await req.db.query(
+      `
+      DELETE FROM queue_hours
+       WHERE queue_name = $1
+         AND (flow_id IS NOT DISTINCT FROM $2 OR $2 IS NULL)
+      `,
+      [before.nome, flowId]
+    );
+
+    // 5) [Opcional, mas recomendado] Limpa vínculos de tags em tickets
+    //    para essa fila, porque existe FK RESTRICT de ticket_tags -> queue_ticket_tag_catalog
+    await req.db.query(
+      `
+      DELETE FROM ticket_tags
+       WHERE fila_id = $1
+      `,
+      [before.id]
+    );
+
+    // 6) Finalmente, apaga a fila em si.
+    //    Isso deve CASCADE em:
+    //      - queue_ticket_tag_catalog (fk_qttc_fila ON DELETE CASCADE)
+    //      - fila_permissoes (ON DELETE CASCADE)
+    await req.db.query(
+      `
+      DELETE FROM filas
+       WHERE id = $1
+      `,
+      [before.id]
+    );
 
     const body200 = {
       ok: true,
@@ -470,6 +537,7 @@ fastify.delete("/:id", async (req, reply) => {
     return reply.code(500).send(body500);
   }
 });
+
 
 }
 
