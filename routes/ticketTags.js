@@ -1,10 +1,10 @@
 // routes/ticketTags.js
 /**
  * Endpoints:
- * - GET    /tags/ticket/catalog?fila=NomeDaFila&q=&active=true|false&page=&page_size=
- * - POST   /tags/ticket/catalog         → cria/ativa/atualiza tag em uma fila { fila, tag, label?, color?, active? }
- * - PATCH  /tags/ticket/catalog/:fila/:tag
- * - DELETE /tags/ticket/catalog/:fila/:tag
+ * - GET    /tags/ticket/catalog?fila=NomeDaFila&q=&active=true|false&page=&page_size=&flow_id=
+ * - POST   /tags/ticket/catalog         → cria/ativa/atualiza tag em uma fila { fila, tag, label?, color?, active?, flow_id? }
+ * - PATCH  /tags/ticket/catalog/:fila/:tag  (?flow_id=)
+ * - DELETE /tags/ticket/catalog/:fila/:tag  (?flow_id=)
  *
  * - GET    /tags/ticket/:ticket_number          → lista tags do ticket
  * - GET    /tags/ticket/:ticket_number/catalog  → lista catálogo aplicável (fila do ticket)
@@ -17,9 +17,11 @@ async function ticketTagsRoutes(fastify) {
   async function getFilaIdByNome(db, nomeFila, flowId = null) {
     if (!nomeFila) return null;
 
+    // se flow_id vier, precisa bater também
     if (flowId !== null && flowId !== undefined) {
       const { rows } = await db.query(
-        `SELECT id FROM filas
+        `SELECT id
+           FROM filas
           WHERE nome = $1
             AND flow_id IS NOT DISTINCT FROM $2
           LIMIT 1`,
@@ -58,6 +60,7 @@ async function ticketTagsRoutes(fastify) {
       page_size = 20,
       flow_id,
     } = req.query || {};
+
     if (!fila.trim())
       return reply.code(400).send({ error: "Parâmetro fila é obrigatório" });
 
@@ -215,7 +218,7 @@ async function ticketTagsRoutes(fastify) {
     }
   });
 
-  // PATCH /tags/ticket/catalog/:fila/:tag  { label?, color?, active?, flow_id? }
+  // PATCH /tags/ticket/catalog/:fila/:tag  { label?, color?, active? } + ?flow_id=
   fastify.patch("/ticket/catalog/:fila/:tag", async (req, reply) => {
     const fila = String(req.params?.fila || "").trim();
     const tag = String(req.params?.tag || "").trim();
@@ -335,7 +338,7 @@ async function ticketTagsRoutes(fastify) {
     }
   });
 
-  // DELETE /tags/ticket/catalog/:fila/:tag (?flow_id=)
+  // DELETE /tags/ticket/catalog/:fila/:tag  (?flow_id=)
   fastify.delete("/ticket/catalog/:fila/:tag", async (req, reply) => {
     const fila = String(req.params?.fila || "").trim();
     const tag = String(req.params?.tag || "").trim();
@@ -436,6 +439,7 @@ async function ticketTagsRoutes(fastify) {
       return reply.code(500).send(body500);
     }
   });
+
   // ============================
   // Vínculo ticket ⇄ tag (ticket_tags)
   // ============================
@@ -488,6 +492,7 @@ async function ticketTagsRoutes(fastify) {
           .code(404)
           .send({ error: "Ticket não encontrado ou sem fila" });
 
+      // aqui ainda usa legado (sem flow_id) pois ticket não tem flow_id no modelo original
       const filaId = await getFilaIdByNome(req.db, filaNome);
       if (!filaId)
         return reply.code(404).send({ error: "Fila do ticket não encontrada" });
@@ -567,6 +572,7 @@ async function ticketTagsRoutes(fastify) {
         return reply.code(404).send(body404);
       }
 
+      // legado: aqui ainda não diferenciamos por flow_id de ticket
       const filaId = await getFilaIdByNome(req.db, filaNome);
       if (!filaId) {
         const body404 = { error: "Fila do ticket não encontrada" };
@@ -583,7 +589,7 @@ async function ticketTagsRoutes(fastify) {
       // valida catálogo/ativas
       const rKnown = await req.db.query(
         `SELECT tag FROM queue_ticket_tag_catalog
-        WHERE fila_id = $1 AND tag = ANY($2::text[]) AND active IS TRUE`,
+          WHERE fila_id = $1 AND tag = ANY($2::text[]) AND active IS TRUE`,
         [filaId, tags]
       );
       const known = new Set((rKnown.rows || []).map((r) => r.tag));
@@ -614,11 +620,11 @@ async function ticketTagsRoutes(fastify) {
         values.push(`($${i++}, $${i++}, $${i++})`);
       }
       const sql = `
-      INSERT INTO ticket_tags (ticket_number, fila_id, tag)
-      VALUES ${values.join(", ")}
-      ON CONFLICT (ticket_number, tag) DO NOTHING
-      RETURNING ticket_number, fila_id, tag, created_at
-    `;
+        INSERT INTO ticket_tags (ticket_number, fila_id, tag)
+        VALUES ${values.join(", ")}
+        ON CONFLICT (ticket_number, tag) DO NOTHING
+        RETURNING ticket_number, fila_id, tag, created_at
+      `;
       const { rows } = await req.db.query(sql, params);
 
       const body201 = {
