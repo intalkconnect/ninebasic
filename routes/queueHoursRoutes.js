@@ -170,7 +170,8 @@ async function testNow(client, queueName, tsOverride /* ISO opcional */, flowId 
   const localDate = q.rows[0].local_date;
 
   const fer = await client.query(
-    `SELECT 1 FROM queue_holidays
+    `SELECT 1
+       FROM queue_holidays
       WHERE queue_name = $1
         AND flow_id IS NOT DISTINCT FROM $2
         AND holiday_date = $3::date`,
@@ -300,14 +301,16 @@ async function findNextOpenLocal(client, queueName, tz, dow, minutes, flowId = n
  * ========================= */
 async function queueHoursRoutes(fastify, options) {
   // GET /queues/:queue/hours
+  // aceita ?flow_id=
   fastify.get("/:queue/hours", async (req, reply) => {
     const queueName = req.params.queue;
     const flowId = req.query?.flow_id ?? null;
 
     try {
       const schema = await resolveSchemaFromReq(req);
-      const data = await withTenant(schema, async (client) =>
-        loadConfig(client, queueName, flowId)
+      const data = await withTenant(
+        schema,
+        async (client) => await loadConfig(client, queueName, flowId)
       );
       return reply.send(data);
     } catch (error) {
@@ -321,6 +324,7 @@ async function queueHoursRoutes(fastify, options) {
   });
 
   // POST /queues/:queue/hours  (upsert)
+  // aceita flow_id no body e/ou query (?flow_id=)
   fastify.post("/:queue/hours", async (req, reply) => {
     const queueName = req.params.queue;
     const flowId = req.query?.flow_id ?? req.body?.flow_id ?? null;
@@ -362,7 +366,9 @@ async function queueHoursRoutes(fastify, options) {
         );
 
         await client.query(
-          `DELETE FROM queue_hours_rules WHERE queue_name=$1 AND flow_id IS NOT DISTINCT FROM $2`,
+          `DELETE FROM queue_hours_rules
+            WHERE queue_name=$1
+              AND flow_id IS NOT DISTINCT FROM $2`,
           [queueName, flowId]
         );
         for (const r of flatRules) {
@@ -374,7 +380,9 @@ async function queueHoursRoutes(fastify, options) {
         }
 
         await client.query(
-          `DELETE FROM queue_holidays WHERE queue_name=$1 AND flow_id IS NOT DISTINCT FROM $2`,
+          `DELETE FROM queue_holidays
+            WHERE queue_name=$1
+              AND flow_id IS NOT DISTINCT FROM $2`,
           [queueName, flowId]
         );
         for (const h of holidays || []) {
@@ -448,6 +456,7 @@ async function queueHoursRoutes(fastify, options) {
   });
 
   // PUT /queues/:queue/hours  (upsert — aceita weekly **ou** windows)
+  // aceita flow_id no body e/ou query (?flow_id=)
   fastify.put("/:queue/hours", async (req, reply) => {
     const queueName = req.params.queue;
     const flowId = req.query?.flow_id ?? req.body?.flow_id ?? null;
@@ -490,7 +499,9 @@ async function queueHoursRoutes(fastify, options) {
         );
 
         await client.query(
-          `DELETE FROM queue_hours_rules WHERE queue_name=$1 AND flow_id IS NOT DISTINCT FROM $2`,
+          `DELETE FROM queue_hours_rules
+            WHERE queue_name=$1
+              AND flow_id IS NOT DISTINCT FROM $2`,
           [queueName, flowId]
         );
         for (const r of flatRules) {
@@ -502,7 +513,9 @@ async function queueHoursRoutes(fastify, options) {
         }
 
         await client.query(
-          `DELETE FROM queue_holidays WHERE queue_name=$1 AND flow_id IS NOT DISTINCT FROM $2`,
+          `DELETE FROM queue_holidays
+            WHERE queue_name=$1
+              AND flow_id IS NOT DISTINCT FROM $2`,
           [queueName, flowId]
         );
         for (const h of holidays) {
@@ -576,6 +589,7 @@ async function queueHoursRoutes(fastify, options) {
   });
 
   // POST /queues/:queue/hours/test
+  // aceita ?flow_id= e/ou body.flow_id
   fastify.post("/:queue/hours/test", async (req, reply) => {
     const queueName = req.params.queue;
     const ts = req.body?.ts ?? req.query?.ts ?? null;
@@ -584,8 +598,9 @@ async function queueHoursRoutes(fastify, options) {
 
     try {
       const schema = await resolveSchemaFromReq(req);
-      const out = await withTenant(schema, async (client) =>
-        testNow(client, queueName, ts, flowId)
+      const out = await withTenant(
+        schema,
+        async (client) => await testNow(client, queueName, ts, flowId)
       );
 
       // 🔎 AUDIT (sucesso)
