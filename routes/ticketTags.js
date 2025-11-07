@@ -124,100 +124,108 @@ async function ticketTagsRoutes(fastify) {
   });
 
   // POST /tags/ticket/catalog { fila, tag, label?, color?, active?, flow_id? }
-  fastify.post("/ticket/catalog", async (req, reply) => {
-    const {
-      fila,
-      tag,
-      label = null,
-      color = null,
-      active = true,
-      flow_id,
-    } = req.body || {};
-    const f = String(fila || "").trim();
-    const t = String(tag || "").trim();
-    const flowId = flow_id ?? null;
+fastify.post("/ticket/catalog", async (req, reply) => {
+  const {
+    fila,
+    tag,
+    label = null,
+    color = null,
+    active = true,
+    flow_id,
+  } = req.body || {};
+  const f = String(fila || "").trim();
+  const t = String(tag || "").trim();
+  const flowId = flow_id ?? null;
 
-    const resourceId = f && t ? `${f}:${t}${flowId ? `@${flowId}` : ""}` : null;
+  const resourceId = f && t ? `${f}:${t}${flowId ? `@${flowId}` : ""}` : null;
 
-    // log de início
+  await fastify.audit(req, {
+    action: "ticket.tags.catalog.upsert.start",
+    resourceType: "queue_ticket_tag",
+    resourceId,
+    statusCode: 200,
+    requestBody: { fila: f, tag: t, label, color, active, flow_id: flowId },
+  });
+
+  if (!f || !t) {
+    const body400 = { error: "Campos fila e tag são obrigatórios" };
     await fastify.audit(req, {
-      action: "ticket.tags.catalog.upsert.start",
+      action: "ticket.tags.catalog.upsert.error",
       resourceType: "queue_ticket_tag",
       resourceId,
-      statusCode: 200,
-      requestBody: { fila: f, tag: t, label, color, active, flow_id: flowId },
+      statusCode: 400,
+      responseBody: body400,
+    });
+    return reply.code(400).send(body400);
+  }
+
+  try {
+    const filaId = await getFilaIdByNome(req.db, f, flowId);
+    if (!filaId) {
+      const body404 = { error: "Fila não encontrada" };
+      await fastify.audit(req, {
+        action: "ticket.tags.catalog.upsert.not_found",
+        resourceType: "queue",
+        resourceId: f,
+        statusCode: 404,
+        responseBody: body404,
+      });
+      return reply.code(404).send(body404);
+    }
+
+    const sql = `
+      INSERT INTO queue_ticket_tag_catalog (fila_id, flow_id, tag, label, color, active)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (fila_id, tag)
+      DO UPDATE SET
+        flow_id = EXCLUDED.flow_id,
+        label   = EXCLUDED.label,
+        color   = EXCLUDED.color,
+        active  = EXCLUDED.active
+      RETURNING fila_id, flow_id, tag, label, color, active, created_at
+    `;
+    const { rows } = await req.db.query(sql, [
+      filaId,
+      flowId,
+      t,
+      label,
+      color,
+      Boolean(active),
+    ]);
+
+    const body201 = {
+      fila: f,
+      fila_id: filaId,
+      flow_id: flowId,
+      ...rows[0],
+    };
+
+    await fastify.audit(req, {
+      action: "ticket.tags.catalog.upsert.done",
+      resourceType: "queue_ticket_tag",
+      resourceId: `${filaId}:${t}`,
+      statusCode: 201,
+      responseBody: body201,
     });
 
-    if (!f || !t) {
-      const body400 = { error: "Campos fila e tag são obrigatórios" };
-      await fastify.audit(req, {
-        action: "ticket.tags.catalog.upsert.error",
-        resourceType: "queue_ticket_tag",
-        resourceId,
-        statusCode: 400,
-        responseBody: body400,
-      });
-      return reply.code(400).send(body400);
-    }
+    return reply.code(201).send(body201);
+  } catch (err) {
+    req.log.error({ err }, "POST /tags/ticket/catalog");
+    const body500 = { error: "Erro ao criar/atualizar tag de fila" };
 
-    try {
-      const filaId = await getFilaIdByNome(req.db, f, flowId);
-      if (!filaId) {
-        const body404 = { error: "Fila não encontrada" };
-        await fastify.audit(req, {
-          action: "ticket.tags.catalog.upsert.not_found",
-          resourceType: "queue",
-          resourceId: f,
-          statusCode: 404,
-          responseBody: body404,
-        });
-        return reply.code(404).send(body404);
-      }
+    await fastify.audit(req, {
+      action: "ticket.tags.catalog.upsert.error",
+      resourceType: "queue_ticket_tag",
+      resourceId,
+      statusCode: 500,
+      responseBody: body500,
+      extra: { message: String(err?.message || err) },
+    });
 
-        const sql = `
-        INSERT INTO queue_ticket_tag_catalog (fila_id, tag, label, color, active)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (fila_id, tag)
-        DO UPDATE SET
-          label = EXCLUDED.label,
-          color = EXCLUDED.color,
-          active = EXCLUDED.active
-        RETURNING fila_id, tag, label, color, active, created_at
-      `;
-      const { rows } = await req.db.query(sql, [
-        filaId,
-        t,
-        label,
-        color,
-        Boolean(active),
-      ]);
-      const body201 = { fila: f, fila_id: filaId, flow_id: flowId, ...rows[0] };
+    return reply.code(500).send(body500);
+  }
+});
 
-      await fastify.audit(req, {
-        action: "ticket.tags.catalog.upsert.done",
-        resourceType: "queue_ticket_tag",
-        resourceId: `${filaId}:${t}`,
-        statusCode: 201,
-        responseBody: body201,
-      });
-
-      return reply.code(201).send(body201);
-    } catch (err) {
-      req.log.error({ err }, "POST /tags/ticket/catalog");
-      const body500 = { error: "Erro ao criar/atualizar tag de fila" };
-
-      await fastify.audit(req, {
-        action: "ticket.tags.catalog.upsert.error",
-        resourceType: "queue_ticket_tag",
-        resourceId,
-        statusCode: 500,
-        responseBody: body500,
-        extra: { message: String(err?.message || err) },
-      });
-
-      return reply.code(500).send(body500);
-    }
-  });
 
   // PATCH /tags/ticket/catalog/:fila/:tag  { label?, color?, active? } + ?flow_id=
   fastify.patch("/ticket/catalog/:fila/:tag", async (req, reply) => {
