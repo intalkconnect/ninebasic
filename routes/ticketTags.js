@@ -14,7 +14,21 @@
 
 async function ticketTagsRoutes(fastify) {
   // ===== Helpers =====
-  async function getFilaIdByNome(db, nomeFila) {
+  async function getFilaIdByNome(db, nomeFila, flowId = null) {
+    if (!nomeFila) return null;
+
+    if (flowId !== null && flowId !== undefined) {
+      const { rows } = await db.query(
+        `SELECT id FROM filas
+          WHERE nome = $1
+            AND flow_id IS NOT DISTINCT FROM $2
+          LIMIT 1`,
+        [nomeFila, flowId]
+      );
+      return rows[0]?.id || null;
+    }
+
+    // legado: sem flow_id, pega a primeira que bater
     const { rows } = await db.query(
       `SELECT id FROM filas WHERE nome = $1 LIMIT 1`,
       [nomeFila]
@@ -34,7 +48,7 @@ async function ticketTagsRoutes(fastify) {
   // Catálogo por fila (queue_ticket_tag_catalog)
   // ============================
 
-  // GET /tags/ticket/catalog?fila=NomeDaFila&q=&active=true|false&page=&page_size=
+  // GET /tags/ticket/catalog?fila=NomeDaFila&q=&active=true|false&page=&page_size=&flow_id=
   fastify.get("/ticket/catalog", async (req, reply) => {
     const {
       fila = "",
@@ -42,16 +56,19 @@ async function ticketTagsRoutes(fastify) {
       active,
       page = 1,
       page_size = 20,
+      flow_id,
     } = req.query || {};
     if (!fila.trim())
       return reply.code(400).send({ error: "Parâmetro fila é obrigatório" });
+
+    const flowId = flow_id ?? null;
 
     const pageNum = Math.max(1, Number(page) || 1);
     const pageSize = Math.min(Math.max(Number(page_size) || 20, 1), 100);
     const offset = (pageNum - 1) * pageSize;
 
     try {
-      const filaId = await getFilaIdByNome(req.db, fila);
+      const filaId = await getFilaIdByNome(req.db, fila, flowId);
       if (!filaId)
         return reply.code(404).send({ error: "Fila não encontrada" });
 
@@ -88,6 +105,7 @@ async function ticketTagsRoutes(fastify) {
       return reply.send({
         fila,
         fila_id: filaId,
+        flow_id: flowId,
         data: rList.rows || [],
         page: pageNum,
         page_size: pageSize,
@@ -102,7 +120,7 @@ async function ticketTagsRoutes(fastify) {
     }
   });
 
-  // POST /tags/ticket/catalog { fila, tag, label?, color?, active? }
+  // POST /tags/ticket/catalog { fila, tag, label?, color?, active?, flow_id? }
   fastify.post("/ticket/catalog", async (req, reply) => {
     const {
       fila,
@@ -110,17 +128,21 @@ async function ticketTagsRoutes(fastify) {
       label = null,
       color = null,
       active = true,
+      flow_id,
     } = req.body || {};
     const f = String(fila || "").trim();
     const t = String(tag || "").trim();
+    const flowId = flow_id ?? null;
+
+    const resourceId = f && t ? `${f}:${t}${flowId ? `@${flowId}` : ""}` : null;
 
     // log de início
     await fastify.audit(req, {
       action: "ticket.tags.catalog.upsert.start",
       resourceType: "queue_ticket_tag",
-      resourceId: f && t ? `${f}:${t}` : null,
+      resourceId,
       statusCode: 200,
-      requestBody: { fila: f, tag: t, label, color, active },
+      requestBody: { fila: f, tag: t, label, color, active, flow_id: flowId },
     });
 
     if (!f || !t) {
@@ -128,7 +150,7 @@ async function ticketTagsRoutes(fastify) {
       await fastify.audit(req, {
         action: "ticket.tags.catalog.upsert.error",
         resourceType: "queue_ticket_tag",
-        resourceId: f && t ? `${f}:${t}` : null,
+        resourceId,
         statusCode: 400,
         responseBody: body400,
       });
@@ -136,7 +158,7 @@ async function ticketTagsRoutes(fastify) {
     }
 
     try {
-      const filaId = await getFilaIdByNome(req.db, f);
+      const filaId = await getFilaIdByNome(req.db, f, flowId);
       if (!filaId) {
         const body404 = { error: "Fila não encontrada" };
         await fastify.audit(req, {
@@ -150,14 +172,14 @@ async function ticketTagsRoutes(fastify) {
       }
 
       const sql = `
-      INSERT INTO queue_ticket_tag_catalog (fila_id, tag, label, color, active)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (fila_id, tag) DO UPDATE
-        SET label = EXCLUDED.label,
-            color = EXCLUDED.color,
-            active = EXCLUDED.active
-      RETURNING fila_id, tag, label, color, active, created_at
-    `;
+        INSERT INTO queue_ticket_tag_catalog (fila_id, tag, label, color, active)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (fila_id, tag) DO UPDATE
+          SET label = EXCLUDED.label,
+              color = EXCLUDED.color,
+              active = EXCLUDED.active
+        RETURNING fila_id, tag, label, color, active, created_at
+      `;
       const { rows } = await req.db.query(sql, [
         filaId,
         t,
@@ -165,7 +187,7 @@ async function ticketTagsRoutes(fastify) {
         color,
         Boolean(active),
       ]);
-      const body201 = { fila: f, fila_id: filaId, ...rows[0] };
+      const body201 = { fila: f, fila_id: filaId, flow_id: flowId, ...rows[0] };
 
       await fastify.audit(req, {
         action: "ticket.tags.catalog.upsert.done",
@@ -183,7 +205,7 @@ async function ticketTagsRoutes(fastify) {
       await fastify.audit(req, {
         action: "ticket.tags.catalog.upsert.error",
         resourceType: "queue_ticket_tag",
-        resourceId: f && t ? `${f}:${t}` : null,
+        resourceId,
         statusCode: 500,
         responseBody: body500,
         extra: { message: String(err?.message || err) },
@@ -193,16 +215,19 @@ async function ticketTagsRoutes(fastify) {
     }
   });
 
-  // PATCH /tags/ticket/catalog/:fila/:tag  { label?, color?, active? }
+  // PATCH /tags/ticket/catalog/:fila/:tag  { label?, color?, active?, flow_id? }
   fastify.patch("/ticket/catalog/:fila/:tag", async (req, reply) => {
     const fila = String(req.params?.fila || "").trim();
     const tag = String(req.params?.tag || "").trim();
+    const flowId = req.query?.flow_id ?? req.body?.flow_id ?? null;
+
+    const resourceId = fila && tag ? `${fila}:${tag}${flowId ? `@${flowId}` : ""}` : null;
 
     // log: start
     await fastify.audit(req, {
       action: "ticket.tags.catalog.update.start",
       resourceType: "queue_ticket_tag",
-      resourceId: fila && tag ? `${fila}:${tag}` : null,
+      resourceId,
       statusCode: 200,
       requestBody: req.body || {},
     });
@@ -212,7 +237,7 @@ async function ticketTagsRoutes(fastify) {
       await fastify.audit(req, {
         action: "ticket.tags.catalog.update.error",
         resourceType: "queue_ticket_tag",
-        resourceId: fila && tag ? `${fila}:${tag}` : null,
+        resourceId,
         statusCode: 400,
         responseBody: body400,
       });
@@ -230,7 +255,7 @@ async function ticketTagsRoutes(fastify) {
       await fastify.audit(req, {
         action: "ticket.tags.catalog.update.nop",
         resourceType: "queue_ticket_tag",
-        resourceId: `${fila}:${tag}`,
+        resourceId,
         statusCode: 400,
         responseBody: body400,
       });
@@ -238,7 +263,7 @@ async function ticketTagsRoutes(fastify) {
     }
 
     try {
-      const filaId = await getFilaIdByNome(req.db, fila);
+      const filaId = await getFilaIdByNome(req.db, fila, flowId);
       if (!filaId) {
         const body404 = { error: "Fila não encontrada" };
         await fastify.audit(req, {
@@ -261,11 +286,11 @@ async function ticketTagsRoutes(fastify) {
       vals.push(filaId, tag);
 
       const sql = `
-      UPDATE queue_ticket_tag_catalog
-         SET ${sets.join(", ")}, updated_at = now()
-       WHERE fila_id = $${i++} AND tag = $${i}
-       RETURNING fila_id, tag, label, color, active, created_at
-    `;
+        UPDATE queue_ticket_tag_catalog
+           SET ${sets.join(", ")}, updated_at = now()
+         WHERE fila_id = $${i++} AND tag = $${i}
+         RETURNING fila_id, tag, label, color, active, created_at
+      `;
       const { rows } = await req.db.query(sql, vals);
       if (!rows[0]) {
         const body404 = {
@@ -281,7 +306,7 @@ async function ticketTagsRoutes(fastify) {
         return reply.code(404).send(body404);
       }
 
-      const body200 = { fila, fila_id: filaId, ...rows[0] };
+      const body200 = { fila, fila_id: filaId, flow_id: flowId, ...rows[0] };
 
       await fastify.audit(req, {
         action: "ticket.tags.catalog.update.done",
@@ -300,7 +325,7 @@ async function ticketTagsRoutes(fastify) {
       await fastify.audit(req, {
         action: "ticket.tags.catalog.update.error",
         resourceType: "queue_ticket_tag",
-        resourceId: fila && tag ? `${fila}:${tag}` : null,
+        resourceId,
         statusCode: 500,
         responseBody: body500,
         extra: { message: String(err?.message || err) },
@@ -310,16 +335,19 @@ async function ticketTagsRoutes(fastify) {
     }
   });
 
-  // DELETE /tags/ticket/catalog/:fila/:tag
+  // DELETE /tags/ticket/catalog/:fila/:tag (?flow_id=)
   fastify.delete("/ticket/catalog/:fila/:tag", async (req, reply) => {
     const fila = String(req.params?.fila || "").trim();
     const tag = String(req.params?.tag || "").trim();
+    const flowId = req.query?.flow_id ?? null;
+
+    const resourceId = fila && tag ? `${fila}:${tag}${flowId ? `@${flowId}` : ""}` : null;
 
     // log: start
     await fastify.audit(req, {
       action: "ticket.tags.catalog.delete.start",
       resourceType: "queue_ticket_tag",
-      resourceId: fila && tag ? `${fila}:${tag}` : null,
+      resourceId,
       statusCode: 200,
       requestBody: null,
     });
@@ -329,7 +357,7 @@ async function ticketTagsRoutes(fastify) {
       await fastify.audit(req, {
         action: "ticket.tags.catalog.delete.error",
         resourceType: "queue_ticket_tag",
-        resourceId: fila && tag ? `${fila}:${tag}` : null,
+        resourceId,
         statusCode: 400,
         responseBody: body400,
       });
@@ -337,7 +365,7 @@ async function ticketTagsRoutes(fastify) {
     }
 
     try {
-      const filaId = await getFilaIdByNome(req.db, fila);
+      const filaId = await getFilaIdByNome(req.db, fila, flowId);
       if (!filaId) {
         const body404 = { error: "Fila não encontrada" };
         await fastify.audit(req, {
@@ -400,7 +428,7 @@ async function ticketTagsRoutes(fastify) {
       await fastify.audit(req, {
         action: "ticket.tags.catalog.delete.error",
         resourceType: "queue_ticket_tag",
-        resourceId: fila && tag ? `${fila}:${tag}` : null,
+        resourceId,
         statusCode: 500,
         responseBody: body500,
         extra: { message: String(err?.message || err) },
@@ -408,7 +436,6 @@ async function ticketTagsRoutes(fastify) {
       return reply.code(500).send(body500);
     }
   });
-
   // ============================
   // Vínculo ticket ⇄ tag (ticket_tags)
   // ============================
