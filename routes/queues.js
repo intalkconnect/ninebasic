@@ -384,6 +384,93 @@ async function queuesRoutes(fastify, options) {
       return reply.code(500).send(body500);
     }
   });
+
+  // ✂️ coloca depois do PUT /queues/:id
+
+// 🗑️ DELETE /queues/:id  (aceita número ou nome; opcional ?flow_id= para validar)
+fastify.delete("/:id", async (req, reply) => {
+  const raw = String(req.params?.id || "").trim();
+  if (!raw) {
+    return reply.code(400).send({ error: "Parâmetro id é obrigatório" });
+  }
+
+  const isNumeric = /^[0-9]+$/.test(raw);
+  const whereSql = isNumeric ? "id = $1" : "nome = $1";
+  const whereVal = isNumeric ? Number(raw) : raw;
+
+  const flowId = req.query?.flow_id ?? null;
+
+  try {
+    // 1) Busca fila para garantir existência + capturar "antes"
+    let sqlSel = `
+      SELECT id, nome, descricao, ativa, color, flow_id
+        FROM filas
+       WHERE ${whereSql}
+    `;
+    const paramsSel = [whereVal];
+
+    if (flowId !== null) {
+      sqlSel += ` AND flow_id IS NOT DISTINCT FROM $${paramsSel.length + 1}`;
+      paramsSel.push(flowId);
+    }
+    sqlSel += " LIMIT 1";
+
+    const r0 = await req.db.query(sqlSel, paramsSel);
+    const before = r0.rows?.[0];
+
+    if (!before) {
+      const body404 = { error: "Fila não encontrada" };
+      await fastify.audit(req, {
+        action: "queue.delete.not_found",
+        resourceType: "queue",
+        resourceId: isNumeric ? String(whereVal) : `byname:${whereVal}`,
+        statusCode: 404,
+        requestBody: null,
+        responseBody: body404,
+        extra: { flow_id: flowId ?? null },
+      });
+      return reply.code(404).send(body404);
+    }
+
+    // 2) Deleta pela PK (id)
+    await req.db.query(`DELETE FROM filas WHERE id = $1`, [before.id]);
+
+    const body200 = {
+      ok: true,
+      id: before.id,
+      nome: before.nome,
+      flow_id: before.flow_id,
+    };
+
+    await fastify.audit(req, {
+      action: "queue.delete",
+      resourceType: "queue",
+      resourceId: String(before.id),
+      statusCode: 200,
+      requestBody: null,
+      beforeData: before,
+      responseBody: body200,
+    });
+
+    return reply.code(200).send(body200);
+  } catch (err) {
+    fastify.log.error(err, "DELETE /queues/:id");
+    const body500 = { error: "Erro ao excluir fila" };
+
+    await fastify.audit(req, {
+      action: "queue.delete.error",
+      resourceType: "queue",
+      resourceId: String(raw),
+      statusCode: 500,
+      requestBody: null,
+      responseBody: body500,
+      extra: { message: String(err?.message || err) },
+    });
+
+    return reply.code(500).send(body500);
+  }
+});
+
 }
 
 export default queuesRoutes;
