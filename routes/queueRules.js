@@ -18,7 +18,6 @@ async function queueRulesRoutes(fastify) {
           error: 'cada condition precisa de "type" e "variable"',
         };
       }
-      // Operadores suportados
       const okTypes = new Set([
         "equals",
         "not_equals",
@@ -57,7 +56,7 @@ async function queueRulesRoutes(fastify) {
         sql += ` WHERE flow_id IS NOT DISTINCT FROM $1`;
         params.push(flowId);
       }
-      sql += ` ORDER BY queue_name ASC`;
+      sql += ` ORDER BY queue_name ASC, flow_id NULLS FIRST`;
 
       const { rows } = await req.db.query(sql, params);
       return reply.code(200).send({ data: rows });
@@ -67,6 +66,7 @@ async function queueRulesRoutes(fastify) {
   });
 
   // 🔎 Obter uma regra por nome de fila (+ flow_id opcional)
+  // 200 quando encontrada; 204 quando não encontrada
   fastify.get("/:queue_name", async (req, reply) => {
     const queueName = String(req.params?.queue_name || "").trim();
     const flowId = req.query?.flow_id ?? null;
@@ -96,7 +96,7 @@ async function queueRulesRoutes(fastify) {
     }
   });
 
-  // ➕ Criar regra (falha se já existir mesma queue + flow)
+  // ➕ Criar regra (falha se já existir queue_name+flow_id)
   fastify.post("/", async (req, reply) => {
     const {
       queue_name,
@@ -125,11 +125,10 @@ async function queueRulesRoutes(fastify) {
 
       const data = { data: rows[0] };
 
-      // 🔎 AUDIT (sucesso)
       await fastify.audit(req, {
         action: "queue.rules.create",
         resourceType: "queue",
-        resourceId: resourceId,
+        resourceId,
         statusCode: 201,
         requestBody: { flow_id: flowId, enabled: !!enabled, conditions },
         responseBody: data,
@@ -143,7 +142,7 @@ async function queueRulesRoutes(fastify) {
         await fastify.audit(req, {
           action: "queue.rules.create.conflict",
           resourceType: "queue",
-          resourceId: resourceId,
+          resourceId,
           statusCode: 409,
           requestBody: { flow_id: flowId, enabled: !!enabled, conditions },
           responseBody: resp,
@@ -157,7 +156,7 @@ async function queueRulesRoutes(fastify) {
       await fastify.audit(req, {
         action: "queue.rules.create.error",
         resourceType: "queue",
-        resourceId: resourceId,
+        resourceId,
         statusCode: 500,
         requestBody: { flow_id: flowId, enabled: !!enabled, conditions },
         responseBody: resp,
@@ -167,7 +166,7 @@ async function queueRulesRoutes(fastify) {
     }
   });
 
-  // ✏️ Atualizar (upsert) regra da fila
+  // ✏️ Atualizar (upsert) regra da fila (queue_name + flow_id)
   // 200 ao atualizar; 201 se precisou criar
   fastify.put("/:queue_name", async (req, reply) => {
     const queueName = String(req.params?.queue_name || "").trim();
@@ -281,7 +280,7 @@ async function queueRulesRoutes(fastify) {
     }
   });
 
-  // 🗑️ Excluir regra da fila
+  // 🗑️ Excluir regra da fila (queue_name + flow_id)
   // 200 quando exclui; 204 quando não existe
   fastify.delete("/:queue_name", async (req, reply) => {
     const queueName = String(req.params?.queue_name || "").trim();
