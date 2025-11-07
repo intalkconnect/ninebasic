@@ -69,16 +69,19 @@ async function resolveSchemaFromReq(req) {
 }
 
 /* compacta para o formato do front (weekly/holidays) */
-async function loadConfig(client, queueName) {
+async function loadConfig(client, queueName, flowId = null) {
   const cfg = await client.query(
-    `SELECT queue_name, tz, enabled, pre_service_message, offhours_message, updated_at
-       FROM queue_hours WHERE queue_name = $1`,
-    [queueName]
+    `SELECT queue_name, flow_id, tz, enabled, pre_service_message, offhours_message, updated_at
+       FROM queue_hours
+      WHERE queue_name = $1
+        AND flow_id IS NOT DISTINCT FROM $2`,
+    [queueName, flowId]
   );
 
   if (cfg.rowCount === 0) {
     return {
       queue_name: queueName,
+      flow_id: flowId,
       tz: "America/Sao_Paulo",
       enabled: false,
       pre_service_message: "",
@@ -94,16 +97,18 @@ async function loadConfig(client, queueName) {
     `SELECT weekday, start_minute, end_minute
        FROM queue_hours_rules
       WHERE queue_name = $1
+        AND flow_id IS NOT DISTINCT FROM $2
       ORDER BY weekday, start_minute`,
-    [queueName]
+    [queueName, flowId]
   );
 
   const hols = await client.query(
     `SELECT holiday_date AS date, COALESCE(name,'') AS name
        FROM queue_holidays
       WHERE queue_name = $1
+        AND flow_id IS NOT DISTINCT FROM $2
       ORDER BY holiday_date`,
-    [queueName]
+    [queueName, flowId]
   );
 
   const weeklyMap = new Map();
@@ -122,6 +127,7 @@ async function loadConfig(client, queueName) {
 
   return {
     queue_name: row.queue_name,
+    flow_id: row.flow_id,
     tz: row.tz,
     enabled: row.enabled,
     pre_service_message: row.pre_service_message || "",
@@ -132,8 +138,8 @@ async function loadConfig(client, queueName) {
 }
 
 /* calcula status agora (ou numa data) e próxima abertura */
-async function testNow(client, queueName, tsOverride /* ISO opcional */) {
-  const cfg = await loadConfig(client, queueName);
+async function testNow(client, queueName, tsOverride /* ISO opcional */, flowId = null) {
+  const cfg = await loadConfig(client, queueName, flowId);
   if (!cfg.enabled) {
     return {
       offhours: true,
@@ -141,6 +147,7 @@ async function testNow(client, queueName, tsOverride /* ISO opcional */) {
       local_ts: null,
       local_tz: cfg.tz,
       next_open_local: null,
+      flow_id: flowId,
     };
   }
 
@@ -163,8 +170,11 @@ async function testNow(client, queueName, tsOverride /* ISO opcional */) {
   const localDate = q.rows[0].local_date;
 
   const fer = await client.query(
-    `SELECT 1 FROM queue_holidays WHERE queue_name=$1 AND holiday_date=$2::date`,
-    [queueName, localDate]
+    `SELECT 1 FROM queue_holidays
+      WHERE queue_name = $1
+        AND flow_id IS NOT DISTINCT FROM $2
+        AND holiday_date = $3::date`,
+    [queueName, flowId, localDate]
   );
   if (fer.rowCount > 0) {
     return {
@@ -177,17 +187,21 @@ async function testNow(client, queueName, tsOverride /* ISO opcional */) {
         queueName,
         cfg.tz,
         dow,
-        minutes
+        minutes,
+        flowId
       ),
+      flow_id: flowId,
     };
   }
 
   const dayRules = await client.query(
     `SELECT start_minute, end_minute
        FROM queue_hours_rules
-      WHERE queue_name=$1 AND weekday=$2
+      WHERE queue_name = $1
+        AND flow_id IS NOT DISTINCT FROM $2
+        AND weekday = $3
       ORDER BY start_minute`,
-    [queueName, dow]
+    [queueName, flowId, dow]
   );
 
   let openNow = false;
@@ -205,6 +219,7 @@ async function testNow(client, queueName, tsOverride /* ISO opcional */) {
       local_ts: localTs,
       local_tz: cfg.tz,
       next_open_local: null,
+      flow_id: flowId,
     };
   }
 
@@ -218,19 +233,24 @@ async function testNow(client, queueName, tsOverride /* ISO opcional */) {
       queueName,
       cfg.tz,
       dow,
-      minutes
+      minutes,
+      flowId
     ),
+    flow_id: flowId,
   };
 }
 
-async function findNextOpenLocal(client, queueName, tz, dow, minutes) {
+async function findNextOpenLocal(client, queueName, tz, dow, minutes, flowId = null) {
   const today = await client.query(
     `SELECT start_minute
        FROM queue_hours_rules
-      WHERE queue_name=$1 AND weekday=$2 AND start_minute > $3
+      WHERE queue_name = $1
+        AND flow_id IS NOT DISTINCT FROM $2
+        AND weekday = $3
+        AND start_minute > $4
       ORDER BY start_minute
       LIMIT 1`,
-    [queueName, dow, minutes]
+    [queueName, flowId, dow, minutes]
   );
   if (today.rowCount > 0) {
     const start = fromMinutes(today.rows[0].start_minute);
@@ -246,19 +266,22 @@ async function findNextOpenLocal(client, queueName, tz, dow, minutes) {
     const hol = await client.query(
       `SELECT 1
          FROM queue_holidays
-        WHERE queue_name=$1
-          AND holiday_date = ( (now() AT TIME ZONE $2)::date + $3::int )`,
-      [queueName, tz, i]
+        WHERE queue_name = $1
+          AND flow_id IS NOT DISTINCT FROM $2
+          AND holiday_date = ( (now() AT TIME ZONE $3)::date + $4::int )`,
+      [queueName, flowId, tz, i]
     );
     if (hol.rowCount > 0) continue;
 
     const r = await client.query(
       `SELECT start_minute
          FROM queue_hours_rules
-        WHERE queue_name=$1 AND weekday=$2
+        WHERE queue_name = $1
+          AND flow_id IS NOT DISTINCT FROM $2
+          AND weekday = $3
         ORDER BY start_minute
         LIMIT 1`,
-      [queueName, nextDow]
+      [queueName, flowId, nextDow]
     );
     if (r.rowCount > 0) {
       const start = fromMinutes(r.rows[0].start_minute);
@@ -279,11 +302,12 @@ async function queueHoursRoutes(fastify, options) {
   // GET /queues/:queue/hours
   fastify.get("/:queue/hours", async (req, reply) => {
     const queueName = req.params.queue;
+    const flowId = req.query?.flow_id ?? null;
+
     try {
       const schema = await resolveSchemaFromReq(req);
-      const data = await withTenant(
-        schema,
-        async (client) => await loadConfig(client, queueName)
+      const data = await withTenant(schema, async (client) =>
+        loadConfig(client, queueName, flowId)
       );
       return reply.send(data);
     } catch (error) {
@@ -299,6 +323,8 @@ async function queueHoursRoutes(fastify, options) {
   // POST /queues/:queue/hours  (upsert)
   fastify.post("/:queue/hours", async (req, reply) => {
     const queueName = req.params.queue;
+    const flowId = req.query?.flow_id ?? req.body?.flow_id ?? null;
+
     const {
       tz = "America/Sao_Paulo",
       enabled = true,
@@ -310,6 +336,7 @@ async function queueHoursRoutes(fastify, options) {
 
     let beforeCfg = null;
     let afterCfg = null;
+    const resourceId = flowId ? `${queueName}@${flowId}` : queueName;
 
     try {
       const schema = await resolveSchemaFromReq(req);
@@ -318,7 +345,7 @@ async function queueHoursRoutes(fastify, options) {
       // snapshot ANTES
       beforeCfg = await withTenant(schema, async (client) => {
         try {
-          return await loadConfig(client, queueName);
+          return await loadConfig(client, queueName, flowId);
         } catch {
           return null;
         }
@@ -327,39 +354,41 @@ async function queueHoursRoutes(fastify, options) {
       // gravação + snapshot DEPOIS
       const data = await withTenant(schema, async (client) => {
         await client.query(
-          `INSERT INTO queue_hours (queue_name, tz, enabled, pre_service_message, offhours_message)
-         VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (queue_name) DO UPDATE
-           SET tz=$2, enabled=$3, pre_service_message=$4, offhours_message=$5, updated_at=now()`,
-          [queueName, tz, enabled, pre_service_message, offhours_message]
+          `INSERT INTO queue_hours (queue_name, flow_id, tz, enabled, pre_service_message, offhours_message)
+           VALUES ($1,$2,$3,$4,$5,$6)
+           ON CONFLICT (queue_name, flow_id) DO UPDATE
+             SET tz=$3, enabled=$4, pre_service_message=$5, offhours_message=$6, updated_at=now()`,
+          [queueName, flowId, tz, enabled, pre_service_message, offhours_message]
         );
 
         await client.query(
-          `DELETE FROM queue_hours_rules WHERE queue_name=$1`,
-          [queueName]
+          `DELETE FROM queue_hours_rules WHERE queue_name=$1 AND flow_id IS NOT DISTINCT FROM $2`,
+          [queueName, flowId]
         );
         for (const r of flatRules) {
           await client.query(
-            `INSERT INTO queue_hours_rules (queue_name, weekday, start_minute, end_minute)
-           VALUES ($1,$2,$3,$4)`,
-            [queueName, r.weekday, r.start_minute, r.end_minute]
+            `INSERT INTO queue_hours_rules (queue_name, flow_id, weekday, start_minute, end_minute)
+             VALUES ($1,$2,$3,$4,$5)`,
+            [queueName, flowId, r.weekday, r.start_minute, r.end_minute]
           );
         }
 
-        await client.query(`DELETE FROM queue_holidays WHERE queue_name=$1`, [
-          queueName,
-        ]);
+        await client.query(
+          `DELETE FROM queue_holidays WHERE queue_name=$1 AND flow_id IS NOT DISTINCT FROM $2`,
+          [queueName, flowId]
+        );
         for (const h of holidays || []) {
           if (!h?.date) continue;
           await client.query(
-            `INSERT INTO queue_holidays (queue_name, holiday_date, name)
-           VALUES ($1,$2,$3)
-           ON CONFLICT (queue_name, holiday_date) DO UPDATE SET name=EXCLUDED.name`,
-            [queueName, h.date, h.name || ""]
+            `INSERT INTO queue_holidays (queue_name, flow_id, holiday_date, name)
+             VALUES ($1,$2,$3,$4)
+             ON CONFLICT (queue_name, flow_id, holiday_date)
+             DO UPDATE SET name=EXCLUDED.name`,
+            [queueName, flowId, h.date, h.name || ""]
           );
         }
 
-        return await loadConfig(client, queueName);
+        return await loadConfig(client, queueName, flowId);
       });
 
       afterCfg = data;
@@ -368,9 +397,10 @@ async function queueHoursRoutes(fastify, options) {
       await fastify.audit(req, {
         action: "queue.hours.upsert",
         resourceType: "queue",
-        resourceId: queueName,
+        resourceId,
         statusCode: 201,
         requestBody: {
+          flow_id: flowId,
           tz,
           enabled,
           pre_service_message,
@@ -397,9 +427,10 @@ async function queueHoursRoutes(fastify, options) {
       await fastify.audit(req, {
         action: "queue.hours.upsert.error",
         resourceType: "queue",
-        resourceId: queueName,
+        resourceId,
         statusCode: 400,
         requestBody: {
+          flow_id: flowId,
           tz,
           enabled,
           pre_service_message,
@@ -419,6 +450,7 @@ async function queueHoursRoutes(fastify, options) {
   // PUT /queues/:queue/hours  (upsert — aceita weekly **ou** windows)
   fastify.put("/:queue/hours", async (req, reply) => {
     const queueName = req.params.queue;
+    const flowId = req.query?.flow_id ?? req.body?.flow_id ?? null;
 
     // aceita os dois formatos de nomes
     const tzInput = req.body?.timezone || req.body?.tz || "America/Sao_Paulo";
@@ -432,6 +464,7 @@ async function queueHoursRoutes(fastify, options) {
 
     let beforeCfg = null;
     let afterCfg = null;
+    const resourceId = flowId ? `${queueName}@${flowId}` : queueName;
 
     try {
       const schema = await resolveSchemaFromReq(req);
@@ -440,7 +473,7 @@ async function queueHoursRoutes(fastify, options) {
       // snapshot ANTES
       beforeCfg = await withTenant(schema, async (client) => {
         try {
-          return await loadConfig(client, queueName);
+          return await loadConfig(client, queueName, flowId);
         } catch {
           return null;
         }
@@ -449,39 +482,41 @@ async function queueHoursRoutes(fastify, options) {
       // gravação + snapshot DEPOIS
       const data = await withTenant(schema, async (client) => {
         await client.query(
-          `INSERT INTO queue_hours (queue_name, tz, enabled, pre_service_message, offhours_message)
-         VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (queue_name) DO UPDATE
-           SET tz=$2, enabled=$3, pre_service_message=$4, offhours_message=$5, updated_at=now()`,
-          [queueName, tzInput, enabled, preMsg, offMsg]
+          `INSERT INTO queue_hours (queue_name, flow_id, tz, enabled, pre_service_message, offhours_message)
+           VALUES ($1,$2,$3,$4,$5,$6)
+           ON CONFLICT (queue_name, flow_id) DO UPDATE
+             SET tz=$3, enabled=$4, pre_service_message=$5, offhours_message=$6, updated_at=now()`,
+          [queueName, flowId, tzInput, enabled, preMsg, offMsg]
         );
 
         await client.query(
-          `DELETE FROM queue_hours_rules WHERE queue_name=$1`,
-          [queueName]
+          `DELETE FROM queue_hours_rules WHERE queue_name=$1 AND flow_id IS NOT DISTINCT FROM $2`,
+          [queueName, flowId]
         );
         for (const r of flatRules) {
           await client.query(
-            `INSERT INTO queue_hours_rules (queue_name, weekday, start_minute, end_minute)
-           VALUES ($1,$2,$3,$4)`,
-            [queueName, r.weekday, r.start_minute, r.end_minute]
+            `INSERT INTO queue_hours_rules (queue_name, flow_id, weekday, start_minute, end_minute)
+             VALUES ($1,$2,$3,$4,$5)`,
+            [queueName, flowId, r.weekday, r.start_minute, r.end_minute]
           );
         }
 
-        await client.query(`DELETE FROM queue_holidays WHERE queue_name=$1`, [
-          queueName,
-        ]);
+        await client.query(
+          `DELETE FROM queue_holidays WHERE queue_name=$1 AND flow_id IS NOT DISTINCT FROM $2`,
+          [queueName, flowId]
+        );
         for (const h of holidays) {
           if (!h?.date) continue;
           await client.query(
-            `INSERT INTO queue_holidays (queue_name, holiday_date, name)
-           VALUES ($1,$2,$3)
-           ON CONFLICT (queue_name, holiday_date) DO UPDATE SET name=EXCLUDED.name`,
-            [queueName, h.date, h.name || ""]
+            `INSERT INTO queue_holidays (queue_name, flow_id, holiday_date, name)
+             VALUES ($1,$2,$3,$4)
+             ON CONFLICT (queue_name, flow_id, holiday_date)
+             DO UPDATE SET name=EXCLUDED.name`,
+            [queueName, flowId, h.date, h.name || ""]
           );
         }
 
-        return await loadConfig(client, queueName);
+        return await loadConfig(client, queueName, flowId);
       });
 
       afterCfg = data;
@@ -490,9 +525,10 @@ async function queueHoursRoutes(fastify, options) {
       await fastify.audit(req, {
         action: "queue.hours.update",
         resourceType: "queue",
-        resourceId: queueName,
+        resourceId,
         statusCode: 200,
         requestBody: {
+          flow_id: flowId,
           tz: tzInput,
           enabled,
           pre_service_message: preMsg,
@@ -519,9 +555,10 @@ async function queueHoursRoutes(fastify, options) {
       await fastify.audit(req, {
         action: "queue.hours.update.error",
         resourceType: "queue",
-        resourceId: queueName,
+        resourceId,
         statusCode: 400,
         requestBody: {
+          flow_id: flowId,
           tz: tzInput,
           enabled,
           pre_service_message: preMsg,
@@ -542,21 +579,22 @@ async function queueHoursRoutes(fastify, options) {
   fastify.post("/:queue/hours/test", async (req, reply) => {
     const queueName = req.params.queue;
     const ts = req.body?.ts ?? req.query?.ts ?? null;
+    const flowId = req.query?.flow_id ?? req.body?.flow_id ?? null;
+    const resourceId = flowId ? `${queueName}@${flowId}` : queueName;
 
     try {
       const schema = await resolveSchemaFromReq(req);
-      const out = await withTenant(
-        schema,
-        async (client) => await testNow(client, queueName, ts)
+      const out = await withTenant(schema, async (client) =>
+        testNow(client, queueName, ts, flowId)
       );
 
       // 🔎 AUDIT (sucesso)
       await fastify.audit(req, {
         action: "queue.hours.test",
         resourceType: "queue",
-        resourceId: queueName,
+        resourceId,
         statusCode: 200,
-        requestBody: { ts },
+        requestBody: { ts, flow_id: flowId },
         responseBody: out,
       });
 
@@ -574,9 +612,9 @@ async function queueHoursRoutes(fastify, options) {
       await fastify.audit(req, {
         action: "queue.hours.test.error",
         resourceType: "queue",
-        resourceId: queueName,
+        resourceId,
         statusCode: 500,
-        requestBody: { ts },
+        requestBody: { ts, flow_id: flowId },
         responseBody: resp,
       });
 
