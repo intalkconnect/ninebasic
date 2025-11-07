@@ -18,7 +18,7 @@ async function queueRulesRoutes(fastify) {
           error: 'cada condition precisa de "type" e "variable"',
         };
       }
-      // Operadores suportados (use os que seu executor entende)
+      // Operadores suportados
       const okTypes = new Set([
         "equals",
         "not_equals",
@@ -44,35 +44,49 @@ async function queueRulesRoutes(fastify) {
 
   // ---------------- CRUD ----------------
 
-  // 📄 Listar todas as regras (200 sempre; pode retornar lista vazia)
+  // 📄 Listar todas as regras (pode filtrar por flow_id)
   fastify.get("/", async (req, reply) => {
+    const flowId = req.query?.flow_id ?? null;
     try {
-      const { rows } = await req.db.query(
-        `SELECT queue_name, enabled, conditions, created_at, updated_at
-           FROM queue_rules
-          ORDER BY queue_name ASC`
-      );
+      let sql = `
+        SELECT queue_name, flow_id, enabled, conditions, created_at, updated_at
+          FROM queue_rules
+      `;
+      const params = [];
+      if (flowId !== null && flowId !== undefined) {
+        sql += ` WHERE flow_id IS NOT DISTINCT FROM $1`;
+        params.push(flowId);
+      }
+      sql += ` ORDER BY queue_name ASC`;
+
+      const { rows } = await req.db.query(sql, params);
       return reply.code(200).send({ data: rows });
     } catch {
-      // sem logs no console
       return reply.code(500).send({ error: "Erro ao listar regras" });
     }
   });
 
-  // 🔎 Obter uma regra por nome de fila
-  // 200 quando encontrada; 204 (sem corpo) quando não encontrada
+  // 🔎 Obter uma regra por nome de fila (+ flow_id opcional)
   fastify.get("/:queue_name", async (req, reply) => {
     const queueName = String(req.params?.queue_name || "").trim();
+    const flowId = req.query?.flow_id ?? null;
     if (!queueName)
       return reply.code(400).send({ error: "queue_name é obrigatório" });
 
     try {
+      const params = [queueName];
+      let where = `queue_name = $1`;
+      if (flowId !== null && flowId !== undefined) {
+        params.push(flowId);
+        where += ` AND flow_id IS NOT DISTINCT FROM $${params.length}`;
+      }
+
       const { rows } = await req.db.query(
-        `SELECT queue_name, enabled, conditions, created_at, updated_at
+        `SELECT queue_name, flow_id, enabled, conditions, created_at, updated_at
            FROM queue_rules
-          WHERE queue_name = $1
+          WHERE ${where}
           LIMIT 1`,
-        [queueName]
+        params
       );
       const row = rows[0];
       if (!row) return reply.code(204).send();
@@ -82,22 +96,31 @@ async function queueRulesRoutes(fastify) {
     }
   });
 
-  // ➕ Criar regra (falha se já existir)
+  // ➕ Criar regra (falha se já existir mesma queue + flow)
   fastify.post("/", async (req, reply) => {
-    const { queue_name, enabled = true, conditions = [] } = req.body || {};
+    const {
+      queue_name,
+      flow_id = null,
+      enabled = true,
+      conditions = [],
+    } = req.body || {};
     const queueName = String(queue_name || "").trim();
+    const flowId = flow_id ?? null;
+
     if (!queueName)
       return reply.code(400).send({ error: "queue_name é obrigatório" });
 
     const v = validateConditions(conditions);
     if (!v.ok) return reply.code(400).send({ error: v.error });
 
+    const resourceId = flowId ? `${queueName}@${flowId}` : queueName;
+
     try {
       const { rows } = await req.db.query(
-        `INSERT INTO queue_rules (queue_name, enabled, conditions)
-       VALUES ($1, $2, $3::jsonb)
-       RETURNING queue_name, enabled, conditions, created_at, updated_at`,
-        [queueName, !!enabled, JSON.stringify(conditions)]
+        `INSERT INTO queue_rules (queue_name, flow_id, enabled, conditions)
+         VALUES ($1, $2, $3, $4::jsonb)
+         RETURNING queue_name, flow_id, enabled, conditions, created_at, updated_at`,
+        [queueName, flowId, !!enabled, JSON.stringify(conditions)]
       );
 
       const data = { data: rows[0] };
@@ -106,25 +129,23 @@ async function queueRulesRoutes(fastify) {
       await fastify.audit(req, {
         action: "queue.rules.create",
         resourceType: "queue",
-        resourceId: queueName,
+        resourceId: resourceId,
         statusCode: 201,
-        requestBody: { enabled: !!enabled, conditions },
+        requestBody: { flow_id: flowId, enabled: !!enabled, conditions },
         responseBody: data,
       });
 
       return reply.code(201).send(data);
     } catch (err) {
-      // conflito (já existe)
       if (err?.code === "23505") {
-        const resp = { error: "Já existe regra para essa fila" };
+        const resp = { error: "Já existe regra para essa fila/flow" };
 
-        // 🔎 AUDIT (conflito)
         await fastify.audit(req, {
           action: "queue.rules.create.conflict",
           resourceType: "queue",
-          resourceId: queueName,
+          resourceId: resourceId,
           statusCode: 409,
-          requestBody: { enabled: !!enabled, conditions },
+          requestBody: { flow_id: flowId, enabled: !!enabled, conditions },
           responseBody: resp,
         });
 
@@ -133,13 +154,12 @@ async function queueRulesRoutes(fastify) {
 
       const resp = { error: "Erro ao criar regra" };
 
-      // 🔎 AUDIT (erro)
       await fastify.audit(req, {
         action: "queue.rules.create.error",
         resourceType: "queue",
-        resourceId: queueName,
+        resourceId: resourceId,
         statusCode: 500,
-        requestBody: { enabled: !!enabled, conditions },
+        requestBody: { flow_id: flowId, enabled: !!enabled, conditions },
         responseBody: resp,
       });
 
@@ -151,6 +171,8 @@ async function queueRulesRoutes(fastify) {
   // 200 ao atualizar; 201 se precisou criar
   fastify.put("/:queue_name", async (req, reply) => {
     const queueName = String(req.params?.queue_name || "").trim();
+    const flowId = req.query?.flow_id ?? req.body?.flow_id ?? null;
+
     if (!queueName)
       return reply.code(400).send({ error: "queue_name é obrigatório" });
 
@@ -160,10 +182,12 @@ async function queueRulesRoutes(fastify) {
       if (!v.ok) return reply.code(400).send({ error: v.error });
     }
 
+    const resourceId = flowId ? `${queueName}@${flowId}` : queueName;
+
     // SETs dinâmicos
     const sets = [];
-    const vals = [queueName];
-    let i = 1;
+    const vals = [queueName, flowId];
+    let i = vals.length;
 
     if (typeof enabled !== "undefined") {
       sets.push(`enabled = $${++i}`);
@@ -181,29 +205,32 @@ async function queueRulesRoutes(fastify) {
     try {
       // snapshot "antes" (se existir)
       const prevRes = await req.db.query(
-        `SELECT queue_name, enabled, conditions, created_at, updated_at
-         FROM queue_rules WHERE queue_name = $1 LIMIT 1`,
-        [queueName]
+        `SELECT queue_name, flow_id, enabled, conditions, created_at, updated_at
+           FROM queue_rules
+          WHERE queue_name = $1
+            AND flow_id IS NOT DISTINCT FROM $2
+          LIMIT 1`,
+        [queueName, flowId]
       );
       const beforeData = prevRes.rows[0] || null;
 
       // tenta atualizar
       const sqlUpd = `
-      UPDATE queue_rules
-         SET ${sets.join(", ")}, updated_at = now()
-       WHERE queue_name = $1
-       RETURNING queue_name, enabled, conditions, created_at, updated_at
-    `;
+        UPDATE queue_rules
+           SET ${sets.join(", ")}, updated_at = now()
+         WHERE queue_name = $1
+           AND flow_id IS NOT DISTINCT FROM $2
+         RETURNING queue_name, flow_id, enabled, conditions, created_at, updated_at
+      `;
       const rUpd = await req.db.query(sqlUpd, vals);
 
       if (rUpd.rows.length) {
         const data = { data: rUpd.rows[0] };
 
-        // 🔎 AUDIT: update
         await fastify.audit(req, {
           action: "queue.rules.upsert.update",
           resourceType: "queue",
-          resourceId: queueName,
+          resourceId,
           statusCode: 200,
           requestBody: req.body,
           beforeData,
@@ -219,18 +246,17 @@ async function queueRulesRoutes(fastify) {
       const condsFinal = typeof conditions === "undefined" ? [] : conditions;
 
       const { rows } = await req.db.query(
-        `INSERT INTO queue_rules (queue_name, enabled, conditions)
-       VALUES ($1, $2, $3::jsonb)
-       RETURNING queue_name, enabled, conditions, created_at, updated_at`,
-        [queueName, enabledFinal, JSON.stringify(condsFinal)]
+        `INSERT INTO queue_rules (queue_name, flow_id, enabled, conditions)
+         VALUES ($1, $2, $3, $4::jsonb)
+         RETURNING queue_name, flow_id, enabled, conditions, created_at, updated_at`,
+        [queueName, flowId, enabledFinal, JSON.stringify(condsFinal)]
       );
       const data = { data: rows[0] };
 
-      // 🔎 AUDIT: create
       await fastify.audit(req, {
         action: "queue.rules.upsert.create",
         resourceType: "queue",
-        resourceId: queueName,
+        resourceId,
         statusCode: 201,
         requestBody: req.body,
         afterData: data.data,
@@ -241,11 +267,10 @@ async function queueRulesRoutes(fastify) {
     } catch (err) {
       const resp = { error: "Erro ao salvar regra" };
 
-      // 🔎 AUDIT: erro
       await fastify.audit(req, {
         action: "queue.rules.upsert.error",
         resourceType: "queue",
-        resourceId: queueName,
+        resourceId,
         statusCode: 500,
         requestBody: req.body,
         responseBody: resp,
@@ -260,47 +285,56 @@ async function queueRulesRoutes(fastify) {
   // 200 quando exclui; 204 quando não existe
   fastify.delete("/:queue_name", async (req, reply) => {
     const queueName = String(req.params?.queue_name || "").trim();
+    const flowId = req.query?.flow_id ?? null;
+    const resourceId = flowId ? `${queueName}@${flowId}` : queueName;
+
     if (!queueName)
       return reply.code(400).send({ error: "queue_name é obrigatório" });
 
     try {
       // snapshot antes (se existir)
       const prev = await req.db.query(
-        `SELECT queue_name, enabled, conditions, created_at, updated_at
-         FROM queue_rules WHERE queue_name = $1 LIMIT 1`,
-        [queueName]
+        `SELECT queue_name, flow_id, enabled, conditions, created_at, updated_at
+           FROM queue_rules
+          WHERE queue_name = $1
+            AND flow_id IS NOT DISTINCT FROM $2
+          LIMIT 1`,
+        [queueName, flowId]
       );
       const beforeData = prev.rows[0] || null;
 
       const { rows } = await req.db.query(
         `DELETE FROM queue_rules
-        WHERE queue_name = $1
-        RETURNING queue_name`,
-        [queueName]
+          WHERE queue_name = $1
+            AND flow_id IS NOT DISTINCT FROM $2
+        RETURNING queue_name, flow_id`,
+        [queueName, flowId]
       );
 
       if (!rows.length) {
-        // 🔎 AUDIT: not found (nada para excluir)
         await fastify.audit(req, {
           action: "queue.rules.delete.notfound",
           resourceType: "queue",
-          resourceId: queueName,
+          resourceId,
           statusCode: 204,
-          beforeData, // provavelmente null
+          beforeData,
           responseBody: null,
         });
         return reply.code(204).send();
       }
 
-      const body = { ok: true, queue_name: rows[0].queue_name };
+      const body = {
+        ok: true,
+        queue_name: rows[0].queue_name,
+        flow_id: rows[0].flow_id,
+      };
 
-      // 🔎 AUDIT: delete OK
       await fastify.audit(req, {
         action: "queue.rules.delete",
         resourceType: "queue",
-        resourceId: queueName,
+        resourceId,
         statusCode: 200,
-        beforeData, // como era antes de remover
+        beforeData,
         responseBody: body,
       });
 
@@ -308,11 +342,10 @@ async function queueRulesRoutes(fastify) {
     } catch (err) {
       const body = { error: "Erro ao excluir regra" };
 
-      // 🔎 AUDIT: erro
       await fastify.audit(req, {
         action: "queue.rules.delete.error",
         resourceType: "queue",
-        resourceId: queueName,
+        resourceId,
         statusCode: 500,
         responseBody: body,
         extra: { error: String(err?.message || err) },
