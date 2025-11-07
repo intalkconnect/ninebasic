@@ -150,15 +150,30 @@ async function queuesRoutes(fastify, options) {
   });
 
   // 📥 Listar filas
-  fastify.get("/", async (req, reply) => {
-    try {
-      const { rows } = await req.db.query("SELECT * FROM filas ORDER BY nome");
-      return reply.send(rows);
-    } catch (err) {
-      fastify.log.error(err);
-      return reply.code(500).send({ error: "Erro ao listar filas" });
+fastify.get("/", async (req, reply) => {
+  const flowId = req.query?.flow_id ?? null;
+
+  try {
+    let sql = "SELECT * FROM filas";
+    const params = [];
+
+    if (flowId !== null && flowId !== undefined) {
+      params.push(flowId);
+      // só filas vinculadas a esse flow
+      sql += " WHERE flow_id IS NOT DISTINCT FROM $1";
+      // se não existir nenhuma com esse flow_id → retorna []
     }
-  });
+
+    sql += " ORDER BY nome";
+
+    const { rows } = await req.db.query(sql, params);
+    return reply.send(rows);
+  } catch (err) {
+    fastify.log.error(err, "GET /queues");
+    return reply.code(500).send({ error: "Erro ao listar filas" });
+  }
+});
+
 
   // 🔄 Definir permissão de transferência
   fastify.post("/queues-permission", async (req, reply) => {
