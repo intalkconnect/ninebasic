@@ -44,39 +44,45 @@ async function queuesRoutes(fastify, options) {
 
   // ➕ Criar fila
   fastify.post("/", async (req, reply) => {
-    const { nome, descricao = null, color = null } = req.body || {};
-    if (!nome || !String(nome).trim()) {
-      return reply.code(400).send({ error: "Nome da fila é obrigatório" });
-    }
+  const {
+    nome,
+    descricao = null,
+    color = null,
+    flow_id = null,
+  } = req.body || {};
 
-    const finalColor = normalizeHexColor(color) || randomPastelHex();
-    const nomeTrim = String(nome).trim();
+  if (!nome || !String(nome).trim()) {
+    return reply.code(400).send({ error: "Nome da fila é obrigatório" });
+  }
 
-    try {
-      const { rows } = await req.db.query(
-        `
-      INSERT INTO filas (nome, descricao, ativa, color)
-      VALUES ($1, $2, TRUE, $3)
+  const finalColor = normalizeHexColor(color) || randomPastelHex();
+  const nomeTrim = String(nome).trim();
+  const flowId = flow_id ?? null;
+
+  try {
+    const { rows } = await req.db.query(
+      `
+      INSERT INTO filas (nome, descricao, ativa, color, flow_id)
+      VALUES ($1, $2, TRUE, $3, $4)
       RETURNING *;
       `,
-        [nomeTrim, descricao ?? null, finalColor]
-      );
+      [nomeTrim, descricao ?? null, finalColor, flowId]
+    );
 
-      const body = rows[0];
+    const body = rows[0];
 
-      // 🔎 AUDIT: created
-      await fastify.audit(req, {
-        action: "queue.create",
-        resourceType: "queue",
-        resourceId: body?.id || nomeTrim,
-        statusCode: 201,
-        requestBody: req.body,
-        afterData: body,
-        responseBody: body,
-      });
+    await fastify.audit(req, {
+      action: "queue.create",
+      resourceType: "queue",
+      resourceId: body?.id || nomeTrim,
+      statusCode: 201,
+      requestBody: req.body,
+      afterData: body,
+      responseBody: body,
+    });
 
-      return reply.code(201).send(body);
-    } catch (err) {
+    return reply.code(201).send(body);
+  } catch (err) {
       fastify.log.error(err, "Erro ao criar fila");
 
       if (err?.code === "23505") {
@@ -247,9 +253,13 @@ async function queuesRoutes(fastify, options) {
 
     try {
       const { rows } = await req.db.query(
-        `SELECT id, nome, descricao, ativa, color FROM filas WHERE ${whereSql} LIMIT 1`,
+        `SELECT id, nome, descricao, ativa, color, flow_id
+           FROM filas
+          WHERE ${whereSql}
+          LIMIT 1`,
         [val]
       );
+
       const row = rows?.[0];
       if (!row) return reply.code(404).send({ error: "Fila não encontrada" });
       // front aceita {data} ou o objeto direto — aqui devolvemos { data }
@@ -322,11 +332,12 @@ async function queuesRoutes(fastify, options) {
       }
 
       const sql = `
-      UPDATE filas
-         SET ${sets.join(", ")}
-       WHERE id = $1
-       RETURNING id, nome, descricao, ativa, color
-    `;
+        UPDATE filas
+           SET ${sets.join(", ")}
+         WHERE id = $1
+         RETURNING id, nome, descricao, ativa, color, flow_id
+      `;
+
       const { rows } = await req.db.query(sql, [before.id, ...vals]);
       const after = rows[0];
 
