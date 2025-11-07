@@ -174,13 +174,14 @@ async function ticketTagsRoutes(fastify) {
         return reply.code(404).send(body404);
       }
 
-      const sql = `
+        const sql = `
         INSERT INTO queue_ticket_tag_catalog (fila_id, tag, label, color, active)
         VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (fila_id, tag) DO UPDATE
-          SET label = EXCLUDED.label,
-              color = EXCLUDED.color,
-              active = EXCLUDED.active
+        ON CONFLICT (fila_id, tag)
+        DO UPDATE SET
+          label = EXCLUDED.label,
+          color = EXCLUDED.color,
+          active = EXCLUDED.active
         RETURNING fila_id, tag, label, color, active, created_at
       `;
       const { rows } = await req.db.query(sql, [
