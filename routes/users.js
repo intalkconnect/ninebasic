@@ -130,7 +130,6 @@ function buildUpsert(cols, data) {
   const values = [];
   const sets = [];
 
-  // a ordem dos placeholders é a mesma dos insertCols
   if (cols.nameCol && data.name != null) {
     insertCols.push(cols.nameCol);
     values.push(data.name);
@@ -175,9 +174,40 @@ function buildUpsert(cols, data) {
   return { text, values };
 }
 
+// Converte filas recebidas (ids ou nomes) para **nomes de filas**
+async function normalizeFilasToNames(req, filas, flowId) {
+  if (!Array.isArray(filas) || filas.length === 0) return [];
+
+  const arr = filas
+    .map((v) => String(v).trim())
+    .filter((v) => v.length > 0);
+
+  if (!arr.length) return [];
+
+  const numericIds = arr.filter((v) => /^\d+$/.test(v));
+  if (numericIds.length === 0) {
+    // já são nomes
+    return arr;
+  }
+
+  const idsInt = numericIds.map((v) => parseInt(v, 10));
+  let sql = `SELECT id, nome FROM filas WHERE id = ANY($1::int4[])`;
+  const params = [idsInt];
+
+  if (flowId) {
+    sql += ` AND (flow_id = $2 OR flow_id IS NULL)`;
+    params.push(flowId);
+  }
+
+  const { rows } = await req.db.query(sql, params);
+  const byId = new Map(rows.map((r) => [String(r.id), r.nome]));
+
+  return arr.map((v) => byId.get(v) || v);
+}
+
 async function usersRoutes(fastify, _options) {
   // ========================================================================
-  // GET /users  → lista (opcionalmente filtrado por flow_id)
+  // GET /users  → lista (opcionalmente filtrado por flow_id)  [ORIGINAL]
   // ========================================================================
   fastify.get("/", async (req, reply) => {
     const flowId = req.query?.flow_id || null;
@@ -205,6 +235,92 @@ async function usersRoutes(fastify, _options) {
     } catch (err) {
       fastify.log.error(err);
       return reply.code(500).send({ error: "Erro ao listar atendentes" });
+    }
+  });
+
+  // ========================================================================
+  // NOVOS ENDPOINTS (não mexem no GET /users original)
+  // ========================================================================
+
+  // GET /users/agents → apenas ATENDENTES (opcional flow_id)
+  fastify.get("/agents", async (req, reply) => {
+    const flowId = req.query?.flow_id || null;
+
+    try {
+      const cols = await detectUserColumns(req);
+      if (!cols.perfilCol) {
+        return reply
+          .code(500)
+          .send({ error: 'Tabela users não possui coluna "perfil"' });
+      }
+
+      let sql = buildSelect(cols);
+      const params = [];
+      const conditions = [`LOWER(${cols.perfilCol}) = 'atendente'`];
+
+      if (flowId && cols.flowIdCol) {
+        conditions.push(`${cols.flowIdCol} = $1`);
+        params.push(flowId);
+      }
+
+      if (conditions.length) {
+        sql += " WHERE " + conditions.join(" AND ");
+      }
+
+      const order =
+        cols.nameCol && cols.lastCol
+          ? ` ORDER BY ${cols.nameCol}, ${cols.lastCol}`
+          : "";
+      sql += order;
+
+      const { rows } = await req.db.query(sql, params);
+      return reply.send(rows);
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.code(500).send({ error: "Erro ao listar atendentes" });
+    }
+  });
+
+  // GET /users/managers → apenas ADMIN + SUPERVISOR (opcional flow_id)
+  fastify.get("/managers", async (req, reply) => {
+    const flowId = req.query?.flow_id || null;
+
+    try {
+      const cols = await detectUserColumns(req);
+      if (!cols.perfilCol) {
+        return reply
+          .code(500)
+          .send({ error: 'Tabela users não possui coluna "perfil"' });
+      }
+
+      let sql = buildSelect(cols);
+      const params = [];
+      const conditions = [
+        `LOWER(${cols.perfilCol}) IN ('admin','supervisor')`,
+      ];
+
+      if (flowId && cols.flowIdCol) {
+        conditions.push(`${cols.flowIdCol} = $1`);
+        params.push(flowId);
+      }
+
+      if (conditions.length) {
+        sql += " WHERE " + conditions.join(" AND ");
+      }
+
+      const order =
+        cols.nameCol && cols.lastCol
+          ? ` ORDER BY ${cols.nameCol}, ${cols.lastCol}`
+          : "";
+      sql += order;
+
+      const { rows } = await req.db.query(sql, params);
+      return reply.send(rows);
+    } catch (err) {
+      fastify.log.error(err);
+      return reply
+        .code(500)
+        .send({ error: "Erro ao listar admins/supervisores" });
     }
   });
 
@@ -284,7 +400,7 @@ async function usersRoutes(fastify, _options) {
   });
 
   // ========================================================================
-  // POST /users  → criar (tenant + public + invite) com flow_id
+  // POST /users  → criar (tenant + public + invite) com flow_id, filas=nome
   // ========================================================================
   fastify.post("/", async (req, reply) => {
     const { name, lastname, email, perfil, filas = [], flow_id } =
@@ -310,7 +426,7 @@ async function usersRoutes(fastify, _options) {
     }
 
     const lowerEmail = String(email).toLowerCase();
-    const filasToSave = Array.isArray(filas) ? filas : [];
+    const filasInput = Array.isArray(filas) ? filas : [];
     const flowId = flow_id || null;
 
     try {
@@ -366,6 +482,11 @@ async function usersRoutes(fastify, _options) {
         return reply.code(500).send(body500);
       }
 
+      // 🔁 converte filas (ids) -> nomes antes de salvar
+      const filasToSave = cols.filasCol
+        ? await normalizeFilasToNames(req, filasInput, flowId)
+        : [];
+
       const up = buildUpsert(cols, {
         name: name ?? null,
         lastname: lastname ?? null,
@@ -416,7 +537,6 @@ async function usersRoutes(fastify, _options) {
         );
       }
 
-      // ✅ AUDIT SUCESSO
       await fastify.audit(req, {
         action: "user.create",
         resourceType: "user",
@@ -464,7 +584,7 @@ async function usersRoutes(fastify, _options) {
   });
 
   // ========================================================================
-  // PUT /users/:id  → atualizar (incluindo flow_id opcional)
+  // PUT /users/:id  → atualizar (incluindo flow_id, filas=nome)
   // ========================================================================
   fastify.put("/:id", async (req, reply) => {
     const { id } = req.params;
@@ -553,10 +673,18 @@ async function usersRoutes(fastify, _options) {
         sets.push(`${cols.perfilCol}=$${i++}`);
         values.push(perfil);
       }
+
+      let filasNormalized = null;
       if (cols.filasCol && Array.isArray(filas)) {
+        filasNormalized = await normalizeFilasToNames(
+          req,
+          filas,
+          flow_id || null
+        );
         sets.push(`${cols.filasCol}=$${i++}`);
-        values.push(filas);
+        values.push(filasNormalized);
       }
+
       if (cols.flowIdCol && flow_id !== undefined) {
         sets.push(`${cols.flowIdCol}=$${i++}`);
         values.push(flow_id);
@@ -621,7 +749,7 @@ async function usersRoutes(fastify, _options) {
         ...(lastname != null ? { lastname } : {}),
         ...(email != null ? { email: String(email).toLowerCase() } : {}),
         ...(perfil != null ? { perfil } : {}),
-        ...(Array.isArray(filas) ? { filas } : {}),
+        ...(filasNormalized ? { filas: filasNormalized } : {}),
         ...(flow_id !== undefined ? { flow_id } : {}),
       };
 
@@ -672,7 +800,6 @@ async function usersRoutes(fastify, _options) {
         return reply.code(500).send(body500);
       }
 
-      // 1) snapshot antes (email, filas, flow_id)
       const selFields = [
         cols.emailCol ? `${cols.emailCol} AS email` : `'__noemail__' AS email`,
       ];
@@ -722,7 +849,6 @@ async function usersRoutes(fastify, _options) {
         return reply.code(409).send(body409);
       }
 
-      // 2) exclui no tenant
       let whereDel = `${cols.idCol} = $1`;
       const paramsDel = [id];
       if (flowId && cols.flowIdCol) {
@@ -747,7 +873,6 @@ async function usersRoutes(fastify, _options) {
         return reply.code(404).send(body404);
       }
 
-      // 3) tenta remover no AUTH (public.users)
       let external = { attempted: false, ok: false, message: null };
       try {
         const companySlug = req.tenant?.subdomain;
@@ -769,7 +894,6 @@ async function usersRoutes(fastify, _options) {
           { err: external.message },
           "❌ Falha ao remover em AUTH /api/users (public.users)"
         );
-        // não bloqueia a exclusão local
       }
 
       const body200 = { success: true };
