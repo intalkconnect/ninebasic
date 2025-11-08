@@ -3,10 +3,8 @@ import axios from "axios";
 import { pool } from "../services/db.js"; // pool global (public)
 
 // ===== Config da API externa =====
-// Token opcional para ambas as chamadas
 const AUTH_API_TOKEN = process.env.AUTH_API_TOKEN || "";
 
-// Delete externo (novo): usa o serviço auth que você expõe em /api/users
 const AUTH_API_BASE = (
   process.env.AUTH_API_BASE || "https://srv-auth.dkdevs.com.br"
 ).replace(/\/+$/, "");
@@ -54,7 +52,7 @@ async function triggerExternalDelete({ email, companySlug }, log) {
     headers,
     timeout: 10_000,
     validateStatus: () => true,
-    data: payload, // body no DELETE
+    data: payload,
   });
 
   log?.info({ status, data }, "🗑️ AUTH DELETE respondeu");
@@ -98,6 +96,7 @@ async function detectUserColumns(req) {
 
   const statusCol = cols.has("status") ? "status" : null;
   const idCol = cols.has("id") ? "id" : null;
+  const flowIdCol = cols.has("flow_id") ? "flow_id" : null;
 
   return {
     idCol,
@@ -107,6 +106,7 @@ async function detectUserColumns(req) {
     filasCol,
     perfilCol,
     statusCol,
+    flowIdCol,
     all: cols,
   };
 }
@@ -120,6 +120,7 @@ function buildSelect(cols) {
   if (cols.statusCol) fields.push(`${cols.statusCol} as status`);
   if (cols.filasCol) fields.push(`${cols.filasCol} as filas`);
   if (cols.perfilCol) fields.push(`${cols.perfilCol} as perfil`);
+  if (cols.flowIdCol) fields.push(`${cols.flowIdCol} as flow_id`);
   if (!fields.length) fields.push("*");
   return `SELECT ${fields.join(", ")} FROM users`;
 }
@@ -128,8 +129,8 @@ function buildUpsert(cols, data) {
   const insertCols = [];
   const values = [];
   const sets = [];
-  let i = 1;
 
+  // a ordem dos placeholders é a mesma dos insertCols
   if (cols.nameCol && data.name != null) {
     insertCols.push(cols.nameCol);
     values.push(data.name);
@@ -154,7 +155,13 @@ function buildUpsert(cols, data) {
     values.push(data.perfil);
     sets.push(`${cols.perfilCol}=EXCLUDED.${cols.perfilCol}`);
   }
+  if (cols.flowIdCol && data.flow_id !== undefined) {
+    insertCols.push(cols.flowIdCol);
+    values.push(data.flow_id);
+    sets.push(`${cols.flowIdCol}=EXCLUDED.${cols.flowIdCol}`);
+  }
 
+  let i = 1;
   const placeholders = insertCols.map(() => `$${i++}`).join(", ");
   const conflictKey = cols.emailCol || "email";
 
@@ -169,17 +176,31 @@ function buildUpsert(cols, data) {
 }
 
 async function usersRoutes(fastify, _options) {
-  // Listar
+  // ========================================================================
+  // GET /users  → lista (opcionalmente filtrado por flow_id)
+  // ========================================================================
   fastify.get("/", async (req, reply) => {
+    const flowId = req.query?.flow_id || null;
+
     try {
       const cols = await detectUserColumns(req);
-      req.log.info({ cols }, "🔎 colunas detectadas (GET /users)");
+      req.log.info({ cols, flowId }, "🔎 colunas detectadas (GET /users)");
+
+      let sql = buildSelect(cols);
+      const params = [];
+
+      if (flowId && cols.flowIdCol) {
+        sql += ` WHERE ${cols.flowIdCol} = $1`;
+        params.push(flowId);
+      }
+
       const order =
         cols.nameCol && cols.lastCol
           ? ` ORDER BY ${cols.nameCol}, ${cols.lastCol}`
           : "";
-      const sql = buildSelect(cols) + order;
-      const { rows } = await req.db.query(sql);
+      sql += order;
+
+      const { rows } = await req.db.query(sql, params);
       return reply.send(rows);
     } catch (err) {
       fastify.log.error(err);
@@ -187,12 +208,19 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // GET /users/id/:id  → busca por ID (string, uuid ou numérico)
+  // ========================================================================
+  // GET /users/id/:id  → busca por ID (opcionalmente checando flow_id)
+  // ========================================================================
   fastify.get("/id/:id", async (req, reply) => {
     const { id } = req.params;
+    const flowId = req.query?.flow_id || null;
+
     try {
       const cols = await detectUserColumns(req);
-      req.log.info({ cols, id }, "🔎 colunas detectadas (GET /users/id/:id)");
+      req.log.info(
+        { cols, id, flowId },
+        "🔎 colunas detectadas (GET /users/id/:id)"
+      );
 
       if (!cols.idCol) {
         return reply
@@ -200,8 +228,15 @@ async function usersRoutes(fastify, _options) {
           .send({ error: "Tabela users não possui coluna de ID" });
       }
 
-      const sql = buildSelect(cols) + ` WHERE ${cols.idCol} = $1`;
-      const { rows } = await req.db.query(sql, [String(id)]);
+      let sql = buildSelect(cols) + ` WHERE ${cols.idCol} = $1`;
+      const params = [String(id)];
+
+      if (flowId && cols.flowIdCol) {
+        sql += ` AND ${cols.flowIdCol} = $2`;
+        params.push(flowId);
+      }
+
+      const { rows } = await req.db.query(sql, params);
       if (rows.length === 0)
         return reply.code(404).send({ error: "Atendente não encontrado" });
       return reply.send(rows[0]);
@@ -211,18 +246,34 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // Buscar por email
+  // ========================================================================
+  // GET /users/:email  → busca por email (opcionalmente filtrado por flow_id)
+  // ========================================================================
   fastify.get("/:email", async (req, reply) => {
     const { email } = req.params;
+    const flowId = req.query?.flow_id || null;
+
     try {
       const cols = await detectUserColumns(req);
-      req.log.info({ cols }, "🔎 colunas detectadas (GET /users/:email)");
+      req.log.info(
+        { cols, email, flowId },
+        "🔎 colunas detectadas (GET /users/:email)"
+      );
+
       if (!cols.emailCol)
         return reply
           .code(500)
           .send({ error: 'Tabela users não possui coluna "email"' });
-      const sql = buildSelect(cols) + ` WHERE ${cols.emailCol} = $1`;
-      const { rows } = await req.db.query(sql, [email]);
+
+      let sql = buildSelect(cols) + ` WHERE ${cols.emailCol} = $1`;
+      const params = [email];
+
+      if (flowId && cols.flowIdCol) {
+        sql += ` AND ${cols.flowIdCol} = $2`;
+        params.push(flowId);
+      }
+
+      const { rows } = await req.db.query(sql, params);
       if (rows.length === 0)
         return reply.code(404).send({ error: "Atendente não encontrado" });
       return reply.send(rows[0]);
@@ -232,9 +283,12 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // Criar (tenant + public + invite)
+  // ========================================================================
+  // POST /users  → criar (tenant + public + invite) com flow_id
+  // ========================================================================
   fastify.post("/", async (req, reply) => {
-    const { name, lastname, email, perfil, filas = [] } = req.body || {};
+    const { name, lastname, email, perfil, filas = [], flow_id } =
+      req.body || {};
     if (!email || !perfil) {
       const body400 = { error: "email e perfil são obrigatórios" };
       await fastify.audit(req, {
@@ -243,9 +297,12 @@ async function usersRoutes(fastify, _options) {
         resourceId: String(email || ""),
         statusCode: 400,
         requestBody: {
+          name,
+          lastname,
           email,
           perfil,
           filas_count: Array.isArray(filas) ? filas.length : 0,
+          flow_id,
         },
         responseBody: body400,
       });
@@ -254,6 +311,7 @@ async function usersRoutes(fastify, _options) {
 
     const lowerEmail = String(email).toLowerCase();
     const filasToSave = Array.isArray(filas) ? filas : [];
+    const flowId = flow_id || null;
 
     try {
       const { subdomain } = req.tenant || {};
@@ -272,8 +330,8 @@ async function usersRoutes(fastify, _options) {
       // 1) catálogo global
       const qTenant = await pool.query(
         `SELECT id AS company_id, slug
-         FROM public.companies
-        WHERE slug = $1`,
+           FROM public.companies
+          WHERE slug = $1`,
         [subdomain]
       );
       const tenant = qTenant.rows[0];
@@ -292,7 +350,7 @@ async function usersRoutes(fastify, _options) {
 
       // 2) UPSERT no schema do tenant
       const cols = await detectUserColumns(req);
-      req.log.info({ cols }, "🧩 colunas detectadas (POST /users)");
+      req.log.info({ cols, flowId }, "🧩 colunas detectadas (POST /users)");
       if (!cols.emailCol) {
         const body500 = {
           error: 'Tabela users do tenant não possui coluna "email"',
@@ -314,9 +372,11 @@ async function usersRoutes(fastify, _options) {
         email: lowerEmail,
         filas: cols.filasCol ? filasToSave : null,
         perfil: perfil ?? null,
+        flow_id: flowId,
       });
       const ins = await req.db.query(up.text, up.values);
       const u = ins.rows[0] || {};
+
       const out = {
         id: u[cols.idCol] ?? u.id ?? null,
         name: u[cols.nameCol] ?? u.name ?? null,
@@ -325,15 +385,16 @@ async function usersRoutes(fastify, _options) {
         status: cols.statusCol ? u[cols.statusCol] ?? u.status ?? null : null,
         filas: cols.filasCol ? u[cols.filasCol] ?? u.filas ?? [] : [],
         perfil: u[cols.perfilCol] ?? u.perfil ?? perfil,
+        flow_id: cols.flowIdCol ? u[cols.flowIdCol] ?? flowId : flowId,
       };
 
       // 3) public.users — company_id, email, profile
       await pool.query(
         `INSERT INTO public.users (company_id, email, profile)
-       VALUES ($1,$2,$3)
-       ON CONFLICT (company_id, email) DO UPDATE
-         SET profile = COALESCE(EXCLUDED.profile, public.users.profile),
-             updated_at = NOW()`,
+         VALUES ($1,$2,$3)
+         ON CONFLICT (company_id, email) DO UPDATE
+           SET profile = COALESCE(EXCLUDED.profile, public.users.profile),
+               updated_at = NOW()`,
         [tenant.company_id, lowerEmail, perfil]
       );
 
@@ -367,6 +428,7 @@ async function usersRoutes(fastify, _options) {
           email: lowerEmail,
           perfil,
           filas_count: filasToSave.length,
+          flow_id: flowId,
         },
         afterData: out,
         extra: {
@@ -389,7 +451,6 @@ async function usersRoutes(fastify, _options) {
         });
     } catch (err) {
       fastify.log.error(err);
-      // 🔴 AUDIT ERRO
       await fastify.audit(req, {
         action: "user.create.error",
         resourceType: "user",
@@ -402,10 +463,12 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // Atualizar (sincroniza public.users: apenas profile)
+  // ========================================================================
+  // PUT /users/:id  → atualizar (incluindo flow_id opcional)
+  // ========================================================================
   fastify.put("/:id", async (req, reply) => {
     const { id } = req.params;
-    const { name, lastname, email, perfil, filas } = req.body || {};
+    const { name, lastname, email, perfil, filas, flow_id } = req.body || {};
 
     if (!email || !perfil) {
       const body400 = { error: "email e perfil são obrigatórios" };
@@ -420,6 +483,7 @@ async function usersRoutes(fastify, _options) {
           email,
           perfil,
           filas_count: Array.isArray(filas) ? filas.length : 0,
+          flow_id,
         },
         responseBody: body400,
       });
@@ -493,6 +557,10 @@ async function usersRoutes(fastify, _options) {
         sets.push(`${cols.filasCol}=$${i++}`);
         values.push(filas);
       }
+      if (cols.flowIdCol && flow_id !== undefined) {
+        sets.push(`${cols.flowIdCol}=$${i++}`);
+        values.push(flow_id);
+      }
 
       if (!sets.length) {
         const body400 = { error: "Nada para atualizar" };
@@ -537,17 +605,16 @@ async function usersRoutes(fastify, _options) {
         if (companyId) {
           await pool.query(
             `INSERT INTO public.users (company_id, email, profile)
-           VALUES ($1,$2,$3)
-           ON CONFLICT (company_id, email) DO UPDATE
-             SET profile = COALESCE(EXCLUDED.profile, public.users.profile),
-                 updated_at = NOW()`,
+             VALUES ($1,$2,$3)
+             ON CONFLICT (company_id, email) DO UPDATE
+               SET profile = COALESCE(EXCLUDED.profile, public.users.profile),
+                   updated_at = NOW()`,
             [companyId, String(email).toLowerCase(), perfil]
           );
           syncInfo = { company_id: companyId, subdomain };
         }
       }
 
-      // afterData mínimo (evita SELECT extra se não precisar)
       const after = {
         id,
         ...(name != null ? { name } : {}),
@@ -555,6 +622,7 @@ async function usersRoutes(fastify, _options) {
         ...(email != null ? { email: String(email).toLowerCase() } : {}),
         ...(perfil != null ? { perfil } : {}),
         ...(Array.isArray(filas) ? { filas } : {}),
+        ...(flow_id !== undefined ? { flow_id } : {}),
       };
 
       await fastify.audit(req, {
@@ -583,9 +651,12 @@ async function usersRoutes(fastify, _options) {
     }
   });
 
-  // Excluir (tenant) + chamada externa para remover em public.users
+  // ========================================================================
+  // DELETE /users/:id  → excluir (opcionalmente checando flow_id)
+  // ========================================================================
   fastify.delete("/:id", async (req, reply) => {
     const { id } = req.params;
+    const flowId = req.query?.flow_id || null;
 
     try {
       const cols = await detectUserColumns(req);
@@ -601,15 +672,24 @@ async function usersRoutes(fastify, _options) {
         return reply.code(500).send(body500);
       }
 
-      // 1) snapshot antes (email e filas)
+      // 1) snapshot antes (email, filas, flow_id)
       const selFields = [
         cols.emailCol ? `${cols.emailCol} AS email` : `'__noemail__' AS email`,
       ];
       if (cols.filasCol) selFields.push(`${cols.filasCol} AS filas`);
+      if (cols.flowIdCol) selFields.push(`${cols.flowIdCol} AS flow_id`);
+
+      let where = `${cols.idCol} = $1`;
+      const paramsSel = [id];
+
+      if (flowId && cols.flowIdCol) {
+        where += ` AND ${cols.flowIdCol} = $2`;
+        paramsSel.push(flowId);
+      }
 
       const pre = await req.db.query(
-        `SELECT ${selFields.join(", ")} FROM users WHERE ${cols.idCol} = $1`,
-        [id]
+        `SELECT ${selFields.join(", ")} FROM users WHERE ${where}`,
+        paramsSel
       );
       if (pre.rowCount === 0) {
         const body404 = { error: "Atendente não encontrado" };
@@ -643,9 +723,16 @@ async function usersRoutes(fastify, _options) {
       }
 
       // 2) exclui no tenant
+      let whereDel = `${cols.idCol} = $1`;
+      const paramsDel = [id];
+      if (flowId && cols.flowIdCol) {
+        whereDel += ` AND ${cols.flowIdCol} = $2`;
+        paramsDel.push(flowId);
+      }
+
       const del = await req.db.query(
-        `DELETE FROM users WHERE ${cols.idCol} = $1`,
-        [id]
+        `DELETE FROM users WHERE ${whereDel}`,
+        paramsDel
       );
       if (del.rowCount === 0) {
         const body404 = { error: "Atendente não encontrado" };
