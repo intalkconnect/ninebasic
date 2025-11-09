@@ -39,90 +39,83 @@ async function ticketsRoutes(fastify, options) {
   }
 
   fastify.get("/history/:id/pdf", async (req, reply) => {
-    let doc;
-    try {
-      const { id } = req.params || {};
+  let doc;
+  try {
+    const { id } = req.params || {};
+    const { flow_id } = req.query || {};
 
-      // 1) Ticket + cliente
-      const tRes = await req.db.query(
-        `
+    if (!flow_id) {
+      const body400 = { error: "flow_id é obrigatório" };
+      await fastify.audit(req, {
+        action: "ticket.history.pdf.missing_flow_id",
+        resourceType: "ticket",
+        resourceId: String(id),
+        statusCode: 400,
+        responseBody: body400,
+      });
+      return reply.code(400).send(body400);
+    }
+
+    const flowId = String(flow_id);
+
+    // 1) Ticket + cliente, RESTRITO ao flow_id
+    const tRes = await req.db.query(
+      `
       SELECT t.id::text AS id, t.ticket_number, t.user_id, t.fila, t.assigned_to,
-             t.status, t.created_at, t.updated_at,
+             t.status, t.created_at, t.updated_at, t.flow_id,
              c.name  AS customer_name, c.email AS customer_email, c.phone AS customer_phone
         FROM tickets t
         LEFT JOIN clientes c ON c.user_id = t.user_id
        WHERE t.id::text = $1
-    `,
-        [String(id)]
-      );
-      if (!tRes.rowCount) {
-        const body404 = { error: "Ticket não encontrado" };
-        await fastify.audit(req, {
-          action: "ticket.history.pdf.not_found",
-          resourceType: "ticket",
-          resourceId: String(id),
-          statusCode: 404,
-          responseBody: body404,
-        });
-        return reply.code(404).send(body404);
-      }
-      const ticket = tRes.rows[0];
+         AND t.flow_id   = $2::uuid
+      `,
+      [String(id), flowId]
+    );
 
-      // 2) Mensagens
-      const mRes = await req.db.query(
-        `
+    if (!tRes.rowCount) {
+      const body404 = { error: "Ticket não encontrado" };
+      await fastify.audit(req, {
+        action: "ticket.history.pdf.not_found",
+        resourceType: "ticket",
+        resourceId: String(id),
+        statusCode: 404,
+        responseBody: body404,
+        extra: { flow_id: flowId },
+      });
+      return reply.code(404).send(body404);
+    }
+
+    const ticket = tRes.rows[0];
+
+    // 2) Mensagens (segue igual, usando ticket_number)
+    const mRes = await req.db.query(
+      `
       SELECT m.id::text AS id, m.direction, m."type", m."content", m."timestamp",
              m.metadata, m.assigned_to
         FROM messages m
        WHERE m.ticket_number = $1
        ORDER BY m."timestamp" ASC, m.id ASC
        LIMIT 2000
-    `,
-        [String(ticket.ticket_number || "")]
-      );
-      const rows = mRes.rows || [];
+      `,
+      [String(ticket.ticket_number || "")]
+    );
+    const rows = mRes.rows || [];
 
-      // 🔎 LOG MANUAL (antes do hijack) — sem conteúdo sensível
-      const firstTs = rows[0]?.timestamp ?? null;
-      const lastTs = rows[rows.length - 1]?.timestamp ?? null;
-      await fastify.audit(req, {
-        action: "ticket.history.pdf.generate",
-        resourceType: "ticket",
-        resourceId: String(ticket.ticket_number || ticket.id),
-        statusCode: 200,
-        extra: {
-          fila: ticket.fila,
-          assigned_to: ticket.assigned_to ?? null,
-          messages_count: rows.length,
-          range: { from: firstTs, to: lastTs },
-        },
-      });
-
-      // 2.1) Resolver nomes de atendentes (users.email -> name + lastname)
-      const agentEmailsSet = new Set();
-      if (ticket.assigned_to)
-        agentEmailsSet.add(String(ticket.assigned_to).toLowerCase());
-      for (const r of rows)
-        if (r.assigned_to)
-          agentEmailsSet.add(String(r.assigned_to).toLowerCase());
-      const agentEmails = [...agentEmailsSet];
-      const agentNameByEmail = new Map();
-      if (agentEmails.length) {
-        const uRes = await req.db.query(
-          `SELECT LOWER(email) AS email,
-                COALESCE(NULLIF(TRIM(name || ' ' || lastname), ''), name, lastname, email) AS full_name
-           FROM users
-          WHERE LOWER(email) = ANY($1)`,
-          [agentEmails]
-        );
-        for (const u of uRes.rows || [])
-          agentNameByEmail.set(u.email, u.full_name || u.email);
-      }
-      const resolveAgent = (email) => {
-        if (!email) return "Atendente";
-        const key = String(email).toLowerCase();
-        return agentNameByEmail.get(key) || email;
-      };
+    const firstTs = rows[0]?.timestamp ?? null;
+    const lastTs = rows[rows.length - 1]?.timestamp ?? null;
+    await fastify.audit(req, {
+      action: "ticket.history.pdf.generate",
+      resourceType: "ticket",
+      resourceId: String(ticket.ticket_number || ticket.id),
+      statusCode: 200,
+      extra: {
+        fila: ticket.fila,
+        assigned_to: ticket.assigned_to ?? null,
+        messages_count: rows.length,
+        range: { from: firstTs, to: lastTs },
+        flow_id: ticket.flow_id || null,
+      },
+    });
 
       // 3) Hijack + headers (evita "write after end")
       const num = ticket.ticket_number
@@ -556,28 +549,33 @@ async function ticketsRoutes(fastify, options) {
   });
 
   fastify.get("/history/:id", async (req, reply) => {
-    const { id } = req.params || {};
-    const { include, messages_limit } = req.query || {};
+  const { id } = req.params || {};
+  const { include, messages_limit, flow_id } = req.query || {};
 
-    const idStr = String(id);
-    const limit = Math.min(
-      Math.max(parseInt(messages_limit || "100", 10) || 100, 1),
-      500
-    );
+  if (!flow_id) {
+    return reply.code(400).send({ error: "flow_id é obrigatório" });
+  }
 
-    // include=messages,attachments
-    const includes = String(include || "")
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
+  const flowId = String(flow_id);
+  const idStr = String(id);
 
-    const withMessages = includes.includes("messages");
-    const withAttachments = includes.includes("attachments");
+  const limit = Math.min(
+    Math.max(parseInt(messages_limit || "100", 10) || 100, 1),
+    500
+  );
 
-    try {
-      // 1) Ticket + dados do cliente
-      const tRes = await req.db.query(
-        `
+  const includes = String(include || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+
+  const withMessages = includes.includes("messages");
+  const withAttachments = includes.includes("attachments");
+
+  try {
+    // 1) Ticket + cliente, RESTRITO ao flow_id
+    const tRes = await req.db.query(
+      `
       SELECT
         t.id::text        AS id,
         t.ticket_number,
@@ -587,7 +585,7 @@ async function ticketsRoutes(fastify, options) {
         t.status,
         t.created_at,
         t.updated_at,
-        -- dados do cliente (podem ser NULL)
+        t.flow_id,
         c.name            AS customer_name,
         c.email           AS customer_email,
         c.phone           AS customer_phone,
@@ -595,73 +593,68 @@ async function ticketsRoutes(fastify, options) {
       FROM tickets t
       LEFT JOIN clientes c ON c.user_id = t.user_id
       WHERE t.id::text = $1
+        AND t.flow_id   = $2::uuid
       `,
-        [idStr]
-      );
+      [idStr, flowId]
+    );
 
-      if (tRes.rowCount === 0) {
-        return reply.code(404).send({ error: "Ticket não encontrado" });
+    if (tRes.rowCount === 0) {
+      return reply.code(404).send({ error: "Ticket não encontrado" });
+    }
+
+    const ticket = tRes.rows[0];
+    ticket.tags = ticket.tags || [];
+
+    const safeParse = (raw) => {
+      if (raw == null) return null;
+      if (typeof raw === "object") return raw;
+      const s = String(raw);
+      try {
+        return JSON.parse(s);
+      } catch {
+        if (/^https?:\/\//i.test(s)) return { url: s };
+        return s;
       }
+    };
 
-      const ticket = tRes.rows[0];
-      ticket.tags = ticket.tags || []; // reservado para futuro
+    const mergeContent = (rawContent, meta, type) => {
+      const c = safeParse(rawContent);
+      const out =
+        c && typeof c === "object" && !Array.isArray(c)
+          ? { ...c }
+          : typeof c === "string"
+          ? { text: c }
+          : {};
+      const m = meta || {};
+      out.url ??=
+        m.url ||
+        m.file_url ||
+        m.download_url ||
+        m.signed_url ||
+        m.public_url ||
+        null;
+      out.filename ??= m.filename || m.name || null;
+      out.mime_type ??= m.mime || m.mimetype || m.content_type || null;
+      out.caption ??= m.caption || null;
+      out.voice ??=
+        m.voice || (String(type).toLowerCase() === "audio" ? true : undefined);
+      out.size ??= m.size || m.filesize || null;
+      out.width ??= m.width || null;
+      out.height ??= m.height || null;
+      out.duration ??= m.duration || m.audio_duration || null;
+      return out;
+    };
 
-      // Helpers
-      const safeParse = (raw) => {
-        if (raw == null) return null;
-        if (typeof raw === "object") return raw;
-        const s = String(raw);
-        try {
-          return JSON.parse(s);
-        } catch {
-          // se a content for uma URL direta
-          if (/^https?:\/\//i.test(s)) return { url: s };
-          return s; // texto puro
-        }
-      };
+    const deriveStatus = (row) => {
+      if (row.read_at) return "read";
+      if (row.delivered_at) return "delivered";
+      if (String(row.direction).toLowerCase() === "outgoing") return "sent";
+      return "received";
+    };
 
-      const mergeContent = (rawContent, meta, type) => {
-        const c = safeParse(rawContent);
-        const out =
-          c && typeof c === "object" && !Array.isArray(c)
-            ? { ...c }
-            : typeof c === "string"
-            ? { text: c }
-            : {};
-        const m = meta || {};
-        out.url ??=
-          m.url ||
-          m.file_url ||
-          m.download_url ||
-          m.signed_url ||
-          m.public_url ||
-          null;
-        out.filename ??= m.filename || m.name || null;
-        out.mime_type ??= m.mime || m.mimetype || m.content_type || null;
-        out.caption ??= m.caption || null;
-        out.voice ??=
-          m.voice ||
-          (String(type).toLowerCase() === "audio" ? true : undefined);
-        out.size ??= m.size || m.filesize || null;
-        out.width ??= m.width || null;
-        out.height ??= m.height || null;
-        out.duration ??= m.duration || m.audio_duration || null;
-        return out;
-      };
-
-      const deriveStatus = (row) => {
-        if (row.read_at) return "read";
-        if (row.delivered_at) return "delivered";
-        if (String(row.direction).toLowerCase() === "outgoing") return "sent";
-        return "received";
-      };
-
-      // 2) Precisaremos carregar mensagens se pediram messages ou attachments
-      if ((withMessages || withAttachments) && ticket.ticket_number) {
-        // se pediram APENAS attachments, ainda assim buscamos mensagens,
-        // mas os campos já cobrem os dois casos
-        const mRes = await req.db.query(
-          `
+    if ((withMessages || withAttachments) && ticket.ticket_number) {
+      const mRes = await req.db.query(
+        `
         SELECT
           m.id::text      AS id,
           m.user_id,
@@ -682,117 +675,113 @@ async function ticketsRoutes(fastify, options) {
         ORDER BY m."timestamp" ASC, m.id ASC
         LIMIT $2
         `,
-          [String(ticket.ticket_number), limit]
-        );
+        [String(ticket.ticket_number), limit]
+      );
 
-        const rows = mRes.rows || [];
+      const rows = mRes.rows || [];
 
-        // 3) Mapeia mensagens (somente se pediram messages)
-        if (withMessages) {
-          ticket.messages = rows.map((m) => {
-            const dir = String(m.direction || "").toLowerCase();
+      if (withMessages) {
+        ticket.messages = rows.map((m) => {
+          const dir = String(m.direction || "").toLowerCase();
+          const type = String(m.type || "").toLowerCase();
+          const content = mergeContent(m.content, m.metadata, type);
+
+          return {
+            id: m.id,
+            direction: dir,
+            type,
+            content,
+            text:
+              typeof content === "string"
+                ? content
+                : content.text || content.body || content.caption || null,
+            timestamp: m.timestamp,
+            created_at: m.timestamp,
+            channel: m.channel,
+            message_id: m.message_id,
+            ticket_number: m.ticket_number,
+            from_agent: dir === "outgoing" || dir === "system",
+            sender_name:
+              dir === "outgoing"
+                ? m.assigned_to || ticket.assigned_to || "Atendente"
+                : dir === "system"
+                ? "Sistema"
+                : null,
+            delivered_at: m.delivered_at,
+            read_at: m.read_at,
+            status: deriveStatus(m),
+            metadata: m.metadata || null,
+            reply_to: m.reply_to || m.metadata?.context?.message_id || null,
+            context: m.metadata?.context || null,
+          };
+        });
+      }
+
+      if (withAttachments) {
+        const attachments = rows
+          .map((m) => {
             const type = String(m.type || "").toLowerCase();
-            const content = mergeContent(m.content, m.metadata, type);
+            const c = mergeContent(m.content, m.metadata, type);
+            const url = c?.url;
+
+            const isAttachType = [
+              "document",
+              "image",
+              "audio",
+              "video",
+              "sticker",
+              "file",
+            ].includes(type);
+            if (!isAttachType && !url) return null;
+            if (!url) return null;
+
+            let filename = c.filename || null;
+            if (!filename) {
+              try {
+                const u = new URL(url);
+                filename = decodeURIComponent(
+                  u.pathname.split("/").pop() || "arquivo"
+                );
+              } catch {
+                filename = "arquivo";
+              }
+            }
 
             return {
               id: m.id,
-              direction: dir,
-              type, // preserva o tipo original (text, image, document, ...)
-              content, // objeto/string normalizado
-              text:
-                typeof content === "string"
-                  ? content
-                  : content.text || content.body || content.caption || null,
-              timestamp: m.timestamp, // compatível com ChatWindow
-              created_at: m.timestamp,
-              channel: m.channel,
-              message_id: m.message_id,
-              ticket_number: m.ticket_number,
-              from_agent: dir === "outgoing" || dir === "system",
+              type,
+              url,
+              filename,
+              mime_type: c.mime_type || null,
+              size: c.size || null,
+              timestamp: m.timestamp,
+              direction: m.direction,
               sender_name:
-                dir === "outgoing"
+                String(m.direction).toLowerCase() === "outgoing"
                   ? m.assigned_to || ticket.assigned_to || "Atendente"
-                  : dir === "system"
-                  ? "Sistema"
-                  : null, // NÃO mostrar “Cliente”
-              delivered_at: m.delivered_at,
-              read_at: m.read_at,
-              status: deriveStatus(m), // 'read' | 'delivered' | 'sent' | 'received'
-              metadata: m.metadata || null,
-              reply_to: m.reply_to || m.metadata?.context?.message_id || null,
-              context: m.metadata?.context || null,
+                  : null,
             };
-          });
-        }
+          })
+          .filter(Boolean);
 
-        // 4) Deriva anexos a partir das mensagens (sempre que pedirem attachments)
-        if (withAttachments) {
-          const attachments = rows
-            .map((m) => {
-              const type = String(m.type || "").toLowerCase();
-              const c = mergeContent(m.content, m.metadata, type); // garante url/mimetype/filename/size...
-              const url = c?.url;
-
-              // tipos que usualmente geram arquivo
-              const isAttachType = [
-                "document",
-                "image",
-                "audio",
-                "video",
-                "sticker",
-                "file",
-              ].includes(type);
-              if (!isAttachType && !url) return null;
-
-              if (!url) return null; // sem URL não há o que baixar
-
-              let filename = c.filename || null;
-              if (!filename) {
-                try {
-                  const u = new URL(url);
-                  filename = decodeURIComponent(
-                    u.pathname.split("/").pop() || "arquivo"
-                  );
-                } catch {
-                  filename = "arquivo";
-                }
-              }
-
-              return {
-                id: m.id,
-                type,
-                url,
-                filename,
-                mime_type: c.mime_type || null,
-                size: c.size || null,
-                timestamp: m.timestamp,
-                direction: m.direction,
-                sender_name:
-                  String(m.direction).toLowerCase() === "outgoing"
-                    ? m.assigned_to || ticket.assigned_to || "Atendente"
-                    : null,
-              };
-            })
-            .filter(Boolean);
-
-          ticket.attachments = attachments;
-        }
-      } else {
-        // não pediram nada = mantém mensagens/attachments ausentes
-        if (withMessages) ticket.messages = [];
-        if (withAttachments) ticket.attachments = [];
+        ticket.attachments = attachments;
       }
-
-      return reply.send(ticket);
-    } catch (err) {
-      req.log.error({ err }, "Erro em GET /tickets/history/:id");
-      return reply.code(500).send({
-        error: "Erro interno ao buscar ticket",
-        details:
-          process.env.NODE_ENV === "development" ? err.message : undefined,
-      });
+    } else {
+      if (withMessages) ticket.messages = [];
+      if (withAttachments) ticket.attachments = [];
     }
-  });
+
+    return reply.send(ticket);
+  } catch (err) {
+    req.log.error({ err }, "Erro em GET /tickets/history/:id");
+    return reply.code(500).send({
+      error: "Erro interno ao buscar ticket",
+      details:
+        process.env.NODE_ENV === "development" ? err.message : undefined,
+    });
+  }
+});
+
 
   // GET /tickets/last/:user_id → retorna o ticket mais recente do usuário
   fastify.get("/last/:user_id", async (req, reply) => {
@@ -1058,81 +1047,85 @@ async function ticketsRoutes(fastify, options) {
 
   // GET /tickets/history → lista de tickets fechados (com busca e período)
   fastify.get("/history", async (req, reply) => {
-    const {
-      q = "",
-      page = 1,
-      page_size = 10,
-      from = "",
-      to = "",
-    } = req.query || {};
+  const {
+    q = "",
+    page = 1,
+    page_size = 10,
+    from = "",
+    to = "",
+    flow_id,
+  } = req.query || {};
 
-    const allowed = new Set([10, 20, 30, 40]);
-    const pageSize = allowed.has(Number(page_size)) ? Number(page_size) : 10;
-    const pageNum = Math.max(1, Number(page) || 1);
-    const offset = (pageNum - 1) * pageSize;
+  if (!flow_id) {
+    return reply.code(400).send({ error: "flow_id é obrigatório" });
+  }
+  const flowId = String(flow_id);
 
-    // WHERE com alias 't' para tickets
-    const where = [`t.status = 'closed'`];
-    const params = [];
+  const allowed = new Set([10, 20, 30, 40]);
+  const pageSize = allowed.has(Number(page_size)) ? Number(page_size) : 10;
+  const pageNum = Math.max(1, Number(page) || 1);
+  const offset = (pageNum - 1) * pageSize;
 
-    if (q) {
-      params.push(`%${q}%`);
-      const qi = params.length;
-      where.push(`(
+  const where = [`t.status = 'closed'`];
+  const params = [];
+
+  if (q) {
+    params.push(`%${q}%`);
+    const qi = params.length;
+    where.push(`(
       LOWER(COALESCE(t.ticket_number::text,'')) LIKE LOWER($${qi})
       OR LOWER(COALESCE(t.user_id::text,''))    LIKE LOWER($${qi})
       OR LOWER(COALESCE(t.fila,''))             LIKE LOWER($${qi})
       OR LOWER(COALESCE(t.assigned_to,''))      LIKE LOWER($${qi})
-      OR LOWER(COALESCE(c."name",''))           LIKE LOWER($${qi})  -- nome do cliente
-      OR LOWER(COALESCE(c.phone,''))            LIKE LOWER($${qi})  -- telefone do cliente (opcional)
-      OR LOWER(COALESCE(ua.name,''))            LIKE LOWER($${qi})  -- nome do atendente
-      OR LOWER(COALESCE(ua.lastname,''))        LIKE LOWER($${qi})  -- sobrenome do atendente
+      OR LOWER(COALESCE(c."name",''))           LIKE LOWER($${qi})
+      OR LOWER(COALESCE(c.phone,''))            LIKE LOWER($${qi})
+      OR LOWER(COALESCE(ua.name,''))            LIKE LOWER($${qi})
+      OR LOWER(COALESCE(ua.lastname,''))        LIKE LOWER($${qi})
       OR LOWER(COALESCE((ua.name || ' ' || ua.lastname),'')) LIKE LOWER($${qi})
     )`);
-    }
+  }
 
-    if (from) {
-      params.push(from + " 00:00:00");
-      where.push(`t.updated_at >= $${params.length}`);
-    }
-    if (to) {
-      params.push(to + " 23:59:59.999");
-      where.push(`t.updated_at <= $${params.length}`);
-    }
+  if (from) {
+    params.push(from + " 00:00:00");
+    where.push(`t.updated_at >= $${params.length}`);
+  }
+  if (to) {
+    params.push(to + " 23:59:59.999");
+    where.push(`t.updated_at <= $${params.length}`);
+  }
 
-    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  // 🔒 sempre filtra por flow_id
+  params.push(flowId);
+  where.push(`t.flow_id = $${params.length}::uuid`);
 
-    // JOINs:
-    //  c  -> clientes (por id::text OU por clientes.user_id)
-    //  ua -> users (atendentes) por e-mail em assigned_to
-    const joinSql = `
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+  const joinSql = `
     LEFT JOIN clientes c ON (c.id::text = t.user_id OR c.user_id = t.user_id)
     LEFT JOIN users    ua ON ua.email   = t.assigned_to
   `;
 
-    // COUNT precisa dos mesmos JOINs para a busca por nome funcionar no total
-    const sqlCount = `
+  const sqlCount = `
     SELECT COUNT(*)::bigint AS total
     FROM tickets t
     ${joinSql}
     ${whereSql}
   `;
 
-    // Na lista, devolvemos "user_id" já como NOME do cliente
-    // e "assigned_to" já como NOME do atendente
-    const sqlList = `
+  const sqlList = `
     SELECT
       t.id,
       t.ticket_number,
-      COALESCE(NULLIF(c."name", ''), c.phone, t.user_id) AS user_id,  -- nome do cliente no lugar do id
+      COALESCE(NULLIF(c."name", ''), c.phone, t.user_id) AS user_id,
       t.fila,
       COALESCE(
         NULLIF(TRIM(ua.name || ' ' || ua.lastname), ''),
         ua.name,
         t.assigned_to
-      ) AS assigned_to,                                               -- nome do atendente no lugar do e-mail
+      ) AS assigned_to,
       t.created_at,
-      t.updated_at
+      t.updated_at,
+      t.flow_id
     FROM tickets t
     ${joinSql}
     ${whereSql}
@@ -1141,27 +1134,26 @@ async function ticketsRoutes(fastify, options) {
     OFFSET $${params.length + 2}
   `;
 
-    try {
-      const rCount = await req.db.query(sqlCount, params);
-      const total = Number(rCount.rows?.[0]?.total || 0);
+  try {
+    const rCount = await req.db.query(sqlCount, params);
+    const total = Number(rCount.rows?.[0]?.total || 0);
 
-      const rList = await req.db.query(sqlList, [...params, pageSize, offset]);
-      const data = rList.rows || [];
+    const rList = await req.db.query(sqlList, [...params, pageSize, offset]);
+    const data = rList.rows || [];
 
-      return reply.send({
-        data,
-        page: pageNum,
-        page_size: pageSize,
-        total,
-        total_pages: Math.max(1, Math.ceil(total / pageSize)),
-      });
-    } catch (err) {
-      req.log.error("Erro em GET /tickets/history:", err);
-      return reply
-        .code(500)
-        .send({ error: "Erro interno ao listar histórico" });
-    }
-  });
+    return reply.send({
+      data,
+      page: pageNum,
+      page_size: pageSize,
+      total,
+      total_pages: Math.max(1, Math.ceil(total / pageSize)),
+    });
+  } catch (err) {
+    req.log.error("Erro em GET /tickets/history:", err);
+    return reply.code(500).send({ error: "Erro interno ao listar histórico" });
+  }
+});
+
 
   /* =======================
      TAGS DO TICKET (tickets)
