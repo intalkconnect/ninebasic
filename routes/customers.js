@@ -7,17 +7,20 @@ function normalizeTag(raw) {
   const t = String(raw).trim().replace(/\s+/g, " ");
   if (!t) return null;
   if (t.length > 40) return t.slice(0, 40);
+
   if (/[^\S\r\n]*[\r\n]/.test(t)) return null;
   return t;
 }
 
 async function customersRoutes(fastify, options) {
-  // GET /clientes?page=&page_size=&q=&flow_id=
+  // GET /customers?page=&page_size=&q=&flow_id=
   fastify.get("/", async (req, reply) => {
     const { q = "", page = 1, page_size = 10, flow_id } = req.query || {};
 
     if (!flow_id) {
-      return reply.code(400).send({ error: "flow_id é obrigatório" });
+      return reply
+        .code(400)
+        .send({ error: "flow_id é obrigatório para listar clientes" });
     }
     const flowId = String(flow_id);
 
@@ -36,11 +39,11 @@ async function customersRoutes(fastify, options) {
 
     if (q) {
       paramsWhere.push(`%${q}%`);
-      const idx = paramsWhere.length;
+      const i = paramsWhere.length;
       where.push(`(
-        LOWER(COALESCE(c.name,''))      LIKE LOWER($${idx})
-        OR LOWER(COALESCE(c.user_id,'')) LIKE LOWER($${idx})
-        OR LOWER(COALESCE(c.phone,''))   LIKE LOWER($${idx})
+        LOWER(COALESCE(c.name,''))      LIKE LOWER($${i})
+        OR LOWER(COALESCE(c.user_id,'')) LIKE LOWER($${i})
+        OR LOWER(COALESCE(c.phone,''))   LIKE LOWER($${i})
       )`);
     }
 
@@ -80,7 +83,7 @@ async function customersRoutes(fastify, options) {
     }
   });
 
-  // GET /clientes/:user_id?flow_id=...
+  // GET /customers/:user_id?flow_id=...
   fastify.get("/:user_id", async (req, reply) => {
     const { user_id } = req.params;
     const { flow_id } = req.query || {};
@@ -135,16 +138,23 @@ async function customersRoutes(fastify, options) {
     }
   });
 
-  // PUT /clientes/:user_id?flow_id=...
+  // PUT /customers/:user_id?flow_id=...
   fastify.put("/:user_id", async (req, reply) => {
     const { user_id } = req.params;
     const { flow_id } = req.query || {};
     const { name, phone } = req.body || {};
 
     if (!flow_id) {
-      return reply
-        .code(400)
-        .send({ error: "flow_id é obrigatório", user_id });
+      const resp = { error: "flow_id é obrigatório", user_id };
+      await fastify.audit(req, {
+        action: "customer.update.bad_request",
+        resourceType: "customer",
+        resourceId: user_id,
+        statusCode: 400,
+        responseBody: resp,
+        requestBody: req.body,
+      });
+      return reply.code(400).send(resp);
     }
     const flowId = String(flow_id);
 
@@ -235,15 +245,22 @@ async function customersRoutes(fastify, options) {
     }
   });
 
-  // PATCH /clientes/:user_id?flow_id=...
+  // PATCH /customers/:user_id?flow_id=...
   fastify.patch("/:user_id", async (req, reply) => {
     const { user_id } = req.params;
     const { flow_id } = req.query || {};
 
     if (!flow_id) {
-      return reply
-        .code(400)
-        .send({ error: "flow_id é obrigatório", user_id });
+      const resp = { error: "flow_id é obrigatório", user_id };
+      await fastify.audit(req, {
+        action: "customer.patch.bad_request",
+        resourceType: "customer",
+        resourceId: user_id,
+        statusCode: 400,
+        requestBody: req.body,
+        responseBody: resp,
+      });
+      return reply.code(400).send(resp);
     }
     const flowId = String(flow_id);
 
@@ -287,7 +304,6 @@ async function customersRoutes(fastify, options) {
       const setClauses = keys
         .map((key, i) => `${key} = $${i + 1}`)
         .join(", ");
-
       const len = keys.length;
 
       const { rows } = await req.db.query(
@@ -351,20 +367,26 @@ async function customersRoutes(fastify, options) {
     }
   });
 
-  // DELETE /clientes/:user_id?flow_id=...
+  // DELETE /customers/:user_id?flow_id=...
   fastify.delete("/:user_id", async (req, reply) => {
     const { user_id } = req.params;
     const { flow_id } = req.query || {};
 
     if (!flow_id) {
-      return reply
-        .code(400)
-        .send({ error: "flow_id é obrigatório", user_id });
+      const resp = { error: "flow_id é obrigatório", user_id };
+      await fastify.audit(req, {
+        action: "customer.delete.bad_request",
+        resourceType: "customer",
+        resourceId: user_id,
+        statusCode: 400,
+        responseBody: resp,
+      });
+      return reply.code(400).send(resp);
     }
     const flowId = String(flow_id);
 
     try {
-      // snapshot "antes" (se existir, útil p/ trilha)
+      // snapshot "antes"
       const beforeQ = await req.db.query(
         `SELECT * FROM clientes WHERE user_id = $1 AND flow_id = $2::uuid LIMIT 1`,
         [user_id, flowId]
@@ -377,7 +399,6 @@ async function customersRoutes(fastify, options) {
       );
 
       if (rowCount > 0) {
-        // 204 – sucesso (sem body)
         await fastify.audit(req, {
           action: "customer.delete",
           resourceType: "customer",
@@ -388,7 +409,6 @@ async function customersRoutes(fastify, options) {
         return reply.code(204).send();
       }
 
-      // 404 – não encontrado
       const resp404 = { error: "Cliente não encontrado", user_id };
       await fastify.audit(req, {
         action: "customer.delete.not_found",
@@ -419,13 +439,15 @@ async function customersRoutes(fastify, options) {
     }
   });
 
-  // GET /clientes/:user_id/tags?flow_id=... -> { user_id, tags: [] }
+  // GET /customers/:user_id/tags?flow_id=...
   fastify.get("/:user_id/tags", async (req, reply) => {
     const { user_id } = req.params;
     const { flow_id } = req.query || {};
 
     if (!flow_id) {
-      return reply.code(400).send({ error: "flow_id é obrigatório" });
+      return reply
+        .code(400)
+        .send({ error: "flow_id é obrigatório para listar tags" });
     }
     const flowId = String(flow_id);
 
@@ -436,7 +458,6 @@ async function customersRoutes(fastify, options) {
     }
 
     try {
-      // garante que o cliente existe nesse flow
       const cRes = await req.db.query(
         `SELECT 1 FROM clientes WHERE user_id = $1 AND flow_id = $2::uuid`,
         [user_id, flowId]
@@ -447,7 +468,7 @@ async function customersRoutes(fastify, options) {
       const { rows } = await req.db.query(
         `SELECT tag 
            FROM customer_tags 
-          WHERE user_id = $1 
+          WHERE user_id = $1
             AND flow_id = $2::uuid
           ORDER BY tag ASC`,
         [user_id, flowId]
@@ -461,7 +482,7 @@ async function customersRoutes(fastify, options) {
     }
   });
 
-  // PUT /clientes/:user_id/tags?flow_id=... { tags: string[] } -> substitui o conjunto
+  // PUT /customers/:user_id/tags?flow_id=... { tags: string[] }
   fastify.put("/:user_id/tags", async (req, reply) => {
     const { user_id } = req.params;
     const { flow_id } = req.query || {};
@@ -480,7 +501,6 @@ async function customersRoutes(fastify, options) {
     }
     const flowId = String(flow_id);
 
-    // validações iniciais
     if (!isValidUserId(user_id)) {
       const resp400 = {
         error: "Formato de user_id inválido. Use: usuario@dominio",
@@ -506,13 +526,11 @@ async function customersRoutes(fastify, options) {
       return reply.code(400).send(resp400);
     }
 
-    // normaliza e remove duplicadas
     const norm = [...new Set(tags.map(normalizeTag).filter(Boolean))];
 
     const client = req.db;
     let inTx = false;
     try {
-      // garante cliente existente
       const cRes = await client.query(
         `SELECT 1 FROM clientes WHERE user_id = $1 AND flow_id = $2::uuid`,
         [user_id, flowId]
@@ -529,11 +547,10 @@ async function customersRoutes(fastify, options) {
         return reply.code(404).send(resp404);
       }
 
-      // snapshot "antes"
       const beforeQ = await client.query(
         `SELECT COALESCE(array_agg(tag ORDER BY tag), '{}') AS tags
-         FROM customer_tags 
-        WHERE user_id = $1 
+         FROM customer_tags
+        WHERE user_id = $1
           AND flow_id = $2::uuid`,
         [user_id, flowId]
       );
@@ -542,7 +559,6 @@ async function customersRoutes(fastify, options) {
       await client.query("BEGIN");
       inTx = true;
 
-      // substitui conjunto
       await client.query(
         `DELETE FROM customer_tags WHERE user_id = $1 AND flow_id = $2::uuid`,
         [user_id, flowId]
@@ -554,8 +570,8 @@ async function customersRoutes(fastify, options) {
           .join(", ");
         await client.query(
           `INSERT INTO customer_tags (user_id, flow_id, tag)
-         VALUES ${values}
-         ON CONFLICT DO NOTHING`,
+           VALUES ${values}
+           ON CONFLICT DO NOTHING`,
           [user_id, flowId, ...norm]
         );
       }
@@ -565,7 +581,6 @@ async function customersRoutes(fastify, options) {
 
       const resp200 = { ok: true, user_id, tags: norm };
 
-      // auditoria de sucesso
       await fastify.audit(req, {
         action: "customer.tags.replace",
         resourceType: "customer",
@@ -601,7 +616,7 @@ async function customersRoutes(fastify, options) {
     }
   });
 
-  // POST /clientes/:user_id/tags?flow_id=... { tag: string } -> adiciona uma tag
+  // POST /customers/:user_id/tags?flow_id=... { tag: string }
   fastify.post("/:user_id/tags", async (req, reply) => {
     const { user_id } = req.params;
     const { flow_id } = req.query || {};
@@ -621,7 +636,6 @@ async function customersRoutes(fastify, options) {
     }
     const flowId = String(flow_id);
 
-    // 400 – user_id inválido
     if (!isValidUserId(user_id)) {
       const resp400 = {
         error: "Formato de user_id inválido. Use: usuario@dominio",
@@ -636,7 +650,6 @@ async function customersRoutes(fastify, options) {
       return reply.code(400).send(resp400);
     }
 
-    // 400 – tag inválida
     if (!t) {
       const resp400 = { error: "Tag inválida" };
       await fastify.audit(req, {
@@ -650,7 +663,6 @@ async function customersRoutes(fastify, options) {
     }
 
     try {
-      // 404 – cliente não existe
       const cRes = await req.db.query(
         `SELECT 1 FROM clientes WHERE user_id = $1 AND flow_id = $2::uuid`,
         [user_id, flowId]
@@ -667,29 +679,26 @@ async function customersRoutes(fastify, options) {
         return reply.code(404).send(resp404);
       }
 
-      // snapshot "antes"
       const beforeQ = await req.db.query(
         `SELECT COALESCE(array_agg(tag ORDER BY tag), '{}') AS tags
-         FROM customer_tags 
-        WHERE user_id = $1 
+         FROM customer_tags
+        WHERE user_id = $1
           AND flow_id = $2::uuid`,
         [user_id, flowId]
       );
       const beforeTags = beforeQ.rows?.[0]?.tags || [];
 
-      // upsert simples
       const ins = await req.db.query(
         `INSERT INTO customer_tags (user_id, flow_id, tag)
-       VALUES ($1, $2::uuid, $3)
-       ON CONFLICT DO NOTHING`,
+         VALUES ($1, $2::uuid, $3)
+         ON CONFLICT DO NOTHING`,
         [user_id, flowId, t]
       );
 
-      // snapshot "depois"
       const afterQ = await req.db.query(
         `SELECT COALESCE(array_agg(tag ORDER BY tag), '{}') AS tags
-         FROM customer_tags 
-        WHERE user_id = $1 
+         FROM customer_tags
+        WHERE user_id = $1
           AND flow_id = $2::uuid`,
         [user_id, flowId]
       );
@@ -698,12 +707,11 @@ async function customersRoutes(fastify, options) {
       const created = ins.rowCount === 1;
       const resp = { ok: true, user_id, tag: t, created };
 
-      // auditoria de sucesso
       await fastify.audit(req, {
         action: created ? "customer.tags.add" : "customer.tags.add.noop",
         resourceType: "customer",
         resourceId: user_id,
-        statusCode: 201, // mantido 201 para compat
+        statusCode: 201,
         beforeData: { tags: beforeTags },
         afterData: { tags: afterTags },
         requestBody: { tag },
@@ -729,7 +737,7 @@ async function customersRoutes(fastify, options) {
     }
   });
 
-  // DELETE /clientes/:user_id/tags/:tag?flow_id=... -> remove uma tag
+  // DELETE /customers/:user_id/tags/:tag?flow_id=...
   fastify.delete("/:user_id/tags/:tag", async (req, reply) => {
     const { user_id, tag } = req.params;
     const { flow_id } = req.query || {};
@@ -748,7 +756,6 @@ async function customersRoutes(fastify, options) {
     }
     const flowId = String(flow_id);
 
-    // 400 – user_id inválido
     if (!isValidUserId(user_id)) {
       const resp400 = {
         error: "Formato de user_id inválido. Use: usuario@dominio",
@@ -763,7 +770,6 @@ async function customersRoutes(fastify, options) {
       return reply.code(400).send(resp400);
     }
 
-    // 400 – tag inválida
     if (!t) {
       const resp400 = { error: "Tag inválida" };
       await fastify.audit(req, {
@@ -777,11 +783,10 @@ async function customersRoutes(fastify, options) {
     }
 
     try {
-      // snapshot "antes"
       const beforeQ = await req.db.query(
         `SELECT COALESCE(array_agg(tag ORDER BY tag), '{}') AS tags
-         FROM customer_tags 
-        WHERE user_id = $1 
+         FROM customer_tags
+        WHERE user_id = $1
           AND flow_id = $2::uuid`,
         [user_id, flowId]
       );
@@ -789,14 +794,14 @@ async function customersRoutes(fastify, options) {
 
       const del = await req.db.query(
         `DELETE FROM customer_tags 
-        WHERE user_id = $1 
+        WHERE user_id = $1
           AND flow_id = $2::uuid
           AND tag = $3`,
         [user_id, flowId, t]
       );
 
       if (del.rowCount === 0) {
-        const resp404 = { error: "Tag não encontrado para este cliente" };
+        const resp404 = { error: "Tag não encontrada para este cliente" };
         await fastify.audit(req, {
           action: "customer.tags.remove.not_found",
           resourceType: "customer",
@@ -809,17 +814,15 @@ async function customersRoutes(fastify, options) {
         return reply.code(404).send(resp404);
       }
 
-      // snapshot "depois"
       const afterQ = await req.db.query(
         `SELECT COALESCE(array_agg(tag ORDER BY tag), '{}') AS tags
-         FROM customer_tags 
-        WHERE user_id = $1 
+         FROM customer_tags
+        WHERE user_id = $1
           AND flow_id = $2::uuid`,
         [user_id, flowId]
       );
       const afterTags = afterQ.rows?.[0]?.tags || [];
 
-      // auditoria de sucesso (204 sem body)
       await fastify.audit(req, {
         action: "customer.tags.remove",
         resourceType: "customer",
