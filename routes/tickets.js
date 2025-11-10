@@ -32,6 +32,12 @@ async function ensureTicketExistsByNumber(db, ticket_number) {
   return r.rowCount ? num : null;
 }
 
+function resolveAgent(value) {
+  if (!value) return "Atendente";
+  if (typeof value === "string") return value;
+  return String(value);
+}
+
 async function ticketsRoutes(fastify, options) {
   // Validação simples do formato do user_id
   function isValidUserId(user_id) {
