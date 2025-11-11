@@ -4,41 +4,67 @@ import { v4 as uuidv4 } from 'uuid';
 import dotenv from 'dotenv';
 dotenv.config();
 
-const AMQP_URL    = process.env.AMQP_URL    || 'amqp://guest:guest@rabbitmq:5672/';
-const OUTGOING_QUEUE = process.env.OUTGOING_QUEUE || 'outgoing';
-const FLOW_ENV    = (process.env.FLOW_ENV   || 'prod').toLowerCase(); // 'prod' | 'hmg'
+const AMQP_URL = process.env.AMQP_URL || 'amqp://guest:guest@rabbitmq:5672/';
+const FLOW_ENV = (process.env.FLOW_ENV || 'prod').toLowerCase(); // 'prod' | 'hmg', etc.
 
 let amqpConn, amqpCh;
+
 async function ensureAMQP() {
   if (amqpCh) return amqpCh;
   amqpConn = await amqplib.connect(AMQP_URL, { heartbeat: 15 });
   amqpConn.on('close', () => { amqpConn = null; amqpCh = null; });
   amqpCh = await amqpConn.createChannel();
-  await amqpCh.assertQueue(OUTGOING_QUEUE, { durable: true });
   return amqpCh;
 }
 
 const decode = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
 
-/* ===================== helpers ===================== */
+/* -------------------- QUEUE POR TENANT -------------------- */
+/**
+ * Regra:
+ * 1) Se OUTGOING_QUEUE estiver setado no env → usa ele (override global).
+ * 2) Senão, usa "<tenant>.outgoing", onde tenant vem de:
+ *    - req.tenant.subdomain (plugin tenant.js)
+ *    - ou header x-tenant (fallback)
+ * 3) Se não conseguir descobrir tenant → "outgoing".
+ */
+function resolveOutgoingQueueName(req) {
+  const envQueue = (process.env.OUTGOING_QUEUE || '').trim();
+  if (envQueue) return envQueue; // override global (ex: hmg.outgoing, prod.outgoing)
+
+  const tenantSub =
+    (req.tenant?.subdomain || req.headers['x-tenant'] || '')
+      .toString()
+      .trim()
+      .toLowerCase();
+
+  if (tenantSub) return `${tenantSub}.outgoing`;
+  return 'outgoing';
+}
+
+/* -------------------- helpers de mensagem -------------------- */
 
 function validateContent(type, content, channel) {
   if (!type) throw new Error('Message type is required');
+
   if (type === 'text') {
     if (!content || typeof content.body !== 'string' || !content.body.trim()) {
       throw new Error('Message text cannot be empty');
     }
     return;
   }
+
   if (!content || !content.url || typeof content.url !== 'string') {
     throw new Error(`Media URL is required for type "${type}" on channel "${channel}"`);
   }
 }
 
 function formatUserId(to, channel = 'whatsapp') {
-  return channel === 'telegram'
-    ? `${to}@t.msgcli.net`
-    : `${to}@w.msgcli.net`;
+  const ch = String(channel || 'whatsapp').toLowerCase();
+  if (ch === 'telegram') return `${to}@t.msgcli.net`;
+  if (ch === 'facebook') return `${to}@f.msgcli.net`;
+  if (ch === 'instagram') return `${to}@i.msgcli.net`;
+  return `${to}@w.msgcli.net`;
 }
 
 // checagem 24h usando o DB do tenant
@@ -56,11 +82,12 @@ async function within24h(db, userId) {
   return diffH <= 24;
 }
 
+/* -------------------- ROTAS -------------------- */
+
 export default async function messagesRoutes(fastify) {
   fastify.log.info('[messages] registrando rotas');
 
-  // ===================== ENVIO =====================
-
+  // ========== ENVIO SIMPLES ==========
   // POST /api/v1/messages/send
   fastify.post('/send', async (req, reply) => {
     const { to, type, content, context, channel = 'whatsapp' } = req.body || {};
@@ -75,95 +102,77 @@ export default async function messagesRoutes(fastify) {
     if (channel === 'whatsapp') {
       const ok = await within24h(req.db, userId);
       if (!ok) {
-        return reply.code(400).send({
-          error: 'Outside 24h window. Use an approved template.'
-        });
+        return reply
+          .code(400)
+          .send({ error: 'Outside 24h window. Use an approved template.' });
       }
     }
 
-    const tempId    = uuidv4();
+    const tempId   = uuidv4();
     const dbContent = type === 'text' ? content.body : JSON.stringify(content);
 
-    // sem flow_version_id / flow_deployment_id
+    // grava mensagem como "pending"
     const { rows } = await req.db.query(
       `INSERT INTO messages (
-         user_id,
-         message_id,
-         direction,
-         "type",
-         "content",
-         "timestamp",
-         flow_id,
-         reply_to,
-         status,
-         metadata,
-         created_at,
-         updated_at,
-         channel
-       ) VALUES (
-         $1,
-         $2,
-         'outgoing',
-         $3,
-         $4,
-         NOW(),
-         NULL,
-         $5,
-         'pending',
-         NULL,
-         NOW(),
-         NOW(),
-         $6
-       )
+         user_id, message_id, direction, "type", "content", "timestamp",
+         flow_id, reply_to, status, metadata, created_at, updated_at, channel
+       ) VALUES ($1,$2,'outgoing',$3,$4,NOW(),
+                 NULL, $5, 'pending', NULL, NOW(), NOW(), $6)
        RETURNING *`,
-      [
-        userId,
-        tempId,
-        type,
-        dbContent,
-        context?.message_id || null,
-        channel
-      ]
+      [userId, tempId, type, dbContent, context?.message_id || null, channel]
     );
     const pending = rows[0];
 
+    // envia pro Rabbit na fila do tenant
     const ch = await ensureAMQP();
+    const queueName = resolveOutgoingQueueName(req);
+    await ch.assertQueue(queueName, { durable: true });
+
     ch.sendToQueue(
-      OUTGOING_QUEUE,
-      Buffer.from(JSON.stringify({
-        tempId,
-        channel,
-        to,
-        userId,
-        type,
-        content,
-        context,
-        // apenas env, sem flowVersionId / flowDeploymentId
-        environment: FLOW_ENV
-      })),
+      queueName,
+      Buffer.from(
+        JSON.stringify({
+          tempId,
+          channel,
+          to,
+          userId,
+          type,
+          content,
+          context,
+          environment: FLOW_ENV,
+        })
+      ),
       { persistent: true, headers: { 'x-attempts': 0 } }
     );
 
+    // notifica front (sockets)
     try {
       fastify.io?.to(`chat-${userId}`).emit('new_message', pending);
       fastify.io?.emit('new_message', pending);
     } catch {}
 
-    return reply.send({ success: true, enqueued: true, message: pending, channel });
+    return reply.send({
+      success: true,
+      enqueued: true,
+      message: pending,
+      channel,
+    });
   });
 
+  // ========== ENVIO DE TEMPLATE ==========
   // POST /api/v1/messages/send/template
   fastify.post('/send/template', async (req, reply) => {
     const { to } = req.body || {};
     let { template, origin, reply_action, reply_payload } = req.body || {};
 
+    // compat: também aceita { templateName, languageCode, components }
     if (!template) {
       const { templateName, languageCode, components } = req.body || {};
       if (templateName && languageCode) {
         template = {
           name: templateName,
           language: { code: languageCode },
-          ...(components ? { components } : {})
+          ...(components ? { components } : {}),
         };
       }
     }
@@ -180,7 +189,7 @@ export default async function messagesRoutes(fastify) {
         .send({ error: 'template.name e template.language.code são obrigatórios' });
     }
 
-    // validação novos campos
+    // validação dos novos campos
     origin = origin || 'individual'; // 'individual' | 'agent_active' | 'campaign'
     if (reply_action) {
       const a = String(reply_action).toLowerCase();
@@ -196,42 +205,21 @@ export default async function messagesRoutes(fastify) {
 
     const channel = 'whatsapp';
     const userId  = formatUserId(to, channel);
-
     const tempId  = uuidv4();
+
     const content = template.name;
     const metaObj = {
       languageCode: template.language.code,
-      components: template.components || null
+      components: template.components || null,
     };
     const meta = JSON.stringify(metaObj);
 
-    // sem flow_version_id / flow_deployment_id
     const { rows } = await req.db.query(
       `INSERT INTO messages (
-         user_id,
-         message_id,
-         direction,
-         "type",
-         "content",
-         "timestamp",
-         status,
-         metadata,
-         created_at,
-         updated_at,
-         channel
-       ) VALUES (
-         $1,
-         $2,
-         'outgoing',
-         'template',
-         $3,
-         NOW(),
-         'pending',
-         $4,
-         NOW(),
-         NOW(),
-         $5
-       )
+         user_id, message_id, direction, "type", "content",
+         "timestamp", status, metadata, created_at, updated_at, channel
+       ) VALUES ($1,$2,'outgoing','template',$3,
+                 NOW(),'pending',$4,NOW(),NOW(),$5)
        RETURNING *`,
       [userId, tempId, content, meta, channel]
     );
@@ -243,52 +231,36 @@ export default async function messagesRoutes(fastify) {
     try {
       await req.db.query(
         `INSERT INTO active_triggers
-           (origin,
-            user_id,
-            channel,
-            campaign_id,
-            campaign_item_id,
-            message_id,
-            reply_action,
-            reply_payload,
-            created_at,
-            expires_at,
-            status)
-         VALUES (
-           $1,
-           $2,
-           $3,
-           $4,
-           $5,
-           $6,
-           $7,
-           $8,
-           NOW(),
-           NOW() + interval '30 days',
-           'pending'
-         )`,
+           (origin, user_id, channel, campaign_id, campaign_item_id, message_id,
+            reply_action, reply_payload, created_at, expires_at, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8, NOW(), NOW() + interval '30 days','pending')`,
         [origin, userId, channel, null, null, tempId, action, payload]
       );
     } catch (e) {
       req.log.error({ e }, '[active_triggers] falha ao inserir');
     }
 
+    // envia pro Rabbit
     const ch = await ensureAMQP();
+    const queueName = resolveOutgoingQueueName(req);
+    await ch.assertQueue(queueName, { durable: true });
+
     ch.sendToQueue(
-      OUTGOING_QUEUE,
-      Buffer.from(JSON.stringify({
-        tempId,
-        channel: 'whatsapp',
-        to,
-        type: 'template',
-        template: {
-          name: template.name,
-          language: { code: template.language.code },
-          ...(template.components ? { components: template.components } : {})
-        },
-        // só o ambiente
-        environment: FLOW_ENV
-      })),
+      queueName,
+      Buffer.from(
+        JSON.stringify({
+          tempId,
+          channel: 'whatsapp',
+          to,
+          type: 'template',
+          template: {
+            name: template.name,
+            language: { code: template.language.code },
+            ...(template.components ? { components: template.components } : {}),
+          },
+          environment: FLOW_ENV,
+        })
+      ),
       { persistent: true, headers: { 'x-attempts': 0 } }
     );
 
@@ -297,10 +269,15 @@ export default async function messagesRoutes(fastify) {
       fastify.io?.emit('new_message', pending);
     } catch {}
 
-    return reply.send({ success: true, enqueued: true, message: pending, channel });
+    return reply.send({
+      success: true,
+      enqueued: true,
+      message: pending,
+      channel,
+    });
   });
 
-  // ===================== STATUS / CONTAGEM =====================
+  // ========== STATUS / CONTAGEM ==========
 
   fastify.get('/check-24h/:user_id', async (req) => {
     const userId = decode(req.params.user_id);
@@ -350,13 +327,12 @@ export default async function messagesRoutes(fastify) {
     return rows;
   });
 
-  // ===================== LISTAGEM =====================
-
+  // ========== LISTAGEM ==========
   fastify.get('/:user_id', async (req) => {
     const userId = decode(req.params.user_id);
     const { limit = '100', before_ts, sort = 'asc' } = req.query || {};
 
-    const lim     = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
     const wantAsc = String(sort).toLowerCase() === 'asc';
 
     let sql, params;
@@ -382,15 +358,15 @@ export default async function messagesRoutes(fastify) {
     }
 
     const { rows } = await req.db.query(sql, params);
-    const result   = wantAsc ? rows.slice().reverse() : rows;
-    const oldest   = result.length
-      ? (result[0].timestamp || result[0].created_at)
+    const result = wantAsc ? rows.slice().reverse() : rows;
+    const oldest = result.length
+      ? result[0].timestamp || result[0].created_at
       : before_ts || null;
 
     return {
       data: result,
       has_more: rows.length === lim,
-      next_before_ts: oldest
+      next_before_ts: oldest,
     };
   });
 }
