@@ -4,9 +4,9 @@ import { v4 as uuidv4 } from 'uuid';
 import dotenv from 'dotenv';
 dotenv.config();
 
-const AMQP_URL = process.env.AMQP_URL || 'amqp://guest:guest@rabbitmq:5672/';
+const AMQP_URL    = process.env.AMQP_URL    || 'amqp://guest:guest@rabbitmq:5672/';
 const OUTGOING_QUEUE = process.env.OUTGOING_QUEUE || 'outgoing';
-const FLOW_ENV = (process.env.FLOW_ENV || 'prod').toLowerCase(); // 'prod' | 'hmg'
+const FLOW_ENV    = (process.env.FLOW_ENV   || 'prod').toLowerCase(); // 'prod' | 'hmg'
 
 let amqpConn, amqpCh;
 async function ensureAMQP() {
@@ -20,24 +20,8 @@ async function ensureAMQP() {
 
 const decode = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
 
-// ============ helpers de domínio (deployment + versão) ============
+/* ===================== helpers ===================== */
 
-async function resolveActiveDeployment(db, channel, environment = FLOW_ENV) {
-  const { rows } = await db.query(
-    `
-    SELECT d.id AS flow_deployment_id, d.version_id AS flow_version_id
-      FROM flow_deployments d
-     WHERE d.channel = $1
-       AND d.environment = $2
-       AND d.is_active = true
-     LIMIT 1
-    `,
-    [channel, environment]
-  );
-  return rows[0] || null;
-}
-
-// valida payload
 function validateContent(type, content, channel) {
   if (!type) throw new Error('Message type is required');
   if (type === 'text') {
@@ -52,7 +36,9 @@ function validateContent(type, content, channel) {
 }
 
 function formatUserId(to, channel = 'whatsapp') {
-  return channel === 'telegram' ? `${to}@t.msgcli.net` : `${to}@w.msgcli.net`;
+  return channel === 'telegram'
+    ? `${to}@t.msgcli.net`
+    : `${to}@w.msgcli.net`;
 }
 
 // checagem 24h usando o DB do tenant
@@ -78,7 +64,9 @@ export default async function messagesRoutes(fastify) {
   // POST /api/v1/messages/send
   fastify.post('/send', async (req, reply) => {
     const { to, type, content, context, channel = 'whatsapp' } = req.body || {};
-    if (!to || !type) return reply.code(400).send({ error: 'Recipient and type are required' });
+    if (!to || !type) {
+      return reply.code(400).send({ error: 'Recipient and type are required' });
+    }
 
     validateContent(type, content, channel);
     const userId = formatUserId(to, channel);
@@ -87,30 +75,55 @@ export default async function messagesRoutes(fastify) {
     if (channel === 'whatsapp') {
       const ok = await within24h(req.db, userId);
       if (!ok) {
-        return reply.code(400).send({ error: 'Outside 24h window. Use an approved template.' });
+        return reply.code(400).send({
+          error: 'Outside 24h window. Use an approved template.'
+        });
       }
     }
 
-    // >>> NOVO: resolve deployment/versão ativos para o canal
-    const dep = await resolveActiveDeployment(req.db, channel);
-    if (!dep) {
-      return reply.code(412).send({ error: `No active deployment for channel ${channel} in ${FLOW_ENV}` });
-    }
-
-    const tempId = uuidv4();
+    const tempId    = uuidv4();
     const dbContent = type === 'text' ? content.body : JSON.stringify(content);
 
+    // sem flow_version_id / flow_deployment_id
     const { rows } = await req.db.query(
       `INSERT INTO messages (
-         user_id, message_id, direction, "type", "content", "timestamp",
-         flow_id, reply_to, status, metadata, created_at, updated_at, channel,
-         flow_version_id, flow_deployment_id
-       ) VALUES ($1,$2,'outgoing',$3,$4,NOW(),
-                 NULL, $5, 'pending', NULL, NOW(), NOW(), $6,
-                 $7, $8)
+         user_id,
+         message_id,
+         direction,
+         "type",
+         "content",
+         "timestamp",
+         flow_id,
+         reply_to,
+         status,
+         metadata,
+         created_at,
+         updated_at,
+         channel
+       ) VALUES (
+         $1,
+         $2,
+         'outgoing',
+         $3,
+         $4,
+         NOW(),
+         NULL,
+         $5,
+         'pending',
+         NULL,
+         NOW(),
+         NOW(),
+         $6
+       )
        RETURNING *`,
-      [userId, tempId, type, dbContent, context?.message_id || null, channel,
-       dep.flow_version_id, dep.flow_deployment_id]
+      [
+        userId,
+        tempId,
+        type,
+        dbContent,
+        context?.message_id || null,
+        channel
+      ]
     );
     const pending = rows[0];
 
@@ -125,8 +138,7 @@ export default async function messagesRoutes(fastify) {
         type,
         content,
         context,
-        flowVersionId: dep.flow_version_id,
-        flowDeploymentId: dep.flow_deployment_id,
+        // apenas env, sem flowVersionId / flowDeploymentId
         environment: FLOW_ENV
       })),
       { persistent: true, headers: { 'x-attempts': 0 } }
@@ -156,18 +168,26 @@ export default async function messagesRoutes(fastify) {
       }
     }
 
-    if (!to) return reply.code(400).send({ error: 'to é obrigatório' });
-    if (!template || typeof template !== 'object')
+    if (!to) {
+      return reply.code(400).send({ error: 'to é obrigatório' });
+    }
+    if (!template || typeof template !== 'object') {
       return reply.code(400).send({ error: 'template é obrigatório' });
-    if (!template.name || !template.language || !template.language.code)
-      return reply.code(400).send({ error: 'template.name e template.language.code são obrigatórios' });
+    }
+    if (!template.name || !template.language || !template.language.code) {
+      return reply
+        .code(400)
+        .send({ error: 'template.name e template.language.code são obrigatórios' });
+    }
 
     // validação novos campos
     origin = origin || 'individual'; // 'individual' | 'agent_active' | 'campaign'
     if (reply_action) {
       const a = String(reply_action).toLowerCase();
       if (!['open_ticket', 'flow_goto'].includes(a)) {
-        return reply.code(400).send({ error: "reply_action deve ser 'open_ticket' ou 'flow_goto'" });
+        return reply
+          .code(400)
+          .send({ error: "reply_action deve ser 'open_ticket' ou 'flow_goto'" });
       }
     }
     if (reply_payload && typeof reply_payload !== 'object') {
@@ -175,16 +195,9 @@ export default async function messagesRoutes(fastify) {
     }
 
     const channel = 'whatsapp';
-    const userId = formatUserId(to, channel);
+    const userId  = formatUserId(to, channel);
 
-    // >>> NOVO: resolve deployment/versão para o canal
-    const dep = await resolveActiveDeployment(req.db, channel);
-    if (!dep) {
-      return reply.code(412).send({ error: `No active deployment for channel ${channel} in ${FLOW_ENV}` });
-    }
-
-    const tempId = uuidv4();
-
+    const tempId  = uuidv4();
     const content = template.name;
     const metaObj = {
       languageCode: template.language.code,
@@ -192,28 +205,68 @@ export default async function messagesRoutes(fastify) {
     };
     const meta = JSON.stringify(metaObj);
 
+    // sem flow_version_id / flow_deployment_id
     const { rows } = await req.db.query(
       `INSERT INTO messages (
-         user_id, message_id, direction, "type", "content",
-         "timestamp", status, metadata, created_at, updated_at, channel,
-         flow_version_id, flow_deployment_id
-       ) VALUES ($1,$2,'outgoing','template',$3,
-                 NOW(),'pending',$4,NOW(),NOW(),$5,
-                 $6,$7)
+         user_id,
+         message_id,
+         direction,
+         "type",
+         "content",
+         "timestamp",
+         status,
+         metadata,
+         created_at,
+         updated_at,
+         channel
+       ) VALUES (
+         $1,
+         $2,
+         'outgoing',
+         'template',
+         $3,
+         NOW(),
+         'pending',
+         $4,
+         NOW(),
+         NOW(),
+         $5
+       )
        RETURNING *`,
-      [userId, tempId, content, meta, channel, dep.flow_version_id, dep.flow_deployment_id]
+      [userId, tempId, content, meta, channel]
     );
     const pending = rows[0];
 
     // gatilho de reply
-    const action = (reply_action || 'open_ticket').toLowerCase();
+    const action  = (reply_action || 'open_ticket').toLowerCase();
     const payload = reply_payload ? JSON.stringify(reply_payload) : null;
     try {
       await req.db.query(
         `INSERT INTO active_triggers
-           (origin, user_id, channel, campaign_id, campaign_item_id, message_id,
-            reply_action, reply_payload, created_at, expires_at, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8, NOW(), NOW() + interval '30 days','pending')`,
+           (origin,
+            user_id,
+            channel,
+            campaign_id,
+            campaign_item_id,
+            message_id,
+            reply_action,
+            reply_payload,
+            created_at,
+            expires_at,
+            status)
+         VALUES (
+           $1,
+           $2,
+           $3,
+           $4,
+           $5,
+           $6,
+           $7,
+           $8,
+           NOW(),
+           NOW() + interval '30 days',
+           'pending'
+         )`,
         [origin, userId, channel, null, null, tempId, action, payload]
       );
     } catch (e) {
@@ -233,8 +286,7 @@ export default async function messagesRoutes(fastify) {
           language: { code: template.language.code },
           ...(template.components ? { components: template.components } : {})
         },
-        flowVersionId: dep.flow_version_id,
-        flowDeploymentId: dep.flow_deployment_id,
+        // só o ambiente
         environment: FLOW_ENV
       })),
       { persistent: true, headers: { 'x-attempts': 0 } }
@@ -259,7 +311,9 @@ export default async function messagesRoutes(fastify) {
   fastify.put('/read-status/:user_id', async (req, reply) => {
     const userId = decode(req.params.user_id);
     const { last_read } = req.body || {};
-    if (!last_read) return reply.code(400).send({ error: 'last_read é obrigatório' });
+    if (!last_read) {
+      return reply.code(400).send({ error: 'last_read é obrigatório' });
+    }
 
     const { rows } = await req.db.query(
       `INSERT INTO user_last_read (user_id, last_read)
@@ -302,7 +356,7 @@ export default async function messagesRoutes(fastify) {
     const userId = decode(req.params.user_id);
     const { limit = '100', before_ts, sort = 'asc' } = req.query || {};
 
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+    const lim     = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
     const wantAsc = String(sort).toLowerCase() === 'asc';
 
     let sql, params;
@@ -328,8 +382,10 @@ export default async function messagesRoutes(fastify) {
     }
 
     const { rows } = await req.db.query(sql, params);
-    const result = wantAsc ? rows.slice().reverse() : rows;
-    const oldest = result.length ? (result[0].timestamp || result[0].created_at) : before_ts || null;
+    const result   = wantAsc ? rows.slice().reverse() : rows;
+    const oldest   = result.length
+      ? (result[0].timestamp || result[0].created_at)
+      : before_ts || null;
 
     return {
       data: result,
