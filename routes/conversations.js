@@ -4,7 +4,7 @@
 // Helper para descobrir o flow_id do atendente pelo email
 async function getAgentFlowId(db, email) {
   const { rows } = await db.query(
-    `SELECT flow_id FROM hmg.users WHERE email = $1 LIMIT 1`,
+    `SELECT flow_id FROM users WHERE email = $1 LIMIT 1`,
     [email]
   );
   return rows[0]?.flow_id || null;
@@ -52,10 +52,10 @@ async function conversationsRoutes(fastify, options) {
         lm.last_message    AS last_message,
         lm.last_message_at AS last_message_at
 
-      FROM hmg.tickets t
-      JOIN hmg.clientes c
+      FROM tickets t
+      JOIN clientes c
         ON c.user_id = t.user_id
-      JOIN hmg.filas f
+      JOIN filas f
         ON f.nome    = t.fila
        AND f.flow_id = t.flow_id
 
@@ -74,7 +74,7 @@ async function conversationsRoutes(fastify, options) {
             WHEN m."type" = 'location'               THEN '📍 Localização'
             ELSE '[mensagem]'
           END AS last_message
-        FROM hmg.messages m
+        FROM messages m
         WHERE m.user_id = t.user_id
           AND m."type" <> 'system'
         ORDER BY m."timestamp" DESC
@@ -134,7 +134,7 @@ fastify.get('/queues', async (req, reply) => {
         t.status,
         t.flow_id,
         t.created_at
-      FROM hmg.tickets t
+      FROM tickets t
       WHERE t.status = 'open'
         AND (t.assigned_to IS NULL OR t.assigned_to = '')
         AND t.fila = ANY($1)
@@ -176,11 +176,11 @@ fastify.put('/queues/next', async (req, reply) => {
 
     const { rows } = await req.db.query(
       `
-      UPDATE hmg.tickets t
+      UPDATE tickets t
       SET assigned_to = $1
       WHERE t.id = (
         SELECT t2.id
-        FROM hmg.tickets t2
+        FROM tickets t2
         WHERE t2.status = 'open'
           AND (t2.assigned_to IS NULL OR t2.assigned_to = '')
           AND ( $2::text[] IS NULL OR t2.fila = ANY($2) )
