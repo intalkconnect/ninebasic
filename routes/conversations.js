@@ -22,6 +22,7 @@ SELECT
   f.color AS fila_color,        
   t.assigned_to,
   t.status,
+  t.flow_id,
   c.name,
   c.channel,
   c.phone,
@@ -97,6 +98,7 @@ ORDER BY COALESCE(lm.last_message_at, t.created_at) DESC;
         t.ticket_number,
         t.fila,
         t.status,
+        t.flow_id,
         t.created_at
       FROM tickets t
       WHERE t.status = 'open'
