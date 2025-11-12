@@ -61,8 +61,8 @@ function validateContent(type, content, channel) {
 
 function formatUserId(to, channel = 'whatsapp') {
   const ch = String(channel || 'whatsapp').toLowerCase();
-  if (ch === 'telegram') return `${to}@t.msgcli.net`;
-  if (ch === 'facebook') return `${to}@f.msgcli.net`;
+  if (ch === 'telegram')  return `${to}@t.msgcli.net`;
+  if (ch === 'facebook')  return `${to}@f.msgcli.net`;
   if (ch === 'instagram') return `${to}@i.msgcli.net`;
   return `${to}@w.msgcli.net`;
 }
@@ -90,13 +90,22 @@ export default async function messagesRoutes(fastify) {
   // ========== ENVIO SIMPLES ==========
   // POST /api/v1/messages/send
   fastify.post('/send', async (req, reply) => {
-    const { to, type, content, context, channel = 'whatsapp' } = req.body || {};
+    const {
+      to,
+      type,
+      content,
+      context,
+      channel = 'whatsapp',
+      flow_id,
+    } = req.body || {};
+
     if (!to || !type) {
       return reply.code(400).send({ error: 'Recipient and type are required' });
     }
 
     validateContent(type, content, channel);
     const userId = formatUserId(to, channel);
+    const flowId = flow_id ?? null;
 
     // 24h apenas p/ WhatsApp
     if (channel === 'whatsapp') {
@@ -108,18 +117,26 @@ export default async function messagesRoutes(fastify) {
       }
     }
 
-    const tempId   = uuidv4();
+    const tempId    = uuidv4();
     const dbContent = type === 'text' ? content.body : JSON.stringify(content);
 
-    // grava mensagem como "pending"
+    // grava mensagem como "pending" (JÁ com flow_id)
     const { rows } = await req.db.query(
       `INSERT INTO messages (
          user_id, message_id, direction, "type", "content", "timestamp",
          flow_id, reply_to, status, metadata, created_at, updated_at, channel
        ) VALUES ($1,$2,'outgoing',$3,$4,NOW(),
-                 NULL, $5, 'pending', NULL, NOW(), NOW(), $6)
+                 $5, $6, 'pending', NULL, NOW(), NOW(), $7)
        RETURNING *`,
-      [userId, tempId, type, dbContent, context?.message_id || null, channel]
+      [
+        userId,                          // $1
+        tempId,                          // $2
+        type,                            // $3
+        dbContent,                       // $4
+        flowId,                          // $5 -> flow_id
+        context?.message_id || null,     // $6 -> reply_to
+        channel,                         // $7 -> channel
+      ]
     );
     const pending = rows[0];
 
@@ -139,6 +156,7 @@ export default async function messagesRoutes(fastify) {
           type,
           content,
           context,
+          flow_id: flowId || null,
           environment: FLOW_ENV,
         })
       ),
@@ -162,7 +180,7 @@ export default async function messagesRoutes(fastify) {
   // ========== ENVIO DE TEMPLATE ==========
   // POST /api/v1/messages/send/template
   fastify.post('/send/template', async (req, reply) => {
-    const { to } = req.body || {};
+    const { to, flow_id } = req.body || {};
     let { template, origin, reply_action, reply_payload } = req.body || {};
 
     // compat: também aceita { templateName, languageCode, components }
@@ -206,6 +224,7 @@ export default async function messagesRoutes(fastify) {
     const channel = 'whatsapp';
     const userId  = formatUserId(to, channel);
     const tempId  = uuidv4();
+    const flowId  = flow_id ?? null;
 
     const content = template.name;
     const metaObj = {
@@ -217,11 +236,18 @@ export default async function messagesRoutes(fastify) {
     const { rows } = await req.db.query(
       `INSERT INTO messages (
          user_id, message_id, direction, "type", "content",
-         "timestamp", status, metadata, created_at, updated_at, channel
+         "timestamp", status, metadata, created_at, updated_at, channel, flow_id
        ) VALUES ($1,$2,'outgoing','template',$3,
-                 NOW(),'pending',$4,NOW(),NOW(),$5)
+                 NOW(),'pending',$4,NOW(),NOW(),$5,$6)
        RETURNING *`,
-      [userId, tempId, content, meta, channel]
+      [
+        userId,   // $1
+        tempId,   // $2
+        content,  // $3
+        meta,     // $4
+        channel,  // $5
+        flowId,   // $6
+      ]
     );
     const pending = rows[0];
 
@@ -252,12 +278,14 @@ export default async function messagesRoutes(fastify) {
           tempId,
           channel: 'whatsapp',
           to,
+          userId,
           type: 'template',
           template: {
             name: template.name,
             language: { code: template.language.code },
             ...(template.components ? { components: template.components } : {}),
           },
+          flow_id: flowId || null,
           environment: FLOW_ENV,
         })
       ),
