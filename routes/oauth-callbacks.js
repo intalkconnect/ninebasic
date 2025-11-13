@@ -33,18 +33,21 @@ export default async function oauthCallbacks(fastify) {
   });
 
   // GET /oauth/wa
-  fastify.get("/wa", async (req, reply) => {
-    const { code = "", state = "" } = req.query || {};
-    const html = `<!doctype html>
+fastify.get("/wa", async (req, reply) => {
+  const { code = "", state = "" } = req.query || {};
+  const html = `<!doctype html>
 <html><body><script>
 (function(){
   try {
-    var payload = { type: "wa:oauth", code: ${JSON.stringify(code)}, state: ${JSON.stringify(state)} };
-    if (window.opener) window.opener.postMessage(payload, "*");
+    if (!window.__wa_done__) {
+      window.__wa_done__ = true;
+      var payload = { type: "wa:oauth", code: ${JSON.stringify(code)}, state: ${JSON.stringify(state)} };
+      if (window.opener) window.opener.postMessage(payload, "*");
+    }
   } catch(e) {}
   window.close();
 })();
 </script>Feche esta janela.</body></html>`;
-    reply.type("text/html").send(html);
-  });
+  reply.type("text/html").send(html);
+});
 }
