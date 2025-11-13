@@ -995,81 +995,126 @@ async function ticketsRoutes(fastify, options) {
 });
 
   // POST /tickets/transferir → fecha atual e cria novo em outra fila
-  fastify.post("/transferir", async (req, reply) => {
-    const { from_user_id, to_fila, to_assigned_to, transferido_por } = req.body;
+ // POST /tickets/transferir → fecha atual (no flow) e cria novo (no mesmo flow)
+fastify.post("/transferir", async (req, reply) => {
+  const {
+    from_user_id,
+    to_fila,            // nome da fila
+    to_assigned_to,
+    transferido_por,
+    flow_id,            // << OBRIGATÓRIO
+  } = req.body || {};
 
-    if (!from_user_id || !to_fila || !transferido_por) {
-      return reply
-        .code(400)
-        .send({
-          error: "Campos obrigatórios: from_user_id, to_fila, transferido_por",
-        });
-    }
+  if (!from_user_id || !to_fila || !transferido_por || !flow_id) {
+    return reply.code(400).send({
+      error:
+        "Campos obrigatórios: from_user_id, to_fila, transferido_por, flow_id",
+    });
+  }
 
-    const client = req.db; // << já é o client conectado
-    let inTx = false;
+  const flowId = String(flow_id);
 
-    try {
-      await client.query("BEGIN"); // usa a MESMA conexão
-      inTx = true;
+  const client = req.db; // conexão já viva
+  let inTx = false;
 
-      const update = await client.query(
-        `UPDATE tickets
+  try {
+    await client.query("BEGIN");
+    inTx = true;
+
+    // 1) Fecha o ticket ABERTO do MESMO flow
+    const rClose = await client.query(
+      `
+      UPDATE tickets
          SET status = 'closed', updated_at = NOW()
-       WHERE user_id = $1 AND status = 'open'`,
-        [from_user_id]
-      );
-      if (update.rowCount === 0) {
-        await client.query("ROLLBACK");
-        return reply
-          .code(404)
-          .send({ error: "Ticket atual não encontrado ou já encerrado" });
-      }
-
-      const filaResult = await client.query(
-        `SELECT nome FROM filas WHERE nome = $1`,
-        [to_fila]
-      );
-      if (filaResult.rowCount === 0) {
-        await client.query("ROLLBACK");
-        return reply.code(400).send({ error: "Fila destino não encontrada" });
-      }
-      const nomeDaFila = filaResult.rows[0].nome;
-
-      const rCreate = await client.query(
-        `SELECT create_ticket($1, $2, $3) AS ticket_number`,
-        [from_user_id, nomeDaFila, to_assigned_to || null]
-      );
-
-      const novoTicket = await client.query(
-        `SELECT user_id, ticket_number, fila, assigned_to, status
-         FROM tickets
-        WHERE ticket_number = $1`,
-        [rCreate.rows[0].ticket_number]
-      );
-
-      await client.query("COMMIT");
-      inTx = false;
-
-      return reply.code(201).send({
-        sucesso: true,
-        transferido_por, // já que é obrigatório, devolvemos também
-        novo_ticket: novoTicket.rows[0],
-      });
-    } catch (err) {
-      if (inTx) {
-        try {
-          await client.query("ROLLBACK");
-        } catch {}
-      }
-      fastify.log.error(
-        { err, body: req.body },
-        "Erro em POST /tickets/transferir"
-      );
-      return reply.code(500).send({ error: "Erro ao transferir atendimento" });
+       WHERE user_id = $1
+         AND status = 'open'
+         AND flow_id = $2::uuid
+      RETURNING id, ticket_number, fila, assigned_to, flow_id
+      `,
+      [from_user_id, flowId]
+    );
+    if (rClose.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return reply
+        .code(404)
+        .send({ error: "Ticket atual (no flow) não encontrado ou já encerrado" });
     }
-    // nada de client.release(); // << NÃO existe nesse client
-  });
+
+    // 2) Confere se a fila destino existe e pertence ao MESMO flow
+    const rFila = await client.query(
+      `
+      SELECT id, nome, flow_id
+        FROM filas
+       WHERE nome = $1
+      `,
+      [to_fila]
+    );
+    if (rFila.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({ error: "Fila destino não encontrada" });
+    }
+
+    const filaRow = rFila.rows[0];
+    if (String(filaRow.flow_id || "") !== flowId) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({
+        error: "Fila destino não pertence ao mesmo flow_id",
+      });
+    }
+
+    // 3) Cria o novo ticket
+    // A função create_ticket original recebe (user_id, fila, assigned_to).
+    // Criamos e, em seguida, forçamos o flow_id no registro criado.
+    const rCreate = await client.query(
+      `SELECT create_ticket($1, $2, $3) AS ticket_number`,
+      [from_user_id, filaRow.nome, to_assigned_to || null]
+    );
+    const newTicketNumber = rCreate.rows[0]?.ticket_number;
+
+    if (!newTicketNumber) {
+      await client.query("ROLLBACK");
+      return reply
+        .code(500)
+        .send({ error: "Falha ao criar novo ticket" });
+    }
+
+    // 4) Força o flow_id no novo ticket (caso a função não grave flow_id)
+    await client.query(
+      `
+      UPDATE tickets
+         SET flow_id = $1::uuid
+       WHERE ticket_number = $2
+      `,
+      [flowId, newTicketNumber]
+    );
+
+    // 5) Busca o novo ticket para responder
+    const rNew = await client.query(
+      `
+      SELECT user_id, ticket_number, fila, assigned_to, status, flow_id
+        FROM tickets
+       WHERE ticket_number = $1
+      `,
+      [newTicketNumber]
+    );
+
+    await client.query("COMMIT");
+    inTx = false;
+
+    return reply.code(201).send({
+      sucesso: true,
+      transferido_por,
+      novo_ticket: rNew.rows[0],
+    });
+  } catch (err) {
+    if (inTx) {
+      try { await client.query("ROLLBACK"); } catch {}
+    }
+    fastify.log.error({ err, body: req.body }, "Erro em POST /tickets/transferir");
+    return reply.code(500).send({ error: "Erro ao transferir atendimento" });
+  }
+});
+
 
   // GET /tickets/history → lista de tickets fechados (com busca e período)
   fastify.get("/history", async (req, reply) => {
