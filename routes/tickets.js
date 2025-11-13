@@ -994,9 +994,8 @@ async function ticketsRoutes(fastify, options) {
   }
 });
 
-  // POST /tickets/transferir → fecha atual e cria novo em outra fila
- // POST /tickets/transferir → fecha atual (no flow) e cria novo (no mesmo flow)
-fastify.post("/transferir", async (req, reply) => {
+// POST /tickets/transfer → fecha atual (mesmo flow) e cria novo na fila destino
+fastify.post("/transfer", async (req, reply) => {
   const {
     from_user_id,
     to_fila,            // nome da fila
@@ -1063,8 +1062,6 @@ fastify.post("/transferir", async (req, reply) => {
     }
 
     // 3) Cria o novo ticket
-    // A função create_ticket original recebe (user_id, fila, assigned_to).
-    // Criamos e, em seguida, forçamos o flow_id no registro criado.
     const rCreate = await client.query(
       `SELECT create_ticket($1, $2, $3) AS ticket_number`,
       [from_user_id, filaRow.nome, to_assigned_to || null]
@@ -1110,11 +1107,10 @@ fastify.post("/transferir", async (req, reply) => {
     if (inTx) {
       try { await client.query("ROLLBACK"); } catch {}
     }
-    fastify.log.error({ err, body: req.body }, "Erro em POST /tickets/transferir");
+    fastify.log.error({ err, body: req.body }, "Erro em POST /tickets/transfer");
     return reply.code(500).send({ error: "Erro ao transferir atendimento" });
   }
 });
-
 
   // GET /tickets/history → lista de tickets fechados (com busca e período)
   fastify.get("/history", async (req, reply) => {
