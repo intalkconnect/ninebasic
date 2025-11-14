@@ -51,60 +51,55 @@ export default async function oauthCallbacks(fastify) {
       app_id = "",
       config_id = "",
       error = "",
-      error_description = "",
-      display = "popup",
+      error_description = ""
     } = q;
 
-    // redirect_uri "proxy-aware"
+    // redirect_uri calculado de forma proxy-aware
     const xfProto = (req.headers["x-forwarded-proto"] || "").toString().split(",")[0].trim();
     const proto   = xfProto || req.protocol || "https";
     const xfHost  = (req.headers["x-forwarded-host"] || "").toString().split(",")[0].trim();
     const host    = xfHost || req.headers.host;
     const redirect_uri = `${proto}://${host}/oauth/wa`;
 
-    // 1) PRIMEIRA ETAPA → HTML-ponte (evita segundo popup)
+    // 1) Primeira etapa: HTML-ponte (evita 2º popup)
     if (start) {
-      // mesmo "extras" do wizard oficial
       const extrasObj = { sessionInfoVersion: "3", version: "v3" };
       const extrasEnc = encodeURIComponent(JSON.stringify(extrasObj));
 
+      // ⚠️ Sem display=popup → usamos O SEU popup; a Meta não abre outro.
       const target =
         `https://business.facebook.com/messaging/whatsapp/onboard/` +
         `?app_id=${encodeURIComponent(String(app_id || ""))}` +
         `&config_id=${encodeURIComponent(String(config_id || ""))}` +
         `&extras=${extrasEnc}` +
-        `&display=${encodeURIComponent(String(display || "popup"))}` +
-        // o ES normalmente ignora state, mas se aceitar, enviamos
         (state ? `&state=${encodeURIComponent(String(state))}` : ``) +
-        // importante: o redirect tem de estar configurado na Meta (este /oauth/wa)
         `&redirect_uri=${encodeURIComponent(redirect_uri)}`;
 
       const html = `<!doctype html>
-<html><head><meta charset="utf-8"><title>WhatsApp Onboarding</title></head>
+<html><head><meta charset="utf-8"><title>WA Onboarding</title></head>
 <body style="margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
   <script>
-    (function () {
-      try {
-        // usar replace garante que continuamos NA MESMA janela (sem abrir outra)
-        window.location.replace(${JSON.stringify(target)});
-      } catch (e) {
-        document.body.innerHTML =
-          '<p style="padding:16px">Não foi possível iniciar o wizard. ' +
-          'Abra <a href=' + ${JSON.stringify(target)} + ' target="_self" rel="opener">este link</a>.</p>';
-      }
-    })();
+    // debug básico
+    console.log("[/oauth/wa start] bridge loaded. Replacing location to Meta wizard...");
+    // garante reutilizar a MESMA janela
+    window.name = "wa-es-onboard";
+    try { window.location.replace(${JSON.stringify(target)}); }
+    catch (e) {
+      console.error("replace failed", e);
+      document.body.innerHTML = '<p style="padding:16px">Abra <a href=' + ${JSON.stringify(target)} + ' target="_self">este link</a>.</p>';
+    }
   </script>
 </body></html>`;
       reply.type("text/html").send(html);
       return;
     }
 
-    // 2) RETORNO DO WIZARD
+    // 2) Retorno do wizard
     if (error || !code) {
       const msg = error ? `${error}: ${error_description || "Falha ao autenticar"}` : "Code ausente no retorno do OAuth.";
       const html = `<!doctype html>
 <html><head><meta charset="utf-8"/><title>WhatsApp – Erro</title></head>
-<body style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding:20px;">
+<body style="font-family: system-ui,-apple-system,Segoe UI,Roboto,sans-serif; padding:20px;">
   <h3>Não foi possível concluir a conexão do WhatsApp</h3>
   <p><strong>Detalhes:</strong> ${String(msg).replace(/</g, "&lt;")}</p>
   <p>Confira <code>app_id</code>, <code>config_id</code> e o <code>redirect_uri</code> configurado na Meta.</p>
@@ -114,14 +109,15 @@ export default async function oauthCallbacks(fastify) {
       return;
     }
 
-    // 3) SUCESSO → avisa o opener e fecha (uma pequena folga antes de fechar)
+    // 3) Sucesso: envia postMessage para a janela mãe e fecha
     const html = `<!doctype html>
 <html><body><script>
 (function () {
+  console.log("[/oauth/wa] success, posting message to opener...");
   try {
     var payload = { type: "wa:oauth", code: ${JSON.stringify(code)}, state: ${JSON.stringify(state)} };
     if (window.opener) window.opener.postMessage(payload, "*");
-  } catch (e) {}
+  } catch (e) { console.error("postMessage failed", e); }
   setTimeout(function(){ window.close(); }, 200);
 })();
 </script>Ok, pode fechar.</body></html>`;
