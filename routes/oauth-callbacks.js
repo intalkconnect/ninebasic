@@ -129,5 +129,5 @@ export default async function oauthCallbacks(fastify) {
 </body></html>`;
     reply.type("text/html").send(html);
   });
-}
+
 }
