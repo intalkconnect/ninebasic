@@ -63,15 +63,16 @@ export default async function oauthCallbacks(fastify) {
 
     // 1) Primeira etapa: aponta DIRETO para o dialog OAuth oficial (garante code)
     if (start) {
-      const url =
-        `https://www.facebook.com/v24.0/dialog/oauth` +
-        `?client_id=${encodeURIComponent(String(app_id || ""))}` +
-        `&redirect_uri=${encodeURIComponent(redirect_uri)}` +
-        `&response_type=code` +
-        `&config_id=${encodeURIComponent(String(config_id || ""))}` +
-        (state ? `&state=${encodeURIComponent(String(state))}` : ``) +
-        // dica: deixar display=popup ajuda a Meta a não abrir outra janela separada
-        `&display=popup`;
+      const extrasObj = { sessionInfoVersion: "3", version: "v3" }; // igual ao wizard
+const url =
+  `https://www.facebook.com/v24.0/dialog/oauth` +
+  `?client_id=${encodeURIComponent(String(app_id || ""))}` +
+  `&redirect_uri=${encodeURIComponent(redirect_uri)}` +
+  `&response_type=code` +
+  `&config_id=${encodeURIComponent(String(config_id || ""))}` +
+  (state ? `&state=${encodeURIComponent(String(state))}` : ``) +
+  `&display=popup` +
+  `&extras=${encodeURIComponent(JSON.stringify(extrasObj))}`;
 
       const html = `<!doctype html>
 <html><head><meta charset="utf-8"><title>Meta OAuth</title></head>
