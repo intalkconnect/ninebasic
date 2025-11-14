@@ -512,131 +512,169 @@ async function whatsappRoutes(fastify) {
 
   // ============ FINALIZE (Embedded Signup) ============
   // POST /api/v1/wa/es/finalize
-  fastify.post("/embedded/es/finalize", async (req, reply) => {
-    // subdomain: preferir do plugin; fallback do body/header
-    const subdomain =
-      req?.tenant?.subdomain ||
-      req?.tenant?.name ||
-      req?.headers["x-tenant-subdomain"] ||
-      req?.body?.subdomain;
+  // ============ FINALIZE (Embedded Signup) ============
+// POST /api/v1/wa/es/finalize
+fastify.post("/embedded/es/finalize", async (req, reply) => {
+  const subdomain =
+    req?.tenant?.subdomain ||
+    req?.tenant?.name ||
+    req?.headers["x-tenant-subdomain"] ||
+    req?.body?.subdomain;
 
-    const { code } = req.body || {};
-    if (!code || !subdomain) {
-      return reply.code(400).send({ error: "missing_code_or_subdomain" });
-    }
+  const { code } = req.body || {};
+  if (!code || !subdomain) {
+    return reply.code(400).send({ error: "missing_code_or_subdomain" });
+  }
 
-    const {
-      META_APP_ID,
-      META_APP_SECRET,
-      META_REDIRECT_URI,
-      YOUR_BUSINESS_ID,
-      SYSTEM_USER_ID,
-      SYSTEM_USER_TOKEN,
-      SYSTEM_USER_ADMIN_TOKEN,
-    } = process.env;
+  const {
+    META_APP_ID,
+    META_APP_SECRET,
+    META_REDIRECT_URI,
+    YOUR_BUSINESS_ID,
+    SYSTEM_USER_ID,
+    SYSTEM_USER_TOKEN,
+    SYSTEM_USER_ADMIN_TOKEN,
+  } = process.env;
 
-    if (!META_APP_ID || !META_APP_SECRET) {
-      return reply.code(500).send({ error: "meta_app_credentials_missing" });
-    }
-    if (!YOUR_BUSINESS_ID || !SYSTEM_USER_ID || !SYSTEM_USER_TOKEN) {
-      return reply
-        .code(500)
-        .send({ error: "system_user_or_business_env_missing" });
-    }
-    if (!req.db) {
-      return reply.code(500).send({ error: "db_not_available" });
-    }
+  if (!META_APP_ID || !META_APP_SECRET) {
+    return reply.code(500).send({ error: "meta_app_credentials_missing" });
+  }
+  if (!YOUR_BUSINESS_ID || !SYSTEM_USER_ID || !SYSTEM_USER_TOKEN) {
+    return reply.code(500).send({ error: "system_user_or_business_env_missing" });
+  }
+  if (!req.db) {
+    return reply.code(500).send({ error: "db_not_available" });
+  }
 
+  try {
+    // tenant
+    const tRes = await req.db.query(
+      `SELECT id, subdomain FROM public.tenants WHERE subdomain = $1 LIMIT 1`,
+      [subdomain]
+    );
+    const tenantRow = tRes.rows[0];
+    if (!tenantRow) return reply.code(404).send({ error: "tenant_not_found", subdomain });
+    const tenantId = tenantRow.id;
+
+    // exchange code -> user access_token
+    const qs = { client_id: META_APP_ID, client_secret: META_APP_SECRET, code };
+    if (META_REDIRECT_URI) qs.redirect_uri = META_REDIRECT_URI;
+    const tok = await gget("/oauth/access_token", { qs });
+    const userToken = tok.access_token;
+
+    // descobrir TODAS as WABAs
+    const wabaSet = new Set();
+
+    // granular_scopes
     try {
-      // 0) resolver tenant_id
-      const tRes = await req.db.query(
-        `SELECT id, subdomain FROM public.tenants WHERE subdomain = $1 LIMIT 1`,
-        [subdomain]
-      );
-      const tenantRow = tRes.rows[0];
-      if (!tenantRow)
-        return reply.code(404).send({ error: "tenant_not_found", subdomain });
-      const tenantId = tenantRow.id;
-
-      // 1) exchange code -> user access_token
-      const qs = {
-        client_id: META_APP_ID,
-        client_secret: META_APP_SECRET,
-        code,
-      };
-      if (META_REDIRECT_URI) qs.redirect_uri = META_REDIRECT_URI;
-      const tok = await gget("/oauth/access_token", { qs });
-      const userToken = tok.access_token;
-
-      // 2) descobrir WABA_ID
-      let wabaId = null;
-
-      // 2a) via /debug_token (granular_scopes)
-      try {
-        const dbg = await gget("/debug_token", {
-          qs: {
-            input_token: userToken,
-            access_token: `${META_APP_ID}|${META_APP_SECRET}`,
-          },
-        });
-        const gs = dbg?.data?.granular_scopes || [];
-        const mgmt = gs.find(
-          (s) =>
-            s?.scope === "whatsapp_business_management" &&
-            Array.isArray(s?.target_ids)
-        );
-        wabaId = mgmt?.target_ids?.[0] || null;
-      } catch (e) {
-        fastify.log.warn({ err: e }, "[wa/es/finalize] debug_token fallback");
-      }
-
-      // 2b) fallback: WABA(s) compartilhadas com seu Business
-      if (!wabaId) {
-        const shared = await gget(
-          `/${YOUR_BUSINESS_ID}/client_whatsapp_business_accounts`,
-          {
-            token: SYSTEM_USER_TOKEN,
-          }
-        );
-        wabaId = shared?.data?.[0]?.id || null;
-      }
-      if (!wabaId) return reply.code(400).send({ error: "no_waba_found" });
-
-      // 3) assinar webhooks do seu app na WABA
-      await gpost(`/${wabaId}/subscribed_apps`, { token: userToken });
-
-      // 4) dar MANAGE ao seu System User
-      await gpost(`/${wabaId}/assigned_users`, {
-        token: SYSTEM_USER_ADMIN_TOKEN || SYSTEM_USER_TOKEN,
-        // Graph aceita tasks como string "['MANAGE']" em x-www-form-urlencoded
-        form: { user: SYSTEM_USER_ID, tasks: "['MANAGE']" },
+      const dbg = await gget("/debug_token", {
+        qs: {
+          input_token: userToken,
+          access_token: `${META_APP_ID}|${META_APP_SECRET}`,
+        },
       });
+      const gs = dbg?.data?.granular_scopes || [];
+      gs.forEach((s) => {
+        if (s?.scope === "whatsapp_business_management" && Array.isArray(s?.target_ids)) {
+          s.target_ids.forEach((id) => id && wabaSet.add(String(id)));
+        }
+      });
+    } catch (e) {
+      fastify.log.warn({ err: e }, "[wa/es/finalize] debug_token warn");
+    }
 
-      // 5) listar números
-      const pn = await gget(`/${wabaId}/phone_numbers`, {
+    // WABAs do usuário
+    try {
+      const acc = await gget("/me/whatsapp_business_accounts", { token: userToken });
+      (acc?.data || []).forEach((a) => a?.id && wabaSet.add(String(a.id)));
+    } catch (e) {
+      fastify.log.warn({ err: e }, "[wa/es/finalize] /me/whatsapp_business_accounts warn");
+    }
+
+    // WABAs próprias
+    try {
+      const own = await gget("/me/owned_whatsapp_business_accounts", { token: userToken });
+      (own?.data || []).forEach((a) => a?.id && wabaSet.add(String(a.id)));
+    } catch (e) {
+      fastify.log.warn({ err: e }, "[wa/es/finalize] /me/owned_whatsapp_business_accounts warn");
+    }
+
+    // WABAs compartilhadas com seu Business
+    try {
+      const shared = await gget(`/${YOUR_BUSINESS_ID}/client_whatsapp_business_accounts`, {
         token: SYSTEM_USER_TOKEN,
       });
+      (shared?.data || []).forEach((a) => a?.id && wabaSet.add(String(a.id)));
+    } catch (e) {
+      fastify.log.warn({ err: e }, "[wa/es/finalize] /client_whatsapp_business_accounts warn");
+    }
+
+    const wabaIds = Array.from(wabaSet);
+    if (!wabaIds.length) {
+      return reply.code(400).send({ error: "no_waba_found" });
+    }
+
+    // coleta nomes dos portfólios
+    const portfolios = [];
+    for (const wabaId of wabaIds) {
+      let name = null;
+      try {
+        const w = await gget(`/${wabaId}`, { token: SYSTEM_USER_TOKEN, qs: { fields: "name" } });
+        name = w?.name || null;
+      } catch {}
+      portfolios.push({ id: wabaId, name });
+    }
+
+    // assinar webhooks + atribuir system user (best-effort)
+    for (const wabaId of wabaIds) {
+      try { await gpost(`/${wabaId}/subscribed_apps`, { token: userToken }); } catch (e) {
+        fastify.log.warn({ err: e, wabaId }, "[wa/es/finalize] subscribed_apps warn");
+      }
+      try {
+        await gpost(`/${wabaId}/assigned_users`, {
+          token: SYSTEM_USER_ADMIN_TOKEN || SYSTEM_USER_TOKEN,
+          form: { user: SYSTEM_USER_ID, tasks: "['MANAGE']" },
+        });
+      } catch (e) {
+        fastify.log.warn({ err: e, wabaId }, "[wa/es/finalize] assigned_users warn");
+      }
+    }
+
+    // listar números e persistir (sem ativar)
+    const allNumbers = [];
+    const qUpsert = `
+      INSERT INTO public.tenant_channel_connections
+        (tenant_id, subdomain, channel, provider, account_id, external_id, display_name, auth_mode, settings, is_active)
+      VALUES
+        ($1,        $2,        'whatsapp','meta',  $3,         $4,          $5,           'system_user', $6,       false)
+      ON CONFLICT (tenant_id, channel, external_id)
+      DO UPDATE SET
+        account_id   = EXCLUDED.account_id,
+        display_name = EXCLUDED.display_name,
+        settings     = COALESCE(public.tenant_channel_connections.settings,'{}'::jsonb) || EXCLUDED.settings,
+        updated_at   = now()
+    `;
+
+    for (const wabaId of wabaIds) {
+      let pn = null;
+      try {
+        pn = await gget(`/${wabaId}/phone_numbers`, { token: SYSTEM_USER_TOKEN });
+      } catch (eSys) {
+        fastify.log.warn({ err: eSys, wabaId }, "[wa/es/finalize] phone_numbers sys warn");
+        try {
+          pn = await gget(`/${wabaId}/phone_numbers`, { token: userToken });
+        } catch (eUsr) {
+          fastify.log.error({ err: eUsr, wabaId }, "[wa/es/finalize] phone_numbers failed");
+          pn = { data: [] };
+        }
+      }
       const numbers = Array.isArray(pn?.data) ? pn.data : [];
-
-      // 6) persistir conexões — insere como INATIVO; não tocar no is_active no upsert
-      const qUpsert = `
-        INSERT INTO public.tenant_channel_connections
-          (tenant_id, subdomain, channel, provider, account_id, external_id, display_name, auth_mode, settings, is_active)
-        VALUES
-          ($1,        $2,        'whatsapp','meta',  $3,         $4,          $5,           'system_user', $6,       true)
-        ON CONFLICT (tenant_id, channel, external_id)
-        DO UPDATE SET
-          account_id  = EXCLUDED.account_id,
-          display_name= EXCLUDED.display_name,
-          settings    = COALESCE(public.tenant_channel_connections.settings,'{}'::jsonb) || EXCLUDED.settings,
-          updated_at  = now()
-      `;
-
       for (const num of numbers) {
         const phoneId = num?.id;
         if (!phoneId) continue;
         const disp = num?.display_phone_number || num?.verified_name || null;
         const settings = { waba_id: wabaId, raw: num };
+
         await req.db.query(qUpsert, [
           tenantId,
           subdomain,
@@ -645,24 +683,34 @@ async function whatsappRoutes(fastify) {
           disp,
           JSON.stringify(settings),
         ]);
-      }
 
-      return reply.send({
-        subdomain,
-        tenant_id: tenantId,
-        waba_id: wabaId,
-        numbers,
-      });
-    } catch (err) {
-      fastify.log.error(err, "[wa/es/finalize] falha no onboarding");
-      const status = Number.isInteger(err?.status) ? err.status : 500;
-      return reply.code(status).send({
-        error: "wa_embedded_finalize_failed",
-        message: err?.message || "Erro inesperado",
-        details: err?.details,
-      });
+        allNumbers.push({
+          id: phoneId,
+          display_phone_number: num?.display_phone_number || null,
+          verified_name: num?.verified_name || null,
+          waba_id: wabaId,
+        });
+      }
     }
-  });
+
+    return reply.send({
+      ok: true,
+      subdomain,
+      tenant_id: tenantId,
+      portfolios,
+      numbers: allNumbers,
+    });
+  } catch (err) {
+    fastify.log.error(err, "[wa/es/finalize] falha no onboarding");
+    const status = Number.isInteger(err?.status) ? err.status : 500;
+    return reply.code(status).send({
+      error: "wa_embedded_finalize_failed",
+      message: err?.message || "Erro inesperado",
+      details: err?.details,
+    });
+  }
+});
+
 
   // status do tenant (mantido)
   fastify.get("/status", async (req, reply) => {
