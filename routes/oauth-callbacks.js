@@ -44,89 +44,73 @@ export default async function oauthCallbacks(fastify) {
   // GET /oauth/wa
   fastify.get("/wa", async (req, reply) => {
     const q = req.query || {};
-    const { start, code = "", state = "", app_id = "", config_id = "", error = "", error_description = "" } = q;
+    const {
+      start,
+      code = "",
+      state = "",
+      app_id = "",
+      config_id = "",
+      extras = "",
+      display = "popup",
+      error = "",
+      error_description = ""
+    } = q;
 
     // calcula redirect_uri de modo "proxy-aware"
     const xfProto = (req.headers["x-forwarded-proto"] || "").toString().split(",")[0].trim();
-    const proto = xfProto || req.protocol || "https";
-    const xfHost = (req.headers["x-forwarded-host"] || "").toString().split(",")[0].trim();
-    const host = xfHost || req.headers.host;
+    const proto   = xfProto || req.protocol || "https";
+    const xfHost  = (req.headers["x-forwarded-host"] || "").toString().split(",")[0].trim();
+    const host    = xfHost || req.headers.host;
     const redirect_uri = `${proto}://${host}/oauth/wa`;
 
-    // 1) primeira etapa: redireciona para o OAuth (UM popup só)
+    // 1) PRIMEIRA ETAPA → abre o wizard oficial (UM popup)
     if (start) {
+      const extrasJson =
+        typeof extras === "string" && extras.length
+          ? extras // já vem url-encoded do front
+          : encodeURIComponent(JSON.stringify({ sessionInfoVersion: "3", version: "v3" }));
+
       const url =
-        `https://www.facebook.com/v23.0/dialog/oauth` +
-        `?client_id=${encodeURIComponent(String(app_id || ""))}` +
-        `&redirect_uri=${encodeURIComponent(redirect_uri)}` +
-        `&response_type=code` +
+        `https://business.facebook.com/messaging/whatsapp/onboard/?` +
+        `app_id=${encodeURIComponent(String(app_id || ""))}` +
         `&config_id=${encodeURIComponent(String(config_id || ""))}` +
-        `&state=${encodeURIComponent(String(state || ""))}`;
+        `&extras=${extrasJson}` +
+        `&display=${encodeURIComponent(String(display || "popup"))}` +
+        // a Meta pode ignorar state no ES, mas repassamos pra manter compatibilidade
+        (state ? `&state=${encodeURIComponent(String(state))}` : ``) +
+        // o redirect_uri é o que você cadastrou no Config (a Meta usará esse /oauth/wa)
+        ``;
+
       reply.redirect(url);
       return;
     }
 
-    // 2) retorno com erro: mantém a janela aberta p/ leitura
+    // 2) RETORNO DO WIZARD
     if (error || !code) {
       const msg = error ? `${error}: ${error_description || "Falha ao autenticar"}` : "Code ausente no retorno do OAuth.";
       const html = `<!doctype html>
 <html><head><meta charset="utf-8"/><title>WhatsApp – Erro</title></head>
 <body style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding:20px;">
   <h3>Não foi possível concluir a conexão do WhatsApp</h3>
-  <p><strong>Detalhes:</strong> ${msg.replace(/</g, "&lt;")}</p>
-  <p>Verifique se o <code>app_id</code>, <code>config_id</code> e <code>redirect_uri</code> estão corretos e cadastrados na Meta.</p>
+  <p><strong>Detalhes:</strong> ${String(msg).replace(/</g, "&lt;")}</p>
+  <p>Confira <code>app_id</code>, <code>config_id</code> e o <code>redirect_uri</code> configurado no Embedded Signup.</p>
   <p><button onclick="window.close()">Fechar</button></p>
 </body></html>`;
       reply.type("text/html").send(html);
       return;
     }
 
-    // 3) sucesso: envia postMessage e ESPERA ACK para fechar (com fallback)
+    // 3) SUCESSO → envia o code pro opener e fecha
     const html = `<!doctype html>
-<html><head><meta charset="utf-8"/><title>WhatsApp – Concluindo…</title>
-<style>
-  body{font-family: system-ui,-apple-system,Segoe UI,Roboto,sans-serif; padding:24px}
-  .ok{display:flex;gap:8px;align-items:center;margin-bottom:6px}
-  small{color:#666}
-</style>
-</head>
-<body>
-  <div class="ok"><strong>Conexão iniciada com sucesso.</strong></div>
-  <small>Você já pode voltar para a aba anterior. Esta janela fechará automaticamente em instantes.</small>
-  <script>
-  (function () {
-    try {
-      var payload = { type: "wa:oauth", code: ${JSON.stringify(code)}, state: ${JSON.stringify(state)} };
-      var closed = false;
-      function closeWin() {
-        if (closed) return;
-        closed = true;
-        try { window.close(); } catch(e) {}
-        // se não fechar (bloqueio do browser), mostra aviso
-        setTimeout(function(){
-          if (!window.closed) {
-            document.body.insertAdjacentHTML('beforeend','<p style="margin-top:12px"><button onclick="window.close()">Fechar</button></p>');
-          }
-        }, 200);
-      }
-
-      // envia mensagem para a janela mãe
-      try { if (window.opener) window.opener.postMessage(payload, "*"); } catch (e){}
-
-      // espera ACK da janela mãe e só então fecha com um pequeno delay (1.2s) para o usuário ver
-      window.addEventListener("message", function(ev){
-        if (!ev || !ev.data) return;
-        if (ev.data.type === "wa:ack") {
-          setTimeout(closeWin, 1200);
-        }
-      });
-
-      // fallback: fecha em 15s caso o ACK não chegue
-      setTimeout(closeWin, 15000);
-    } catch (e) {}
-  })();
-  </script>
-</body></html>`;
+<html><body><script>
+(function () {
+  try {
+    var payload = { type: "wa:oauth", code: ${JSON.stringify(code)}, state: ${JSON.stringify(state)} };
+    if (window.opener) window.opener.postMessage(payload, "*");
+  } catch (e) {}
+  window.close();
+})();
+</script>Feche esta janela.</body></html>`;
     reply.type("text/html").send(html);
   });
 
