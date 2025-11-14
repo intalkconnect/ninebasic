@@ -2,6 +2,11 @@
 // Callbacks de OAuth para FB/IG/WA + rota de DEBUG do redirect_uri
 
 export default async function oauthCallbacks(fastify) {
+  // --------- CONFIG FIXA (altere aqui, se necessário) ---------
+  // Se quiser fixar também o APP_ID, preencha APP_ID_FIXED (string).
+  const CONFIG_ID_FIXED = "1700863947504538"; // <-- seu novo config_id
+  const APP_ID_FIXED = null;                  // ex.: "684947304155673" | null = usa o app_id vindo da query
+
   // Util: calcula o redirect_uri levando em conta proxy/reverse-proxy
   function computeRedirectURI(req, path = "/oauth/wa") {
     const xfProto = (req.headers["x-forwarded-proto"] || "").toString().split(",")[0].trim();
@@ -91,22 +96,32 @@ export default async function oauthCallbacks(fastify) {
       code = "",
       state = "",
       app_id = "",
-      config_id = "",
+      // config_id = "",  // ignorado propositalmente; usamos CONFIG_ID_FIXED
       error = "",
       error_description = "",
     } = q;
 
     const redirect_uri = computeRedirectURI(req, "/oauth/wa");
+    const appIdToUse = (APP_ID_FIXED || String(app_id || "")).trim();
+    const configIdToUse = CONFIG_ID_FIXED;
 
     // 1) Primeira etapa → redireciona para o OAuth oficial da Meta
     if (start) {
-      fastify.log.info({ route: "GET /oauth/wa", action: "start", app_id, config_id, state, redirect_uri });
+      fastify.log.info({
+        route: "GET /oauth/wa",
+        action: "start",
+        app_id_sent: app_id,
+        app_id_used: appIdToUse,
+        config_id_used: configIdToUse,
+        state_present: !!state,
+        redirect_uri
+      });
       const url =
-        `https://www.facebook.com/v24.0/dialog/oauth` + // v24 ok
-        `?client_id=${encodeURIComponent(String(app_id || ""))}` +
+        `https://www.facebook.com/v24.0/dialog/oauth` +
+        `?client_id=${encodeURIComponent(appIdToUse)}` +
         `&redirect_uri=${encodeURIComponent(redirect_uri)}` +
         `&response_type=code` +
-        `&config_id=${encodeURIComponent(String(1700863947504538))}` +
+        `&config_id=${encodeURIComponent(configIdToUse)}` +
         `&state=${encodeURIComponent(String(state || ""))}`;
       reply.redirect(url);
       return;
@@ -120,7 +135,7 @@ export default async function oauthCallbacks(fastify) {
         error,
         error_description,
         has_code: !!code,
-        state,
+        state_present: !!state,
       });
       const msg = error ? `${error}: ${error_description || "Falha ao autenticar"}` : "Code ausente no retorno do OAuth.";
       const html = `<!doctype html>
@@ -137,7 +152,12 @@ export default async function oauthCallbacks(fastify) {
     }
 
     // 3) Sucesso → postMessage para a aba mãe e fechar
-    fastify.log.info({ route: "GET /oauth/wa", action: "callback_ok", state_present: !!state });
+    fastify.log.info({
+      route: "GET /oauth/wa",
+      action: "callback_ok",
+      state_present: !!state
+    });
+
     const html = `<!doctype html>
 <html><body><script>
 (function () {
