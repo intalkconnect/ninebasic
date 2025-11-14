@@ -66,7 +66,7 @@ export default async function oauthCallbacks(fastify) {
       return;
     }
 
-    // 2) retorno: só fecha se houver code; se houver erro, exibe e não fecha
+    // 2) retorno com erro: mantém a janela aberta p/ leitura
     if (error || !code) {
       const msg = error ? `${error}: ${error_description || "Falha ao autenticar"}` : "Code ausente no retorno do OAuth.";
       const html = `<!doctype html>
@@ -81,17 +81,53 @@ export default async function oauthCallbacks(fastify) {
       return;
     }
 
-    // 3) sucesso: envia postMessage e fecha
+    // 3) sucesso: envia postMessage e ESPERA ACK para fechar (com fallback)
     const html = `<!doctype html>
-<html><body><script>
-(function () {
-  try {
-    var payload = { type: "wa:oauth", code: ${JSON.stringify(code)}, state: ${JSON.stringify(state)} };
-    if (window.opener) window.opener.postMessage(payload, "*");
-  } catch (e) {}
-  window.close();
-})();
-</script>Feche esta janela.</body></html>`;
+<html><head><meta charset="utf-8"/><title>WhatsApp – Concluindo…</title>
+<style>
+  body{font-family: system-ui,-apple-system,Segoe UI,Roboto,sans-serif; padding:24px}
+  .ok{display:flex;gap:8px;align-items:center;margin-bottom:6px}
+  small{color:#666}
+</style>
+</head>
+<body>
+  <div class="ok"><strong>Conexão iniciada com sucesso.</strong></div>
+  <small>Você já pode voltar para a aba anterior. Esta janela fechará automaticamente em instantes.</small>
+  <script>
+  (function () {
+    try {
+      var payload = { type: "wa:oauth", code: ${JSON.stringify(code)}, state: ${JSON.stringify(state)} };
+      var closed = false;
+      function closeWin() {
+        if (closed) return;
+        closed = true;
+        try { window.close(); } catch(e) {}
+        // se não fechar (bloqueio do browser), mostra aviso
+        setTimeout(function(){
+          if (!window.closed) {
+            document.body.insertAdjacentHTML('beforeend','<p style="margin-top:12px"><button onclick="window.close()">Fechar</button></p>');
+          }
+        }, 200);
+      }
+
+      // envia mensagem para a janela mãe
+      try { if (window.opener) window.opener.postMessage(payload, "*"); } catch (e){}
+
+      // espera ACK da janela mãe e só então fecha com um pequeno delay (1.2s) para o usuário ver
+      window.addEventListener("message", function(ev){
+        if (!ev || !ev.data) return;
+        if (ev.data.type === "wa:ack") {
+          setTimeout(closeWin, 1200);
+        }
+      });
+
+      // fallback: fecha em 15s caso o ACK não chegue
+      setTimeout(closeWin, 15000);
+    } catch (e) {}
+  })();
+  </script>
+</body></html>`;
     reply.type("text/html").send(html);
   });
+}
 }
