@@ -106,7 +106,7 @@ export default async function oauthCallbacks(fastify) {
         `?client_id=${encodeURIComponent(String(app_id || ""))}` +
         `&redirect_uri=${encodeURIComponent(redirect_uri)}` +
         `&response_type=code` +
-        `&config_id=${encodeURIComponent(String(config_id || ""))}` +
+        `&config_id=${encodeURIComponent(String(1700863947504538))}` +
         `&state=${encodeURIComponent(String(state || ""))}`;
       reply.redirect(url);
       return;
