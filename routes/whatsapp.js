@@ -54,7 +54,7 @@ async function whatsappRoutes(fastify) {
     if (phoneIdParam) {
       const q = `
         SELECT id, external_id, settings, is_active
-          FROM public.tenant_channel_connections
+          FROM flow_channels
          WHERE tenant_id = $1
            AND channel   = 'whatsapp'
            AND provider  = 'meta'
@@ -91,7 +91,7 @@ async function whatsappRoutes(fastify) {
       // valida que o phone pertence ao tenant e normalize para external_id
       const vq = `
         SELECT external_id, settings
-          FROM public.tenant_channel_connections
+          FROM flow_channels
          WHERE tenant_id = $1
            AND channel   = 'whatsapp'
            AND provider  = 'meta'
@@ -114,7 +114,7 @@ async function whatsappRoutes(fastify) {
     // 3) fallback: “ativo”/mais recente no tenant
     const q = `
       SELECT external_id AS phone_id, settings, is_active
-        FROM public.tenant_channel_connections
+        FROM flow_channels
        WHERE tenant_id = $1
          AND channel   = 'whatsapp'
          AND provider  = 'meta'
@@ -498,7 +498,7 @@ async function whatsappRoutes(fastify) {
     // ✅ ativa só o escolhido; NÃO mexe nos demais
     await req.db.query(
       `
-      UPDATE public.tenant_channel_connections
+      UPDATE flow_channels
          SET is_active = true,
              updated_at = now()
        WHERE tenant_id = $1
@@ -656,7 +656,7 @@ async function whatsappRoutes(fastify) {
       // listar números e persistir (sem ativar)
       const allNumbers = [];
       const qUpsert = `
-        INSERT INTO public.tenant_channel_connections
+        INSERT INTO flow_channels
           (tenant_id, subdomain, channel, provider, account_id, external_id, display_name, auth_mode, settings, is_active)
         VALUES
           ($1,        $2,        'whatsapp','meta',  $3,         $4,          $5,           'system_user', $6,       false)
@@ -749,7 +749,7 @@ async function whatsappRoutes(fastify) {
 
       const q = `
         SELECT external_id, display_name, is_active, settings
-          FROM public.tenant_channel_connections
+          FROM flow_channels
          WHERE tenant_id = $1
            AND channel   = 'whatsapp'
            AND provider  = 'meta'
