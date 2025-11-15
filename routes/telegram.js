@@ -92,7 +92,7 @@ export default async function telegramRoutes(fastify) {
       };
 
       const upsertSql = `
-        INSERT INTO public.tenant_channel_connections
+        INSERT INTO flow_channels
           (tenant_id, subdomain, channel, provider, account_id, external_id, display_name, auth_mode, credentials_encrypted, settings, is_active)
         VALUES
           ($1::uuid, $2::text, 'telegram'::channel_type, 'telegram'::text,
@@ -103,7 +103,7 @@ export default async function telegramRoutes(fastify) {
           display_name          = EXCLUDED.display_name,
           auth_mode             = EXCLUDED.auth_mode,
           credentials_encrypted = EXCLUDED.credentials_encrypted,
-          settings              = COALESCE(public.tenant_channel_connections.settings,'{}'::jsonb) || EXCLUDED.settings,
+          settings              = COALESCE(flow_channels.settings,'{}'::jsonb) || EXCLUDED.settings,
           updated_at            = now()
         RETURNING id
       `;
@@ -190,7 +190,7 @@ export default async function telegramRoutes(fastify) {
           // Busca a conexão específica desse bot no tenant
           const cq = `
             SELECT external_id AS bot_id, display_name AS username, is_active, settings
-              FROM public.tenant_channel_connections
+              FROM flow_channels
              WHERE tenant_id = $1
                AND channel   = 'telegram'
                AND provider  = 'telegram'
@@ -215,7 +215,7 @@ export default async function telegramRoutes(fastify) {
       // Sem flow vinculado: retorna a conexão mais recente do tenant (sem marcar bound)
       const tq = `
         SELECT external_id AS bot_id, display_name AS username, is_active, settings
-          FROM public.tenant_channel_connections
+          FROM flow_channels
          WHERE tenant_id = $1
            AND channel   = 'telegram'
            AND provider  = 'telegram'
