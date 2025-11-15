@@ -30,7 +30,7 @@ export default async function instagramRoutes(fastify) {
       ...(pageAccessToken ? { page_access_token: pageAccessToken } : {})
     };
     const sql = `
-      INSERT INTO public.tenant_channel_connections
+      INSERT INTO flow_channels
         (tenant_id, subdomain, channel, provider,
          account_id, external_id, display_name,
          auth_mode, credentials_encrypted, settings, is_active)
@@ -42,7 +42,7 @@ export default async function instagramRoutes(fastify) {
       DO UPDATE SET
         account_id = EXCLUDED.account_id,
         display_name = EXCLUDED.display_name,
-        settings = COALESCE(tenant_channel_connections.settings,'{}'::jsonb) || EXCLUDED.settings,
+        settings = COALESCE(flow_channels.settings,'{}'::jsonb) || EXCLUDED.settings,
         updated_at = now()
       RETURNING id, account_id, external_id, settings, is_active
     `;
@@ -204,7 +204,7 @@ export default async function instagramRoutes(fastify) {
 
       const { rows } = await req.db.query(
         `SELECT account_id AS page_id, external_id AS ig_user_id, is_active, settings, display_name
-           FROM public.tenant_channel_connections
+           FROM flow_channels
           WHERE tenant_id=$1 AND channel='instagram' AND provider='meta'
           ORDER BY updated_at DESC
           LIMIT 1`,
