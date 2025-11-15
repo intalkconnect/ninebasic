@@ -93,11 +93,11 @@ export default async function telegramRoutes(fastify) {
 
       const upsertSql = `
         INSERT INTO flow_channels
-          (tenant_id, subdomain, channel, provider, account_id, external_id, display_name, auth_mode, credentials_encrypted, settings, is_active)
+          (tenant_id, subdomain, channel_type, provider, account_id, external_id, display_name, auth_mode, credentials_encrypted, settings, is_active)
         VALUES
           ($1::uuid, $2::text, 'telegram'::channel_type, 'telegram'::text,
            $3::text, $4::text, $5::text, $6::auth_mode, $7::bytea, $8::jsonb, true)
-        ON CONFLICT (tenant_id, channel, external_id)
+        ON CONFLICT (tenant_id, channel_type, external_id)
         DO UPDATE SET
           account_id            = EXCLUDED.account_id,
           display_name          = EXCLUDED.display_name,
@@ -192,7 +192,7 @@ export default async function telegramRoutes(fastify) {
             SELECT external_id AS bot_id, display_name AS username, is_active, settings
               FROM flow_channels
              WHERE tenant_id = $1
-               AND channel   = 'telegram'
+               AND channel_type   = 'telegram'
                AND provider  = 'telegram'
                AND external_id = $2
              LIMIT 1
@@ -217,7 +217,7 @@ export default async function telegramRoutes(fastify) {
         SELECT external_id AS bot_id, display_name AS username, is_active, settings
           FROM flow_channels
          WHERE tenant_id = $1
-           AND channel   = 'telegram'
+           AND channel_type   = 'telegram'
            AND provider  = 'telegram'
          ORDER BY updated_at DESC
          LIMIT 1
