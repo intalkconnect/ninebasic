@@ -31,14 +31,14 @@ export default async function instagramRoutes(fastify) {
     };
     const sql = `
       INSERT INTO flow_channels
-        (tenant_id, subdomain, channel, provider,
+        (tenant_id, subdomain, channel_type, provider,
          account_id, external_id, display_name,
          auth_mode, credentials_encrypted, settings, is_active)
       VALUES
         ($1, $2, 'instagram', 'meta',
          $3, $4, $5,
          'page_token', NULL, $6, true)
-      ON CONFLICT (tenant_id, channel, external_id)
+      ON CONFLICT (tenant_id, channel_type, external_id)
       DO UPDATE SET
         account_id = EXCLUDED.account_id,
         display_name = EXCLUDED.display_name,
@@ -205,7 +205,7 @@ export default async function instagramRoutes(fastify) {
       const { rows } = await req.db.query(
         `SELECT account_id AS page_id, external_id AS ig_user_id, is_active, settings, display_name
            FROM flow_channels
-          WHERE tenant_id=$1 AND channel='instagram' AND provider='meta'
+          WHERE tenant_id=$1 AND channel_type='instagram' AND provider='meta'
           ORDER BY updated_at DESC
           LIMIT 1`,
         [tRows[0].id]
