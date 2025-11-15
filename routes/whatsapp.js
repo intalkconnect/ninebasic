@@ -56,7 +56,7 @@ async function whatsappRoutes(fastify) {
         SELECT id, external_id, settings, is_active
           FROM flow_channels
          WHERE tenant_id = $1
-           AND channel   = 'whatsapp'
+           AND channel_type   = 'whatsapp'
            AND provider  = 'meta'
            AND (external_id = $2 OR id::text = $2)
          LIMIT 1
@@ -93,7 +93,7 @@ async function whatsappRoutes(fastify) {
         SELECT external_id, settings
           FROM flow_channels
          WHERE tenant_id = $1
-           AND channel   = 'whatsapp'
+           AND channel_type   = 'whatsapp'
            AND provider  = 'meta'
            AND (external_id = $2 OR id::text = $2)
          LIMIT 1
@@ -116,7 +116,7 @@ async function whatsappRoutes(fastify) {
       SELECT external_id AS phone_id, settings, is_active
         FROM flow_channels
        WHERE tenant_id = $1
-         AND channel   = 'whatsapp'
+         AND channel_type   = 'whatsapp'
          AND provider  = 'meta'
        ORDER BY is_active DESC, updated_at DESC
        LIMIT 1
@@ -502,7 +502,7 @@ async function whatsappRoutes(fastify) {
          SET is_active = true,
              updated_at = now()
        WHERE tenant_id = $1
-         AND channel   = 'whatsapp'
+         AND channel_type   = 'whatsapp'
          AND provider  = 'meta'
          AND external_id = $2
       `,
@@ -657,14 +657,14 @@ async function whatsappRoutes(fastify) {
       const allNumbers = [];
       const qUpsert = `
         INSERT INTO flow_channels
-          (tenant_id, subdomain, channel, provider, account_id, external_id, display_name, auth_mode, settings, is_active)
+          (tenant_id, subdomain, channel_type, provider, account_id, external_id, display_name, auth_mode, settings, is_active)
         VALUES
           ($1,        $2,        'whatsapp','meta',  $3,         $4,          $5,           'system_user', $6,       false)
-        ON CONFLICT (tenant_id, channel, external_id)
+        ON CONFLICT (tenant_id, channel_type, external_id)
         DO UPDATE SET
           account_id   = EXCLUDED.account_id,
           display_name = EXCLUDED.display_name,
-          settings     = COALESCE(public.tenant_channel_connections.settings,'{}'::jsonb) || EXCLUDED.settings,
+          settings     = COALESCE(flow_channels.settings,'{}'::jsonb) || EXCLUDED.settings,
           updated_at   = now()
       `;
 
@@ -751,7 +751,7 @@ async function whatsappRoutes(fastify) {
         SELECT external_id, display_name, is_active, settings
           FROM flow_channels
          WHERE tenant_id = $1
-           AND channel   = 'whatsapp'
+           AND channel_type   = 'whatsapp'
            AND provider  = 'meta'
       `;
       const { rows } = await req.db.query(q, [tenant.id]);
