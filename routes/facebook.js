@@ -38,21 +38,21 @@ export default async function facebookRoutes(fastify) {
 
     const sql = `
       INSERT INTO flow_channels
-        (tenant_id, subdomain, channel, provider,
+        (tenant_id, subdomain, channel_type, provider,
          account_id, external_id, display_name,
          auth_mode, credentials_encrypted, settings, is_active)
       VALUES
         ($1::uuid, $2::text, 'facebook'::channel_type, 'meta'::text,
          $3::text, $3::text, $4::text,
          'oauth'::auth_mode, NULL, $5::jsonb, true)
-      ON CONFLICT (tenant_id, channel, external_id)
+      ON CONFLICT (tenant_id, channel_type, external_id)
       DO UPDATE SET
         account_id   = EXCLUDED.account_id,
         display_name = EXCLUDED.display_name,
         auth_mode    = EXCLUDED.auth_mode,
         settings     = COALESCE(flow_channels.settings,'{}'::jsonb) || EXCLUDED.settings,
         updated_at   = now()
-      RETURNING id, tenant_id, channel, provider, account_id, external_id,
+      RETURNING id, tenant_id, channel_type, provider, account_id, external_id,
                 display_name, is_active, settings, updated_at
     `;
 
@@ -189,7 +189,7 @@ export default async function facebookRoutes(fastify) {
       const q = `
         SELECT account_id AS page_id, is_active, settings, display_name
           FROM flow_channels
-         WHERE tenant_id=$1 AND channel='facebook' AND provider='meta'
+         WHERE tenant_id=$1 AND channel_type='facebook' AND provider='meta'
          ORDER BY updated_at DESC
          LIMIT 1`;
       const { rows } = await req.db.query(q, [t.id]);
