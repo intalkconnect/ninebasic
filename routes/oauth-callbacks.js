@@ -4,7 +4,7 @@
 export default async function oauthCallbacks(fastify) {
   // --------- CONFIG FIXA (altere aqui, se necessário) ---------
   // Se quiser fixar também o APP_ID, preencha APP_ID_FIXED (string).
-  const CONFIG_ID_FIXED = "1556698225756152"; // <-- seu novo config_id
+  const CONFIG_ID_FIXED = "1556698225756152"; // <-- seu config_id de Embedded Signup
   const APP_ID_FIXED = null;                  // ex.: "684947304155673" | null = usa o app_id vindo da query
 
   // Util: calcula o redirect_uri levando em conta proxy/reverse-proxy
@@ -116,6 +116,7 @@ export default async function oauthCallbacks(fastify) {
         state_present: !!state,
         redirect_uri
       });
+
       const url =
         `https://www.facebook.com/v24.0/dialog/oauth` +
         `?client_id=${encodeURIComponent(appIdToUse)}` +
@@ -123,6 +124,7 @@ export default async function oauthCallbacks(fastify) {
         `&response_type=code` +
         `&config_id=${encodeURIComponent(configIdToUse)}` +
         `&state=${encodeURIComponent(String(state || ""))}`;
+
       reply.redirect(url);
       return;
     }
