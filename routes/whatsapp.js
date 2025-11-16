@@ -38,11 +38,31 @@ async function whatsappRoutes(fastify) {
     return t;
   }
 
+  // helper pequeno para extrair waba_id de settings (jsonb ou string)
+  function extractWabaId(settings) {
+    if (!settings) return null;
+
+    if (typeof settings === "object" && settings !== null) {
+      return settings.waba_id || null;
+    }
+
+    if (typeof settings === "string") {
+      try {
+        const parsed = JSON.parse(settings);
+        return parsed?.waba_id || null;
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  }
+
   /**
    * Resolve o phone_id obedecendo a prioridade:
-   * 1) phone_id explícito (query/body) -> aceita external_id OU id (UUID) e normaliza para external_id
-   * 2) flow_id (canal vinculado ao flow) -> aceita channel_key como external_id OU id (UUID) e normaliza para external_id
-   * 3) fallback: número "ativo" do tenant
+   * 1) phone_id explícito (query/body) -> aceita external_id, id(UUID) ou channel_key(UUID) e normaliza para external_id
+   * 2) flow_id (canal vinculado ao flow) -> usa SEMPRE o external_id do flow_channels
+   * 3) fallback: número mais recente/ativo do tenant
    */
   async function resolvePhoneForRequest(req) {
     const tenant = await resolveTenant(req);
@@ -50,74 +70,61 @@ async function whatsappRoutes(fastify) {
     const phoneIdParam = req?.query?.phone_id || req?.body?.phone_id || null;
     const flowIdParam  = req?.query?.flow_id  || req?.body?.flow_id  || null;
 
-    // 1) phone_id explícito (pode ser external_id ou UUID interno)
+    // 1) phone_id explícito (pode ser external_id, id OU channel_key)
     if (phoneIdParam) {
       const q = `
         SELECT id, external_id, settings, is_active
           FROM flow_channels
-         WHERE tenant_id = $1
-           AND channel_type   = 'whatsapp'
-           AND provider  = 'meta'
-           AND (external_id = $2 OR id::text = $2)
+         WHERE tenant_id    = $1
+           AND channel_type = 'whatsapp'
+           AND provider     = 'meta'
+           AND (
+                 external_id        = $2
+              OR id::text           = $2
+              OR channel_key::text  = $2
+           )
          LIMIT 1
       `;
       const { rows } = await req.db.query(q, [tenant.id, String(phoneIdParam)]);
       const row = rows[0];
       if (!row?.external_id) throw new Error("phone_not_found_for_tenant");
 
-      const waba_id =
-        row?.settings?.waba_id ||
-        (row?.settings && typeof row.settings === "string"
-          ? (() => { try { return JSON.parse(row.settings)?.waba_id; } catch { return null; } })()
-          : null);
-
+      const waba_id = extractWabaId(row.settings);
       return { tenant, phone_id: row.external_id, waba_id };
     }
 
-    // 2) via flow_id (flow_channels.channel_key pode ser external_id ou UUID interno)
+    // 2) via flow_id -> pega o external_id do flow_channels daquele flow
     if (flowIdParam) {
-      const bq = `
-        SELECT fc.channel_key AS phone_id
+      const qFlow = `
+        SELECT fc.external_id AS phone_id,
+               fc.settings
           FROM flow_channels fc
-         WHERE fc.flow_id = $1
+         WHERE fc.flow_id      = $1
+           AND fc.tenant_id    = $2
            AND fc.channel_type = 'whatsapp'
-           AND fc.is_active = true
+           AND fc.provider     = 'meta'
+           AND fc.is_active    = true
+         ORDER BY fc.updated_at DESC
          LIMIT 1
       `;
-      const { rows: bRows } = await req.db.query(bq, [String(flowIdParam)]);
-      const phoneFromFlow = bRows?.[0]?.phone_id || null;
-      if (!phoneFromFlow) throw new Error("flow_not_bound_to_whatsapp");
+      const { rows: fRows } = await req.db.query(qFlow, [String(flowIdParam), tenant.id]);
+      const row = fRows[0];
 
-      // valida que o phone pertence ao tenant e normalize para external_id
-      const vq = `
-        SELECT external_id, settings
-          FROM flow_channels
-         WHERE tenant_id = $1
-           AND channel_type   = 'whatsapp'
-           AND provider  = 'meta'
-           AND (external_id = $2 OR id::text = $2)
-         LIMIT 1
-      `;
-      const { rows: vRows } = await req.db.query(vq, [tenant.id, String(phoneFromFlow)]);
-      const v = vRows[0];
-      if (!v?.external_id) throw new Error("phone_not_found_for_tenant");
+      if (!row?.phone_id) {
+        throw new Error("flow_not_bound_to_whatsapp");
+      }
 
-      const waba_id =
-        v?.settings?.waba_id ||
-        (v?.settings && typeof v.settings === "string"
-          ? (() => { try { return JSON.parse(v.settings)?.waba_id; } catch { return null; } })()
-          : null);
-
-      return { tenant, phone_id: v.external_id, waba_id };
+      const waba_id = extractWabaId(row.settings);
+      return { tenant, phone_id: row.phone_id, waba_id };
     }
 
     // 3) fallback: “ativo”/mais recente no tenant
     const q = `
       SELECT external_id AS phone_id, settings, is_active
         FROM flow_channels
-       WHERE tenant_id = $1
-         AND channel_type   = 'whatsapp'
-         AND provider  = 'meta'
+       WHERE tenant_id    = $1
+         AND channel_type = 'whatsapp'
+         AND provider     = 'meta'
        ORDER BY is_active DESC, updated_at DESC
        LIMIT 1
     `;
@@ -125,12 +132,7 @@ async function whatsappRoutes(fastify) {
     const row = rows[0];
     if (!row?.phone_id) throw new Error("no_whatsapp_connection");
 
-    const waba_id =
-      row?.settings?.waba_id ||
-      (row?.settings && typeof row.settings === "string"
-        ? (() => { try { return JSON.parse(row.settings)?.waba_id; } catch { return null; } })()
-        : null);
-
+    const waba_id = extractWabaId(row.settings);
     return { tenant, phone_id: row.phone_id, waba_id };
   }
 
@@ -501,10 +503,10 @@ async function whatsappRoutes(fastify) {
       UPDATE flow_channels
          SET is_active = true,
              updated_at = now()
-       WHERE tenant_id = $1
-         AND channel_type   = 'whatsapp'
-         AND provider  = 'meta'
-         AND external_id = $2
+       WHERE tenant_id    = $1
+         AND channel_type = 'whatsapp'
+         AND provider     = 'meta'
+         AND external_id  = $2
       `,
       [tenant.id, phone_number_id]
     );
@@ -724,7 +726,7 @@ async function whatsappRoutes(fastify) {
     }
   });
 
-  // status do tenant (mantido)
+  // status do tenant (mantido, mas com leitura de settings mais robusta)
   fastify.get("/status", async (req, reply) => {
     const subdomain =
       req?.tenant?.subdomain ||
@@ -750,9 +752,9 @@ async function whatsappRoutes(fastify) {
       const q = `
         SELECT external_id, display_name, is_active, settings
           FROM flow_channels
-         WHERE tenant_id = $1
-           AND channel_type   = 'whatsapp'
-           AND provider  = 'meta'
+         WHERE tenant_id    = $1
+           AND channel_type = 'whatsapp'
+           AND provider     = 'meta'
       `;
       const { rows } = await req.db.query(q, [tenant.id]);
 
@@ -765,13 +767,23 @@ async function whatsappRoutes(fastify) {
         });
       }
 
+      // waba_id usando o helper (aceita settings obj ou string)
       const waba_id =
-        rows.find((r) => r?.settings?.waba_id)?.settings?.waba_id ||
-        rows[0]?.settings?.waba_id ||
-        null;
+        rows.map((r) => extractWabaId(r.settings)).find(Boolean) || null;
 
       const numbers = rows.map((r) => {
-        const raw = r?.settings?.raw || {};
+        let settingsObj = {};
+        if (typeof r.settings === "object" && r.settings !== null) {
+          settingsObj = r.settings;
+        } else if (typeof r.settings === "string") {
+          try {
+            settingsObj = JSON.parse(r.settings);
+          } catch {
+            settingsObj = {};
+          }
+        }
+
+        const raw = settingsObj.raw || {};
         return {
           id: r.external_id,
           display_phone_number:
