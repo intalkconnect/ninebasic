@@ -47,6 +47,7 @@ function resolveOutgoingQueueName(req) {
 function validateContent(type, content, channel) {
   if (!type) throw new Error('Message type is required');
 
+  // 1) Texto normal
   if (type === 'text') {
     if (!content || typeof content.body !== 'string' || !content.body.trim()) {
       throw new Error('Message text cannot be empty');
@@ -54,9 +55,27 @@ function validateContent(type, content, channel) {
     return;
   }
 
-  if (!content || !content.url || typeof content.url !== 'string') {
-    throw new Error(`Media URL is required for type "${type}" on channel "${channel}"`);
+  // 2) Mensagens interativas (botões, listas, carrossel etc.)
+  if (type === 'interactive') {
+    if (!content || typeof content !== 'object') {
+      throw new Error('Interactive content is required');
+    }
+    // aqui você pode ser mais específico se quiser validar estrutura
+    return;
   }
+
+  // 3) Tipos de mídia que REALMENTE precisam de URL
+  const mediaTypes = ['image', 'audio', 'video', 'document', 'sticker'];
+
+  if (mediaTypes.includes(type)) {
+    if (!content || !content.url || typeof content.url !== 'string') {
+      throw new Error(`Media URL is required for type "${type}" on channel "${channel}"`);
+    }
+    return;
+  }
+
+  // 4) Para outros tipos custom, não valida nada por enquanto
+  return;
 }
 
 function formatUserId(to, channel = 'whatsapp') {
@@ -398,3 +417,4 @@ export default async function messagesRoutes(fastify) {
     };
   });
 }
+
